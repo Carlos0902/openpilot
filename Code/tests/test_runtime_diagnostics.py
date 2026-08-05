@@ -3,10 +3,20 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from core.llm import LLMMessage, LLMRequest, LLMResponse
+from core.exceptions import InvalidLLMResponseError
+from memory.context_assembly import ContextAssembler, ContextRequestBuilder
 from metadata import (
+    ContextAssemblyPolicy,
+    ContextRequestPurpose,
+    ContextSelectionMetadata,
     FailureMetadata,
+    GuardDecisionMetadata,
     LogEventMetadata,
+    ReasoningEffort,
+    ReasoningMode,
+    ReasoningPolicy,
     ResultStatus,
+    RuntimeResumeDecisionMetadata,
     ToolCallMetadata,
     ToolErrorMetadata,
     ToolExecutionEnvelopeMetadata,
@@ -134,6 +144,100 @@ def test_hooks_are_no_throw_and_record_tool_failures(tmp_path) -> None:
     assert records[0]["signal"]["category"] == "environment"
 
 
+def test_guard_decision_hook_records_typed_block_event(tmp_path) -> None:
+    hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
+    decision = GuardDecisionMetadata(
+        approved=False,
+        reason="runtime is read-only",
+        attributes={"need_type": "file_write", "tool_name": "file_writer"},
+    )
+
+    hooks.on_guard_decision(task_id="task-guard", session_id="session-guard", decision=decision)
+
+    run = hooks.recorder.load_run("task-guard")
+    events = hooks.recorder.load_trajectory_events(run.run_id if run else "")
+    assert run is not None
+    assert events[-1]["event_type"] == "decision_need_blocked"
+    assert events[-1]["payload"]["attributes"]["need_type"] == "file_write"
+
+
+def test_new_recorder_appends_resume_events_to_explicit_existing_run(tmp_path) -> None:
+    data_dir = tmp_path / "diagnostics"
+    original_hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(data_dir))
+    original_hooks.on_task_received(
+        task_id="root-task",
+        source="test",
+        raw_input="repair project",
+        session_id="original-session",
+    )
+    original_run = original_hooks.recorder.load_run("root-task")
+    assert original_run is not None
+
+    replacement_hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(data_dir))
+    replacement_hooks.on_resume_preflight_completed(
+        RuntimeResumeDecisionMetadata(
+            checkpoint_id="checkpoint-1",
+            run_id=original_run.run_id,
+            root_task_id="root-task",
+            session_id="original-session",
+            resume_attempt_id="resume-1",
+            decision="exact_resume",
+            safe_boundary="task_normalized",
+            reason="safe to resume",
+            next_action="continue",
+        )
+    )
+
+    run_dirs = [item for item in replacement_hooks.recorder.trajectory_dir.iterdir() if item.is_dir()]
+    events = replacement_hooks.recorder.load_trajectory_events(original_run.run_id, limit=0)
+    assert [item.name for item in run_dirs] == [original_run.run_id]
+    assert [event["event_type"] for event in events] == ["task_received", "resume_preflight_completed"]
+    assert events[-1]["run_id"] == original_run.run_id
+    assert events[-1]["payload"]["recoverability"] == "recoverable_now"
+    assert events[-1]["payload"]["recovery_mode"] == "exact_resume"
+    assert events[-1]["payload"]["reason_code"] == "checkpoint_valid"
+    assert events[-1]["summary"] == "resume preflight: recoverable_now/exact_resume"
+
+
+def test_separate_recorders_append_strictly_increasing_event_sequences(tmp_path) -> None:
+    data_dir = tmp_path / "diagnostics"
+    first = RuntimeDiagnosticsHooks(DiagnosticRecorder(data_dir))
+    first.on_task_received(
+        task_id="root-task",
+        source="test",
+        raw_input="inspect",
+        session_id="session-1",
+    )
+    run = first.recorder.load_run("root-task")
+    assert run is not None
+
+    second = RuntimeDiagnosticsHooks(DiagnosticRecorder(data_dir))
+    second.recorder.attach_existing_run(
+        run.run_id,
+        expected_task_id="root-task",
+        expected_session_id="session-1",
+    )
+    second.on_log_event(
+        task_id="root-task",
+        session_id="session-1",
+        source_name="test",
+        phase="execute",
+        event_type="second_writer_event",
+        success=True,
+    )
+    first.on_log_event(
+        task_id="root-task",
+        session_id="session-1",
+        source_name="test",
+        phase="execute",
+        event_type="first_writer_event",
+        success=True,
+    )
+
+    events = first.recorder.load_trajectory_events(run.run_id, limit=0)
+    assert [event["sequence"] for event in events] == [1, 2, 3]
+
+
 def test_agent_runtime_controller_records_task_finish_and_suspicious_success(tmp_path) -> None:
     class FakeSessionRunner:
         def run(self, goal, context, mode="standard"):
@@ -199,7 +303,11 @@ def test_tool_event_loop_records_tool_error_via_runtime_hooks(tmp_path) -> None:
 
     records = hooks.recorder.load_recent_records()
     assert records
-    assert records[0]["signal"]["source"] == "tool_error"
+    assert records[0]["signal"]["signal_source"] == "tool_error"
+    assert records[0]["signal"]["source"] == {
+        "source_type": "system",
+        "source_name": "openpilot",
+    }
 
 from runtime_diagnostics import RuntimeTaskPoolRunner, load_raw_tasks
 
@@ -467,6 +575,24 @@ def test_hooks_record_phase_verification_and_tool_events(tmp_path) -> None:
     assert summary.tool_succeeded_count == 1
 
 
+def test_diagnostic_recorder_reopens_run_id_and_continues_event_sequence_after_restart(tmp_path) -> None:
+    first = DiagnosticRecorder(tmp_path)
+    run = first.ensure_run("root-restart-task", session_id="restart-session")
+    first_event = first.record_event(run.run_id, event_type="checkpoint_created", payload={"generation": 1})
+
+    restarted = DiagnosticRecorder(tmp_path)
+    second_event = restarted.record_event(
+        run.run_id,
+        event_type="resume_preflight_completed",
+        payload={"decision": "exact_resume"},
+    )
+
+    assert first_event.run_id == run.run_id
+    assert second_event.run_id == run.run_id
+    assert second_event.sequence == first_event.sequence + 1
+    assert len(list((tmp_path / "task_trajectory").glob("*/run.json"))) == 1
+
+
 def test_hooks_record_generic_log_event_with_correlation(tmp_path) -> None:
     hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
 
@@ -601,6 +727,11 @@ def test_llm_proxy_records_request_response_events_and_artifacts(tmp_path) -> No
             messages=[LLMMessage(role="user", content="请总结项目结构")],
             response_format="json_object",
             trace_info={"semantic_task": "goal"},
+            context_selection=ContextSelectionMetadata(
+                max_prompt_chars=1000,
+                original_prompt_chars=8,
+                final_prompt_chars=8,
+            ),
         )
     )
 
@@ -613,17 +744,191 @@ def test_llm_proxy_records_request_response_events_and_artifacts(tmp_path) -> No
     assert events[0]["payload_kind"] == "llm_request"
     assert events[1]["payload_kind"] == "llm_response"
     assert events[0]["payload"]["correlation"]["task_id"] == "task-llm-1"
+    assert events[0]["payload"]["context_selection"]["max_prompt_chars"] == 1000
     diagnostics = events[0]["payload"]["trace_info"]["diagnostics"]
     assert diagnostics["message_count"] == 1
     assert diagnostics["prompt_chars"] == len("请总结项目结构")
     assert diagnostics["response_format"] == "json_object"
     assert diagnostics["model"] == "demo-model"
     assert diagnostics["provider"] == "demo-provider"
+    request_hash = events[0]["payload"]["trace_info"]["request_hash"]
+    assert request_hash.startswith("v2:sha256:")
+    response_details = events[1]["payload"]["provider_details"]
+    assert response_details["request_hash"] == request_hash
+    assert response_details["attempt_id"] == events[1]["payload"]["correlation"]["execution_id"]
     assert events[1]["payload"]["correlation"]["execution_id"].startswith("llm_")
     assert summary is not None
     assert summary.artifact_count >= 2
     artifacts = hooks.recorder._load_jsonl(hooks.recorder._artifacts_index_file(run.run_id))
     assert {artifact["kind"] for artifact in artifacts} >= {"llm_request", "llm_response_text", "llm_response_json"}
+
+
+def test_llm_replay_request_hash_excludes_non_provider_context_selection_evidence() -> None:
+    plain = LLMRequest(messages=[LLMMessage(role="user", content="same")])
+    assembled = LLMRequest(
+        messages=[LLMMessage(role="user", content="same")],
+        context_selection=ContextSelectionMetadata(
+            max_prompt_chars=100,
+            original_prompt_chars=4,
+            final_prompt_chars=4,
+        ),
+    )
+
+    assert TrajectoryLLMClientProxy._request_hash(plain) == TrajectoryLLMClientProxy._request_hash(assembled)
+
+
+def test_llm_replay_hash_binds_provider_model_and_resolved_reasoning() -> None:
+    request = LLMRequest(messages=[LLMMessage(role="user", content="same")])
+    openai_settings = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.openai.com/v1?secret=omitted",
+        model="gpt-5.6-terra",
+        reasoning_capability_profile=None,
+    )
+    other_model = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5.6-luna",
+        reasoning_capability_profile=None,
+    )
+    low = request.model_copy(
+        update={
+            "reasoning_policy": ReasoningPolicy(
+                mode=ReasoningMode.ENABLED,
+                effort=ReasoningEffort.LOW,
+            )
+        }
+    )
+
+    baseline_hash = TrajectoryLLMClientProxy._request_hash(request, settings=openai_settings)
+
+    assert baseline_hash.startswith("v2:sha256:")
+    assert baseline_hash != TrajectoryLLMClientProxy._request_hash(request, settings=other_model)
+    assert baseline_hash != TrajectoryLLMClientProxy._request_hash(low, settings=openai_settings)
+
+
+def test_llm_replay_hash_ignores_completion_budget_audit_trace_but_binds_execution_semantics() -> None:
+    settings = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5.6-terra",
+        reasoning_capability_profile=None,
+    )
+    baseline = LLMRequest(
+        messages=[LLMMessage(role="user", content="same")],
+        max_tokens=800,
+        trace_info={
+            "context_purpose": "iteration_task_design",
+            "completion_budget": {
+                "reservation_id": "reservation-a",
+                "reserved_tokens": 800,
+                "remaining_tokens": 9_000,
+            },
+        },
+    )
+    audit_only_change = baseline.model_copy(
+        update={
+            "trace_info": {
+                **baseline.trace_info,
+                "completion_budget": {
+                    "reservation_id": "reservation-after-resume",
+                    "reserved_tokens": 800,
+                    "remaining_tokens": 8_200,
+                },
+            }
+        }
+    )
+    message_change = baseline.model_copy(
+        update={"messages": [LLMMessage(role="user", content="different")]}
+    )
+    max_tokens_change = baseline.model_copy(update={"max_tokens": 801})
+    reasoning_change = baseline.model_copy(
+        update={
+            "reasoning_policy": ReasoningPolicy(
+                mode=ReasoningMode.ENABLED,
+                effort=ReasoningEffort.LOW,
+            )
+        }
+    )
+    other_provider = SimpleNamespace(
+        provider="other-provider",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5.6-terra",
+        reasoning_capability_profile=None,
+    )
+
+    baseline_hash = TrajectoryLLMClientProxy._request_hash(baseline, settings=settings)
+
+    assert TrajectoryLLMClientProxy._request_hash(audit_only_change, settings=settings) == baseline_hash
+    assert TrajectoryLLMClientProxy._request_hash(message_change, settings=settings) != baseline_hash
+    assert TrajectoryLLMClientProxy._request_hash(max_tokens_change, settings=settings) != baseline_hash
+    assert TrajectoryLLMClientProxy._request_hash(reasoning_change, settings=settings) != baseline_hash
+    assert TrajectoryLLMClientProxy._request_hash(baseline, settings=other_provider) != baseline_hash
+
+
+def test_llm_replay_hash_binds_non_default_endpoint_port() -> None:
+    request = LLMRequest(messages=[LLMMessage(role="user", content="same")])
+    first = SimpleNamespace(
+        provider="openai-compatible",
+        base_url="http://localhost:8000/v1",
+        model="same-model",
+        reasoning_capability_profile=None,
+    )
+    second = SimpleNamespace(
+        provider="openai-compatible",
+        base_url="http://localhost:9000/v1",
+        model="same-model",
+        reasoning_capability_profile=None,
+    )
+
+    assert TrajectoryLLMClientProxy._request_hash(
+        request, settings=first
+    ) != TrajectoryLLMClientProxy._request_hash(request, settings=second)
+
+
+def test_llm_proxy_records_requested_and_resolved_reasoning_policy(tmp_path) -> None:
+    hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
+
+    class FakeLLMClient:
+        settings = SimpleNamespace(
+            model="gpt-5.6-terra",
+            provider="openai",
+            base_url="https://api.openai.com/v1",
+            reasoning_capability_profile=None,
+            timeout_seconds=10,
+        )
+
+        def complete(self, request, max_retries=3, use_cache=True, stream_callback=None):
+            return LLMResponse(
+                content="{}",
+                parsed_json={},
+                model=self.settings.model,
+                provider=self.settings.provider,
+            )
+
+    proxy = TrajectoryLLMClientProxy(
+        FakeLLMClient(),
+        hooks=hooks,
+        task_id_getter=lambda: "reasoning-task",
+        session_id_getter=lambda: "reasoning-session",
+    )
+
+    proxy.complete(
+        LLMRequest(
+            messages=[LLMMessage(role="user", content="decide")],
+            reasoning_policy=ReasoningPolicy(
+                mode=ReasoningMode.ENABLED,
+                effort=ReasoningEffort.LOW,
+            ),
+        )
+    )
+
+    run = hooks.recorder.load_run("reasoning-session")
+    events = hooks.recorder.load_trajectory_events(run.run_id)
+    request_payload = events[0]["payload"]
+    assert request_payload["reasoning_policy"]["effort"] == "low"
+    assert request_payload["resolved_reasoning_policy"]["effective_effort"] == "low"
+    assert request_payload["resolved_reasoning_policy"]["profile_id"] == "openai-chat-known"
 
 
 def test_llm_proxy_records_failure_event(tmp_path) -> None:
@@ -667,6 +972,50 @@ def test_llm_proxy_records_failure_event(tmp_path) -> None:
     assert failure_diagnostics["message_count"] == 1
     assert failure_diagnostics["response_format"] == "text"
     assert failure_diagnostics["model"] == "demo-model"
+
+
+def test_llm_proxy_records_failed_provider_attempt_usage_and_partial_response_artifact(tmp_path) -> None:
+    hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
+
+    class TruncatedLLMClient:
+        settings = SimpleNamespace(model="demo-model", provider="demo-provider")
+
+        def complete(self, request, max_retries=3, use_cache=True, stream_callback=None):
+            raise InvalidLLMResponseError(
+                "truncated JSON",
+                response_text='{"decision_needs": [',
+                usage={"completion_tokens": 77, "completion_tokens_details": {"reasoning_tokens": 70}},
+                finish_reason="length",
+            )
+
+    proxy = TrajectoryLLMClientProxy(
+        TruncatedLLMClient(),
+        hooks=hooks,
+        task_id_getter=lambda: "task-llm-truncated",
+        session_id_getter=lambda: "session-llm-truncated",
+    )
+
+    try:
+        proxy.complete(LLMRequest(messages=[LLMMessage(role="user", content="plan")], response_format="json_object"))
+    except InvalidLLMResponseError:
+        pass
+    else:
+        raise AssertionError("Expected InvalidLLMResponseError")
+
+    run = hooks.recorder.load_run("session-llm-truncated")
+    assert run is not None
+    events = hooks.recorder.load_trajectory_events(run.run_id)
+    attempt = events[-1]["payload"]["details"]["provider_attempt"]
+    assert attempt["attempt_id"] == events[-1]["payload"]["correlation"]["execution_id"]
+    assert attempt["request_hash"].startswith("v2:sha256:")
+    assert attempt["transport_attempted"] is True
+    assert attempt["json_repair_attempts"] == 0
+    assert attempt["transport_retry_count"] == 0
+    assert attempt["error_category"] == "validation"
+    assert attempt["finish_reason"] == "length"
+    assert attempt["usage"]["completion_tokens"] == 77
+    artifacts = hooks.recorder._load_jsonl(hooks.recorder._artifacts_index_file(run.run_id))
+    assert "llm_failed_response" in {artifact["kind"] for artifact in artifacts}
 
 
 def test_generate_stage_summary_writes_markdown_and_json(tmp_path) -> None:
@@ -755,3 +1104,92 @@ def test_hooks_task_finished_normalizes_subtask_to_root_task(tmp_path) -> None:
     assert finished["task_id"] == "root-finish-1"
     assert finished["payload"]["correlation"]["task_id"] == "root-finish-1"
     assert finished["payload"]["annotations"]["subtask_id"] == "subtask-finish-1"
+
+
+def test_task_finished_finalization_id_is_idempotent_across_hook_instances(tmp_path) -> None:
+    first_hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
+    first_hooks.on_task_received(
+        task_id="root-finalization",
+        source="test",
+        raw_input="finish once",
+        session_id="session-finalization",
+    )
+    first = first_hooks.on_task_finished(
+        task_id="root-finalization",
+        success=True,
+        session_id="session-finalization",
+        finalization_id="finalization-1",
+        summary={"completion_reason": "done", "phase": "summarize"},
+    )
+    second_hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
+    second_hooks.recorder.attach_existing_run(
+        first_hooks.recorder.load_run("root-finalization").run_id,
+        expected_task_id="root-finalization",
+        expected_session_id="session-finalization",
+    )
+    second = second_hooks.on_task_finished(
+        task_id="root-finalization",
+        success=True,
+        session_id="session-finalization",
+        finalization_id="finalization-1",
+        summary={"completion_reason": "done", "phase": "summarize"},
+    )
+
+    events = second_hooks.recorder.load_trajectory_events("root-finalization")
+    finished = [event for event in events if event["event_type"] == "task_finished"]
+    assert len(finished) == 1
+    assert first is not None and second is not None
+    assert first.event_id == second.event_id
+
+
+def test_llm_proxy_replays_durable_observed_response_without_provider_call(tmp_path) -> None:
+    hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
+    provider_calls: list[str] = []
+    durable_response = LLMResponse(
+        content='{"task_type":"coding"}',
+        parsed_json={"task_type": "coding"},
+        model="durable-model",
+        provider="durable-provider",
+    )
+
+    class FakeLLMClient:
+        settings = SimpleNamespace(model="demo-model", provider="demo-provider")
+
+        def complete(self, request, max_retries=3, use_cache=True, stream_callback=None):
+            provider_calls.append("called")
+            return durable_response
+
+    class RecoveryHandler:
+        def replay_llm_response(self, task_id, request_ordinal, request_hash):
+            return durable_response
+
+        def prepare_llm_request(self, task_id, request_ordinal, request_hash):
+            raise AssertionError("durable replay must not prepare a provider request")
+
+        def observe_llm_response(self, task_id, request_ordinal, request_hash, response):
+            raise AssertionError("durable replay must not observe a second response")
+
+    proxy = TrajectoryLLMClientProxy(
+        FakeLLMClient(),
+        hooks=hooks,
+        task_id_getter=lambda: "task-replay",
+        session_id_getter=lambda: "session-replay",
+        recovery_handler=RecoveryHandler(),
+    )
+    prepared = ContextRequestBuilder(
+        ContextAssembler(renderer=lambda _payload: "")
+    ).build_messages(
+        [LLMMessage(role="user", content="build app")],
+        purpose=ContextRequestPurpose.SEMANTIC_GOAL,
+        policy=ContextAssemblyPolicy(
+            purpose=ContextRequestPurpose.SEMANTIC_GOAL,
+            max_prompt_chars=1000,
+        ),
+        response_format="json_object",
+    )
+
+    response = proxy.complete(prepared.require_request())
+
+    assert response == durable_response
+    assert provider_calls == []
+    assert prepared.assembly.selection.candidate_decisions[0].candidate_id.endswith("message:1")

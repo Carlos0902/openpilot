@@ -110,7 +110,7 @@ def test_tool_router_blocks_command_executor_when_command_path_escapes_project(t
 
     assert selections == []
     assert any(
-        resolution.source == "command_executor:command"
+        resolution.path_source == "command_executor:command"
         and resolution.status == "blocked"
         and "outside project boundary" in resolution.reason.lower()
         for resolution in state.path_resolutions
@@ -136,7 +136,7 @@ def test_tool_router_corrects_hallucinated_absolute_command_argument(tmp_path: P
     assert selections
     assert selections[0].input_metadata.command == f"python {target.resolve()}"
     assert any(
-        resolution.source == "command_executor:command"
+        resolution.path_source == "command_executor:command"
         and resolution.status == "corrected"
         and resolution.correction_rule == "hallucinated_root_alias"
         for resolution in state.path_resolutions

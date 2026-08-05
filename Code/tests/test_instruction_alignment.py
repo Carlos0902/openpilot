@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from autonomous_iteration.models import DesignedImprovementTask
 from autonomous_iteration.agents.context_loader import (
     DEFAULT_AUTONOMOUS_ITERATION_SYSTEM_PROMPT,
@@ -19,7 +21,13 @@ from memory.agents.virtual_environment_manager import VirtualEnvironmentManager
 from memory.memory_models import MemoryRecord, MemoryType
 from memory.memory_store import MemoryStore
 from tools.task_classifier import task_classifier_executor
-from metadata import TaskRouteMetadata, ToolInputMetadata
+from metadata import (
+    ConversationIdentity,
+    SessionConstraintState,
+    SessionIngressState,
+    TaskRouteMetadata,
+    ToolInputMetadata,
+)
 from tools.builtin_tools import register_builtin_tools
 from tools.tool_executor import ToolExecutor
 from tools.tool_selection import ToolSelection
@@ -143,6 +151,109 @@ def test_autonomous_iteration_pipeline_stage_order_and_decomposition() -> None:
     assert decomposition["depth"] == 1
     assert decomposition["difficulty"]["level"] == "low"
     assert len(decomposition["subtasks"]) == 2
+
+
+def test_context_loader_forwards_session_constraint_state() -> None:
+    captured: dict[str, object] = {}
+
+    class Builder:
+        def build(self, query, **kwargs):
+            captured.update(kwargs)
+            return {"query": query}
+
+    state = SessionConstraintState(session_id="session-1", revision=2)
+    pipeline = AutonomousIterationPipeline(
+        context_loader=ContextLoaderAgent(memory_context_builder=Builder()),
+        goal_maker=GoalMakerAgent(lambda *args: []),
+        task_designer=TaskDesignerAgent(lambda *args: []),
+        task_decomposer=TaskDecomposerAgent(lambda tasks: [], lambda tasks: {}),
+    )
+
+    pipeline.load_context("goal", ".", 0, session_constraints=state)
+
+    assert captured["session_constraints"] is state
+    assert captured["project_index_mode"] == "read_only"
+    assert captured["strict_sources"] is True
+
+
+def test_context_loader_forwards_optional_session_ingress_state() -> None:
+    captured: dict[str, object] = {}
+
+    class Builder:
+        def build(self, query, **kwargs):
+            captured.update(kwargs)
+            return {"query": query}
+
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root="/project",
+        )
+    )
+    ContextLoaderAgent(memory_context_builder=Builder()).run(
+        "goal",
+        "/project",
+        session_ingress_state=state,
+    )
+
+    assert captured["session_ingress_state"] is state
+
+
+def test_context_loader_rejects_session_ingress_project_identity_mismatch() -> None:
+    class Builder:
+        def build(self, query, **kwargs):
+            return {"query": query}
+
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root="/owned-project",
+        )
+    )
+
+    with pytest.raises(ValueError, match="project identity"):
+        ContextLoaderAgent(memory_context_builder=Builder()).run(
+            "goal",
+            "/other-project",
+            session_ingress_state=state,
+        )
+
+
+def test_pipeline_forwards_session_ingress_state_to_context_loader() -> None:
+    captured: dict[str, object] = {}
+
+    class ContextLoader:
+        def run(self, goal, project_path, iteration, **kwargs):
+            captured.update(kwargs)
+            return {"query": goal}
+
+    pipeline = AutonomousIterationPipeline(
+        context_loader=ContextLoader(),
+        goal_maker=GoalMakerAgent(lambda *args: []),
+        task_designer=TaskDesignerAgent(lambda *args: []),
+        task_decomposer=TaskDecomposerAgent(lambda tasks: [], lambda tasks: {}),
+    )
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root="/project",
+        )
+    )
+
+    pipeline.load_context(
+        "goal",
+        "/project",
+        0,
+        session_ingress_state=state,
+    )
+
+    assert captured["session_ingress_state"] is state
 
 
 def test_tool_executor_structured_logs_include_source_type(tmp_path) -> None:

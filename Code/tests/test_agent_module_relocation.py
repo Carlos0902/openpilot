@@ -156,6 +156,141 @@ def test_simple_code_artifact_decomposition_skips_planning_only_subtasks() -> No
     assert result.subtasks[1].dependencies == [result.subtasks[0].id]
 
 
+def test_decomposition_normalizes_legacy_type_into_permission_relevant_task_kind() -> None:
+    class LegacyTypeLLM:
+        def complete(self, _request):
+            return type(
+                "Response",
+                (),
+                {
+                    "parsed_json": {
+                        "rationale": "inspect, change, verify",
+                        "subtasks": [
+                            {
+                                "description": "Read calculator.py before changing it.",
+                                "type": "check",
+                                "read_files": ["calculator.py"],
+                            },
+                            {
+                                "description": "Modify calculator.py.",
+                                "type": "implement",
+                                "write_files": ["calculator.py"],
+                                "dependencies": [0],
+                            },
+                            {
+                                "description": "Run pytest.",
+                                "type": "verify",
+                                "validation_command": "python -m pytest -q",
+                                "dependencies": [1],
+                            },
+                        ],
+                    },
+                    "content": "",
+                },
+            )()
+
+    result = TaskDecomposer(LegacyTypeLLM()).decompose("Fix calculator.py")
+
+    assert [task.kind for task in result.subtasks] == ["inspect", "implement", "validate"]
+    assert result.subtasks[0].read_files == ["calculator.py"]
+    assert result.subtasks[1].write_files == ["calculator.py"]
+    assert result.subtasks[2].validation_command == "python -m pytest -q"
+
+
+def test_decomposition_rejects_unknown_explicit_subtask_type() -> None:
+    decomposer = TaskDecomposer(FakeLLM())
+
+    with pytest.raises(ValueError, match="Unsupported subtask kind"):
+        decomposer._normalize_subtask_contract(
+            {"description": "Do something ambiguous", "type": "mystery"}
+        )
+
+
+def test_decomposition_keeps_control_schema_when_dynamic_context_is_oversized() -> None:
+    class CapturingLLM:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def complete(self, request):
+            self.requests.append(request)
+            return type(
+                "Response",
+                (),
+                {
+                    "parsed_json": {
+                        "rationale": "safe contract",
+                        "subtasks": [
+                            {
+                                "description": "Inspect calculator.py",
+                                "kind": "inspect",
+                                "read_files": ["calculator.py"],
+                            },
+                            {
+                                "description": "Modify calculator.py",
+                                "kind": "implement",
+                                "write_files": ["calculator.py"],
+                                "dependencies": [0],
+                            },
+                            {
+                                "description": "Run pytest",
+                                "kind": "validate",
+                                "validation_command": "python -m pytest -q",
+                                "dependencies": [1],
+                            },
+                        ],
+                    },
+                    "content": "",
+                },
+            )()
+
+    llm = CapturingLLM()
+    result = TaskDecomposer(llm).decompose(
+        "Fix calculator.py and run python -m pytest -q",
+        context={"oversized_project_context": "x" * 30000},
+    )
+
+    request = llm.requests[0]
+    assert [message.role for message in request.messages] == ["system", "user"]
+    assert "validation_command" in request.messages[0].content
+    assert "write_files" in request.messages[0].content
+    assert "Fix calculator.py" in request.messages[1].content
+    assert request.max_tokens == 3200
+    assert request.context_selection.truncated is True
+    assert [task.kind for task in result.subtasks] == ["inspect", "implement", "validate"]
+
+
+def test_decomposition_limits_json_repair_to_one_provider_attempt() -> None:
+    class RepairAwareLLM:
+        def __init__(self) -> None:
+            self.max_retries = []
+
+        def complete(self, _request, max_retries=3):
+            self.max_retries.append(max_retries)
+            return type(
+                "Response",
+                (),
+                {
+                    "parsed_json": {
+                        "rationale": "inspect only",
+                        "subtasks": [
+                            {
+                                "description": "Inspect calculator.py",
+                                "kind": "inspect",
+                                "read_files": ["calculator.py"],
+                            }
+                        ],
+                    },
+                    "content": "",
+                },
+            )()
+
+    llm = RepairAwareLLM()
+
+    TaskDecomposer(llm).decompose("Inspect calculator.py")
+
+    assert llm.max_retries == [1]
+
+
 def test_simple_code_artifact_compaction_skips_chinese_planning_only_subtasks() -> None:
     decomposer = TaskDecomposer(FakeLLM())
     subtasks = [

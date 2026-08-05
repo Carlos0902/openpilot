@@ -8,7 +8,7 @@ import pytest
 
 from autonomous_iteration.models import EvaluationResult, IterationResult
 from autonomous_iteration.improvement_context import ImprovementContextHelper
-from autonomous_iteration.task_models import TaskExecutionResult, TaskStatus
+from autonomous_iteration.task_models import Task, TaskExecutionContext, TaskExecutionResult, TaskStatus
 from autonomous_iteration.task_executor import AutonomousTaskExecutor
 from core.openpilot_log import OpenPilotLogger
 from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
@@ -16,6 +16,7 @@ from metadata import (
     FailureMetadata,
     FileArtifactMetadata,
     ResultStatus,
+    RuntimeBudgetMetadata,
     TaskResultMetadata,
     TextArtifactMetadata,
     ToolExecutionEnvelopeMetadata,
@@ -104,6 +105,21 @@ class FakeRuntime:
             if self.code_results:
                 return _tool_envelope(tool_name, self.code_results.pop(0), kwargs.get("input_metadata"))
             return _tool_envelope(tool_name, {"success": True, "result": {"code": "print('improved')\n"}, "status": "completed"}, kwargs.get("input_metadata"))
+        if tool_name == "code_editor":
+            return _tool_envelope(
+                tool_name,
+                {
+                    "success": True,
+                    "result": {
+                        "file_path": str(self.tmp_path / "app.py"),
+                        "operation_kind": "modify_symbol",
+                        "symbol_name": "add",
+                        "replacement_text": "def add(a, b):\n    return a + b\n",
+                    },
+                    "status": "completed",
+                },
+                kwargs.get("input_metadata"),
+            )
         if tool_name == "file_writer":
             return _tool_envelope(tool_name, self.write_result, kwargs.get("input_metadata"))
         if tool_name == "code_reviewer":
@@ -143,6 +159,9 @@ def test_runtime_applies_project_command_context_to_command_metadata(tmp_path) -
     runtime._project_environments = {
         str(project.resolve()): {
             "project_path": str(project),
+            "operation": "preflight",
+            "readiness": "ready",
+            "environment_id": "env:test-project",
             "command_cwd": str(project),
             "command_env": {"VIRTUAL_ENV": str(project / ".venv"), "PATH": f"{project / '.venv' / 'bin'}:/usr/bin"},
             "python_command": str(project / ".venv" / "bin" / "python"),
@@ -163,9 +182,139 @@ def test_runtime_applies_project_command_context_to_command_metadata(tmp_path) -
 
     assert updated.cwd == str(project)
     assert updated.command == shlex.join([str(project / ".venv" / "bin" / "python"), "main.py"])
+    assert updated.requested_command == "python main.py"
+    assert updated.effective_interpreter == str(project / ".venv" / "bin" / "python")
+    assert updated.environment_id == "env:test-project"
     assert updated.env["VIRTUAL_ENV"] == str(project / ".venv")
     assert updated.env["PATH"].startswith(str(project / ".venv" / "bin"))
     assert updated.env["PYGAME_HIDE_SUPPORT_PROMPT"] == "1"
+
+
+def test_runtime_does_not_bind_unknown_environment_snapshot(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = object.__new__(IntelligentAutopilot)
+    runtime._project_environments = {
+        str(project.resolve()): {
+            "project_path": str(project),
+            "readiness": "unknown",
+            "python_command": str(project / ".venv" / "bin" / "python"),
+            "command_cwd": str(project),
+        }
+    }
+    metadata = ToolInputMetadata.from_mapping(
+        "command_executor",
+        {"command": "python -m pytest -q", "cwd": str(project)},
+    )
+
+    updated = runtime._apply_project_command_context("command_executor", metadata)
+
+    assert updated.command == "python -m pytest -q"
+    assert updated.environment_id is None
+
+
+def test_validation_environment_setup_denial_blocks_before_sync(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "test_app.py").write_text("import pytest\n", encoding="utf-8")
+    runtime = object.__new__(IntelligentAutopilot)
+    runtime.auto_approve = False
+    runtime._project_environments = {}
+    runtime._confirm_environment_setup = lambda *_args, **_kwargs: False
+    runtime._sync_project_environment = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("setup must not run after denial")
+    )
+    task = Task(
+        id="validate",
+        description="Run tests",
+        kind="validate",
+        validation_command="python -m pytest -q",
+    )
+    context = TaskExecutionContext(
+        task=task,
+        parent_context={"goal": "Validate project", "project_path": str(project)},
+    )
+
+    error = runtime._ensure_environment_for_task(task, context)
+
+    assert "approval" in (error or "").lower()
+    assert runtime._project_environments == {}
+
+
+def test_validation_attaches_existing_ready_environment_without_setup(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    python = project / ".venv" / "bin" / "python"
+    pip = project / ".venv" / "bin" / "pip"
+    python.parent.mkdir(parents=True)
+    python.write_text("not executed", encoding="utf-8")
+    pip.write_text("not executed", encoding="utf-8")
+    runtime = object.__new__(IntelligentAutopilot)
+    runtime.auto_approve = False
+    runtime._project_environments = {}
+    runtime._sync_project_environment = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("ready environment must attach without setup")
+    )
+    task = Task(
+        id="validate",
+        description="Compile project",
+        kind="validate",
+        validation_command="python -m compileall -q app.py",
+    )
+    context = TaskExecutionContext(
+        task=task,
+        parent_context={"goal": "Validate project", "project_path": str(project)},
+    )
+
+    error = runtime._ensure_environment_for_task(task, context)
+
+    assert error is None
+    environment = runtime._project_environments[str(project.resolve())]
+    assert environment["readiness"] == "ready"
+    assert environment["python_executable"] == str(python)
+
+
+def test_session_environment_preparation_selects_validation_before_execution() -> None:
+    runtime = object.__new__(IntelligentAutopilot)
+    observed: list[str] = []
+    runtime._task_parent_context = lambda goal: {"goal": goal, "project_path": "/tmp/project"}
+    runtime._ensure_environment_for_task = lambda task, _context: observed.append(task.id) or None
+    tasks = [
+        Task(id="implement", description="Edit app", kind="implement", write_files=["app.py"]),
+        Task(
+            id="validate",
+            description="Run tests",
+            kind="validate",
+            validation_command="python -m pytest -q",
+        ),
+    ]
+
+    runtime._prepare_session_environment(tasks, "Improve app")
+
+    assert observed == ["validate"]
+
+
+def test_direct_environment_sync_denial_has_zero_project_side_effects(tmp_path) -> None:
+    project = tmp_path / "not-created"
+    runtime = object.__new__(IntelligentAutopilot)
+    runtime.auto_approve = False
+    runtime.enhanced_ui = None
+    runtime._confirm_environment_setup = lambda *_args, **_kwargs: False
+    task = Task(id="environment", description="Prepare environment")
+
+    result = runtime._sync_project_environment(
+        task=task,
+        step_id="environment_setup",
+        project_path=project,
+        written_files=[],
+        entry_files=[],
+        run_command="python -m pytest -q",
+    )
+
+    assert result.success is False
+    assert result.failure.error_type == "EnvironmentSetupApprovalRequired"
+    assert not project.exists()
 
 
 def test_collect_written_files_reads_typed_tool_result_metadata(tmp_path) -> None:
@@ -262,11 +411,85 @@ def test_autonomous_task_executor_success_path_and_logs(tmp_path) -> None:
         "file_writer",
         "project_environment_tool",
         "code_reviewer",
-        "readme_tool",
     ]
     events = [json.loads(line) for line in (tmp_path / "task_executor.jsonl").read_text(encoding="utf-8").splitlines()]
     payloads = [event["payload"] for event in events]
     assert any(payload["source_type"] == "agent" and payload["source_name"] == "autonomous_iteration.task_executor" for payload in payloads)
+
+
+def test_code_improvement_does_not_run_unrequested_readme_postprocessing(tmp_path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("print('old')\n", encoding="utf-8")
+    runtime = FakeRuntime(tmp_path)
+    runtime.readme_result = {"success": False, "error": "README is outside task scope"}
+
+    result = AutonomousTaskExecutor(runtime).execute_improvement(
+        goal="Improve project",
+        project_path=tmp_path,
+        written_files=[str(app)],
+        run_command="",
+        readme_path=tmp_path / "README.md",
+        iteration=1,
+        evaluation=_evaluation(),
+        actions=["Improve app.py"],
+        improvement_report={
+            "designed_tasks": [
+                {
+                    "description": "Improve only app.py",
+                    "target_files": [str(app)],
+                    "acceptance_criteria": ["app.py contains the improvement"],
+                }
+            ]
+        },
+        is_repair=False,
+    )
+
+    assert result.success is True
+    assert "readme_tool" not in {
+        call.get("tool_name") for call in runtime.calls if "tool_name" in call
+    }
+
+
+def test_improvement_code_generation_uses_authoritative_full_file_for_symbol_edit(tmp_path) -> None:
+    target = tmp_path / "app.py"
+    current_code = "".join(f"VALUE_{index} = {index}\n" for index in range(800))
+    current_code += "\ndef add(a, b):\n    return a - b\n"
+    target.write_text(current_code, encoding="utf-8")
+    runtime = FakeRuntime(tmp_path)
+    enhancement_budget = RuntimeBudgetMetadata()
+    runtime._enhancement_runtime_budget = lambda: enhancement_budget
+    executor = AutonomousTaskExecutor(runtime)
+
+    result = executor.execute_code_generation_for_improvement(
+        task=Task(
+            id="improve-add",
+            description="Fix the add function.",
+            kind="repair",
+            read_files=[str(target)],
+            write_files=[str(target)],
+        ),
+        iteration=1,
+        target_file=target,
+        improvement_prompt="Fix the add function without rewriting unrelated code.",
+        simplified=False,
+        prompt_context={
+            "project_context": {
+                "target_file": str(target),
+                "current_code_context": "VALUE_0 = 0\n[... omitted ...]\ndef add(a, b):\n",
+            },
+            "tool_task": "Modify the add function so it returns a + b.",
+            "acceptance_criteria": ["add(2, 3) returns 5"],
+        },
+    )
+
+    call = runtime.calls[-1]
+    params = call["input_metadata"].to_params()
+    assert result.success is True
+    assert call["tool_name"] == "code_editor"
+    assert params["operation_kind"] == "modify_symbol"
+    assert params["symbol_name"] == "add"
+    assert params["code"] == current_code
+    assert params["_runtime_budget"] is enhancement_budget
 
 
 def test_autonomous_task_executor_routes_readme_task_to_documentation_writer(tmp_path) -> None:
@@ -411,7 +634,7 @@ def test_autonomous_task_executor_scopes_repair_to_designed_validation_target(tm
     assert str(assistant) in code_call["input_metadata"].context
 
 
-def test_autonomous_task_executor_retries_full_compact_surgical_on_timeout(tmp_path) -> None:
+def test_autonomous_task_executor_does_not_retry_timeout_with_unknown_usage(tmp_path) -> None:
     app = tmp_path / "app.py"
     app.write_text("print('old')\n", encoding="utf-8")
     runtime = FakeRuntime(
@@ -436,9 +659,86 @@ def test_autonomous_task_executor_retries_full_compact_surgical_on_timeout(tmp_p
         is_repair=False,
     )
 
-    assert result.success is True
-    assert [item["mode"] for item in result.retry_history] == ["full", "compact", "surgical"]
-    assert result.retry_attempted is True
+    assert result.success is False
+    assert [item["mode"] for item in result.retry_history] == ["full"]
+    assert result.retry_attempted is False
+
+
+def test_target_symbol_matching_uses_identifier_boundaries_and_goal_evidence(
+    tmp_path,
+) -> None:
+    executor = AutonomousTaskExecutor(FakeRuntime(tmp_path))
+    source = (
+        "def add(left, right):\n    return left + right\n\n"
+        "def divide(numerator, denominator):\n    return numerator / denominator\n"
+    )
+
+    symbol = executor._infer_target_symbol(
+        source,
+        {
+            "agent_instruction": "Improve the project without adding unrelated code.",
+            "acceptance_criteria": [
+                "divide raises ValueError when denominator is zero"
+            ],
+        },
+    )
+
+    assert symbol == "divide"
+
+
+def test_target_symbol_prefers_typed_iteration_goal_over_imperative_add_verb(
+    tmp_path,
+) -> None:
+    executor = AutonomousTaskExecutor(FakeRuntime(tmp_path))
+    source = (
+        "def add(left, right):\n    return left + right\n\n"
+        "def divide(numerator, denominator):\n    return numerator / denominator\n"
+    )
+
+    symbol = executor._infer_target_symbol(
+        source,
+        {
+            "iteration_goal": "Document divide's denominator-zero contract.",
+            "tool_task": "Add a concise docstring to the divide function.",
+            "acceptance_criteria": ["divide documents ValueError"],
+        },
+    )
+
+    assert symbol == "divide"
+
+
+def test_retry_requires_observed_length_finish_reason(tmp_path) -> None:
+    executor = AutonomousTaskExecutor(FakeRuntime(tmp_path))
+    unknown_timeout = ToolExecutionEnvelopeMetadata(
+        tool_name="code_editor",
+        step_id="edit",
+        status=ResultStatus.TIMEOUT,
+        success=False,
+        input_metadata=ToolInputMetadata(tool_name="code_editor"),
+        failure=FailureMetadata(
+            error_type="LLMTimeoutError",
+            error_message="Request timed out.",
+            details={},
+        ),
+    )
+    observed_length = unknown_timeout.model_copy(
+        update={
+            "status": ResultStatus.FAIL,
+            "failure": FailureMetadata(
+                error_type="InvalidLLMResponseError",
+                error_message="response truncated",
+                details={
+                    "provider_attempt": {
+                        "finish_reason": "length",
+                        "usage": {"total_tokens": 900},
+                    }
+                },
+            ),
+        }
+    )
+
+    assert executor.should_retry_code_generation_attempt(unknown_timeout) is False
+    assert executor.should_retry_code_generation_attempt(observed_length) is True
 
 
 def test_autonomous_task_executor_retries_product_intent_reviewer_rejection(tmp_path) -> None:
@@ -495,7 +795,6 @@ def test_autonomous_task_executor_retries_product_intent_reviewer_rejection(tmp_
         (lambda runtime, app: runtime.code_results.append({"success": True, "result": {"code": "def broken(:\n"}}), "code_generator", "syntax error"),
         (lambda runtime, app: setattr(runtime, "write_result", {"success": False, "error": "write failed"}), "file_writer", "write failed"),
         (lambda runtime, app: setattr(runtime, "review_result", {"success": True, "result": {"approved": False, "suggestions": ["not good"]}}), "code_reviewer", "not good"),
-        (lambda runtime, app: setattr(runtime, "readme_result", {"success": False, "error": "readme failed"}), "readme_tool", "readme failed"),
     ],
 )
 def test_autonomous_task_executor_failure_semantics(tmp_path, setup, failed_tool, reason_part) -> None:
@@ -521,6 +820,40 @@ def test_autonomous_task_executor_failure_semantics(tmp_path, setup, failed_tool
     assert result.failure_stage == "Task Executor"
     assert result.failed_tool == failed_tool
     assert reason_part in (result.failure_reason or "")
+
+
+def test_explicitly_targeted_readme_postprocessing_remains_required(tmp_path) -> None:
+    app = tmp_path / "app.py"
+    readme = tmp_path / "README.md"
+    app.write_text("print('old')\n", encoding="utf-8")
+    readme.write_text("# App\n", encoding="utf-8")
+    runtime = FakeRuntime(tmp_path)
+    runtime.readme_result = {"success": False, "error": "readme failed"}
+
+    result = AutonomousTaskExecutor(runtime).execute_improvement(
+        goal="Improve app and its documentation",
+        project_path=tmp_path,
+        written_files=[str(app), str(readme)],
+        run_command="",
+        readme_path=readme,
+        iteration=1,
+        evaluation=_evaluation(),
+        actions=["Improve app.py and synchronize README.md"],
+        improvement_report={
+            "designed_tasks": [
+                {
+                    "description": "Improve app.py and synchronize README.md",
+                    "target_files": [str(app), str(readme)],
+                    "acceptance_criteria": ["README describes the improved app"],
+                }
+            ]
+        },
+        is_repair=False,
+    )
+
+    assert result.success is False
+    assert result.failed_tool == "readme_tool"
+    assert "readme failed" in (result.failure_reason or "")
 
 
 def test_autonomous_task_executor_environment_failure_stage(tmp_path) -> None:

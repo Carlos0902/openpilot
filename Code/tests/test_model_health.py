@@ -167,3 +167,11 @@ def test_enhanced_cli_skips_configured_model_probe_for_injected_client(monkeypat
 
     assert exit_code == 0
     assert events == ["banner"]
+
+
+def test_settings_search_repository_and_code_env_files() -> None:
+    env_files = tuple(str(path) for path in LLMSettings.model_config["env_file"])
+
+    assert env_files[-3].endswith("/openpilot/.env")
+    assert env_files[-2].endswith("/openpilot/Code/.env")
+    assert env_files[-1] == ".env"

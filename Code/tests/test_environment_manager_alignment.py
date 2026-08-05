@@ -11,9 +11,15 @@ from memory.agents.virtual_environment_manager import (
 from memory.agents.project_environment_tool import (
     EnvironmentManager,
     infer_project_dependencies,
+    inspect_project_environment,
     project_environment_tool_executor,
 )
-from metadata import ToolInputMetadata
+from metadata import (
+    EnvironmentOperation,
+    EnvironmentReadiness,
+    EnvironmentSyncMetadata,
+    ToolInputMetadata,
+)
 
 
 class FakeEnvironmentManager:
@@ -37,6 +43,88 @@ class FakeEnvironmentManager:
 
     def get_env_info(self, env_name):
         return SimpleNamespace(python_version="3.13.0")
+
+
+def test_environment_lifecycle_metadata_is_typed_and_legacy_defaults_fail_closed() -> None:
+    legacy = EnvironmentSyncMetadata(project_path="/tmp/project")
+
+    assert legacy.operation == EnvironmentOperation.LEGACY_SYNC
+    assert legacy.readiness == EnvironmentReadiness.UNKNOWN
+    assert legacy.environment_id == ""
+
+    ready = EnvironmentSyncMetadata(
+        project_path="/tmp/project",
+        operation=EnvironmentOperation.PREFLIGHT,
+        readiness=EnvironmentReadiness.READY,
+        environment_id="env:123",
+        python_executable="/tmp/project/.venv/bin/python",
+        command_cwd="/tmp/project",
+    )
+
+    assert EnvironmentSyncMetadata.model_validate(ready.to_json_dict()) == ready
+
+
+def test_environment_preflight_has_zero_project_side_effects(tmp_path) -> None:
+    project = tmp_path / "calculator"
+    project.mkdir()
+    (project / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    before = sorted(path.relative_to(project) for path in project.rglob("*"))
+
+    result = inspect_project_environment(project_path=project, run_command="python -m pytest -q")
+
+    after = sorted(path.relative_to(project) for path in project.rglob("*"))
+    assert after == before
+    assert result.operation == EnvironmentOperation.PREFLIGHT
+    assert result.readiness == EnvironmentReadiness.SETUP_REQUIRED
+    assert result.detected_packages == ["pytest"]
+    assert result.missing_packages == ["pytest"]
+    assert result.environment_id
+    assert not (project / ".venv").exists()
+    assert not (project / ".git").exists()
+    assert not (project / ".openpilot").exists()
+
+
+def test_environment_preflight_attaches_existing_ready_venv_without_executing_it(tmp_path) -> None:
+    project = tmp_path / "calculator"
+    project.mkdir()
+    (project / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    python = project / ".venv" / "bin" / "python"
+    pip = project / ".venv" / "bin" / "pip"
+    python.parent.mkdir(parents=True)
+    python.write_text("not executable and must not be invoked", encoding="utf-8")
+    pip.write_text("not executable and must not be invoked", encoding="utf-8")
+    dist_info = project / ".venv" / "lib" / "python3.13" / "site-packages" / "pytest-9.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text("Name: pytest\nVersion: 9.0.0\n", encoding="utf-8")
+
+    result = inspect_project_environment(project_path=project, run_command="python -m pytest -q")
+
+    assert result.readiness == EnvironmentReadiness.READY
+    assert result.installed_packages == ["pytest==9.0.0"]
+    assert result.missing_packages == []
+    assert result.python_executable == str(python)
+    assert result.python_command == str(python)
+
+
+def test_environment_identity_changes_when_installed_distribution_set_changes(tmp_path) -> None:
+    project = tmp_path / "calculator"
+    project.mkdir()
+    python = project / ".venv" / "bin" / "python"
+    pip = project / ".venv" / "bin" / "pip"
+    python.parent.mkdir(parents=True)
+    python.write_text("python marker", encoding="utf-8")
+    pip.write_text("pip marker", encoding="utf-8")
+    site_packages = project / ".venv" / "lib" / "python3.13" / "site-packages"
+    first = inspect_project_environment(project_path=project)
+    dist_info = site_packages / "pytest-9.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text("Name: pytest\nVersion: 9.0.0\n", encoding="utf-8")
+
+    second = inspect_project_environment(project_path=project)
+
+    assert first.readiness == EnvironmentReadiness.READY
+    assert second.readiness == EnvironmentReadiness.READY
+    assert first.environment_id != second.environment_id
 
 
 def test_virtual_environment_manager_agent_exposes_instruction_functions(tmp_path) -> None:
@@ -101,6 +189,20 @@ def test_project_environment_tool_maps_import_name_to_published_distribution(tmp
     detected = infer_project_dependencies(tmp_path, ["assistant.py"])
 
     assert detected == ["pyttsx3", "SpeechRecognition"]
+
+
+def test_project_environment_tool_scans_project_tests_outside_written_files(tmp_path) -> None:
+    project = tmp_path / "calculator"
+    project.mkdir()
+    (project / "calculator.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (project / "test_calculator.py").write_text(
+        "import pytest\n\nfrom calculator import add\n",
+        encoding="utf-8",
+    )
+
+    detected = infer_project_dependencies(project, ["calculator.py"])
+
+    assert detected == ["pytest"]
 
 
 def test_project_environment_tool_persists_and_updates_stack_preset(tmp_path) -> None:

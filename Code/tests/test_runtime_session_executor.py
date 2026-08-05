@@ -18,6 +18,11 @@ from metadata import (
     ToolExecutionEnvelopeMetadata,
     ToolInputMetadata,
     ToolResultMetadata,
+    SessionExecutionCursor,
+    SessionSemanticSnapshot,
+    SessionStage,
+    SessionTaskResult,
+    TaskGraphNodeMetadata,
 )
 
 
@@ -150,18 +155,28 @@ class FakeRuntime:
     def _dashboard_task_items(self, tasks, running_task_id=None):
         return [{"id": task.id, "status": task.status.value} for task in tasks]
 
-    def _execute_tasks(self, tasks, goal):
-        for task in tasks:
+    def _execute_tasks(
+        self,
+        tasks,
+        goal,
+        *,
+        prior_results=None,
+        start_index=0,
+        progress_sink=None,
+    ):
+        results = list(prior_results or [])
+        execution_order = [task.id for task in tasks]
+        for index, task in enumerate(tasks[start_index:], start=start_index):
             task.mark_completed({"ok": True})
-        return [
-            TaskExecutionResult(
+            results.append(TaskExecutionResult(
                 task_id=task.id,
                 status=TaskStatus.COMPLETED,
                 result={"ok": True},
                 duration=0.1,
-            )
-            for task in tasks
-        ]
+            ))
+            if progress_sink is not None:
+                progress_sink(tasks, execution_order, results, index + 1)
+        return results
 
     def _finalize_project_readme(self, goal, results):
         return ToolExecutionEnvelopeMetadata(
@@ -194,7 +209,15 @@ class FakeRuntime:
 
 
 class FailingToolLoopRuntime(FakeRuntime):
-    def _execute_tasks(self, tasks, goal):
+    def _execute_tasks(
+        self,
+        tasks,
+        goal,
+        *,
+        prior_results=None,
+        start_index=0,
+        progress_sink=None,
+    ):
         failure = FailureMetadata(
             error_type="ToolLoopExceeded",
             error_message="Tool event loop exceeded. Last unresolved tool error: multi_file_reader (call-1)",
@@ -217,7 +240,7 @@ class FailingToolLoopRuntime(FakeRuntime):
                 status=ResultStatus.FAIL,
                 failure=failure,
             )
-        return [
+        results = list(prior_results or []) + [
             TaskExecutionResult(
                 task_id=task.id,
                 status=TaskStatus.FAILED,
@@ -225,8 +248,11 @@ class FailingToolLoopRuntime(FakeRuntime):
                 result_metadata=task.result,
                 duration=0.1,
             )
-            for task in tasks
+            for task in tasks[start_index:]
         ]
+        if progress_sink is not None:
+            progress_sink(tasks, [task.id for task in tasks], results, len(tasks))
+        return results
 
 
 def test_runtime_session_standard_returns_result(tmp_path) -> None:
@@ -256,6 +282,70 @@ def test_runtime_session_enhanced_returns_result(tmp_path, monkeypatch) -> None:
     assert runtime.tracker.started is True
     assert runtime.tracker.stopped is True
     assert runtime.enhanced_ui.current_updates[-1]["title"] == "Success"
+
+
+def test_runtime_session_enhanced_emits_durable_decomposition_and_task_cursors(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("autonomous_iteration.runtime_controller.time.sleep", lambda seconds: None)
+    runtime = FakeRuntime(tmp_path)
+    runtime.stats["start_time"] = runtime.stats["end_time"] = __import__("datetime").datetime.now()
+    cursor_updates: list[SessionExecutionCursor] = []
+    executor = _RuntimeSessionExecutor(runtime, session_cursor_sink=cursor_updates.append)
+
+    result = executor.run("Build app", {}, mode="enhanced_ui")
+
+    assert result["success"] is True
+    assert cursor_updates[0].mode == "enhanced_ui"
+    assert cursor_updates[0].stage == SessionStage.DECOMPOSITION_RECORDED
+    assert cursor_updates[0].next_task_index == 0
+    assert cursor_updates[-1].mode == "enhanced_ui"
+    assert cursor_updates[-1].stage == SessionStage.TASKS_EXECUTED
+    assert cursor_updates[-1].next_task_index == 1
+
+
+def test_runtime_session_enhanced_resumes_only_unfinished_task_suffix(tmp_path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    runtime.stats["start_time"] = runtime.stats["end_time"] = __import__("datetime").datetime.now()
+    executed_task_ids: list[str] = []
+
+    def execute_tasks(tasks, goal, *, prior_results=None, start_index=0, progress_sink=None):
+        results = list(prior_results or [])
+        order = [task.id for task in tasks]
+        for index, task in enumerate(tasks[start_index:], start=start_index):
+            executed_task_ids.append(task.id)
+            task.mark_completed({"ok": True})
+            results.append(TaskExecutionResult(task_id=task.id, status=TaskStatus.COMPLETED))
+            if progress_sink is not None:
+                progress_sink(tasks, order, results, index + 1)
+        return results
+
+    runtime._execute_tasks = execute_tasks
+    cursor_updates: list[SessionExecutionCursor] = []
+    executor = _RuntimeSessionExecutor(runtime, session_cursor_sink=cursor_updates.append)
+    original = TaskGraphNodeMetadata(task_id="root", description="Build app")
+    tasks = [
+        TaskGraphNodeMetadata(task_id="inspect", description="Inspect app"),
+        TaskGraphNodeMetadata(task_id="fix", description="Fix app", dependencies=["inspect"]),
+    ]
+    order = ["inspect", "fix"]
+    cursor = SessionExecutionCursor(
+        mode="enhanced_ui",
+        stage=SessionStage.TASK_EXECUTION,
+        plan_hash=executor._session_plan_hash(original, tasks, order),
+        semantic=SessionSemanticSnapshot(task_type="coding", risk_level="low", confidence=0.9),
+        original_task=original,
+        tasks=tasks,
+        execution_order=order,
+        next_task_index=1,
+        results=[SessionTaskResult(task_id="inspect", status="completed")],
+    )
+
+    result = executor.run("Build app", {}, mode="enhanced_ui", resume_cursor=cursor)
+
+    assert result["success"] is True
+    assert executed_task_ids == ["fix"]
+    assert cursor_updates[-1].mode == "enhanced_ui"
+    assert cursor_updates[-1].next_task_index == 2
+    assert runtime.task_decomposer.decompose_called is False
 
 
 def test_runtime_session_fast_path_skips_decomposition(tmp_path) -> None:
@@ -361,3 +451,54 @@ def test_runtime_session_calls_iteration_when_written_files_detected(tmp_path) -
         for update in runtime.enhanced_ui.graph_updates
         if update.get("tasks")
     )
+
+
+def test_runtime_session_resumes_remaining_subtasks_from_durable_cursor(tmp_path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    runtime.stats["start_time"] = runtime.stats["end_time"] = __import__("datetime").datetime.now()
+    executed_task_ids: list[str] = []
+
+    def execute_tasks(tasks, goal, *, prior_results=None, start_index=0, progress_sink=None):
+        results = list(prior_results or [])
+        order = [task.id for task in tasks]
+        for index, task in enumerate(tasks[start_index:], start=start_index):
+            executed_task_ids.append(task.id)
+            task.mark_completed({"ok": True})
+            result = TaskExecutionResult(
+                task_id=task.id,
+                status=TaskStatus.COMPLETED,
+                result={"ok": True},
+                duration=0.1,
+            )
+            results.append(result)
+            if progress_sink is not None:
+                progress_sink(tasks, order, results, index + 1)
+        return results
+
+    runtime._execute_tasks = execute_tasks
+    cursor_updates: list[SessionExecutionCursor] = []
+    executor = _RuntimeSessionExecutor(runtime, session_cursor_sink=cursor_updates.append)
+    original_task = TaskGraphNodeMetadata(task_id="root", description="Build app")
+    task_nodes = [
+        TaskGraphNodeMetadata(task_id="task-1", description="Inspect app"),
+        TaskGraphNodeMetadata(task_id="task-2", description="Fix app", dependencies=["task-1"]),
+    ]
+    execution_order = ["task-1", "task-2"]
+    cursor = SessionExecutionCursor(
+        stage=SessionStage.TASK_EXECUTION,
+        plan_hash=executor._session_plan_hash(original_task, task_nodes, execution_order),
+        semantic=SessionSemanticSnapshot(task_type="coding", risk_level="low", confidence=0.9),
+        original_task=original_task,
+        tasks=task_nodes,
+        execution_order=execution_order,
+        next_task_index=1,
+        results=[SessionTaskResult(task_id="task-1", status="completed")],
+    )
+
+    result = executor.run("Build app", {}, mode="standard", resume_cursor=cursor)
+
+    assert result["success"] is True
+    assert executed_task_ids == ["task-2"]
+    assert cursor_updates[-1].next_task_index == 2
+    assert [item.task_id for item in cursor_updates[-1].results] == ["task-1", "task-2"]
+    assert runtime.task_decomposer.decompose_called is False

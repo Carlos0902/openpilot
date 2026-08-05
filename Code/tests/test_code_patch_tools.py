@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from metadata import ToolInputMetadata
+from metadata import ReasoningMode, RuntimeBudgetMetadata, ToolInputMetadata
 from tools.code_editor import code_editor_executor
 from tools.file_delete_tool import file_delete_tool_executor
 from tools.file_patch_writer import file_patch_writer_executor
@@ -139,6 +140,59 @@ def test_code_editor_fails_when_python_symbol_cannot_be_located(tmp_path) -> Non
                 },
             )
         )
+
+
+def test_enhancement_code_editor_uses_shared_completion_budget_and_routine_reasoning(
+    tmp_path,
+) -> None:
+    target = tmp_path / "app.py"
+    target.write_text("def change():\n    return 'old'\n", encoding="utf-8")
+
+    class CapturingLLM:
+        settings = SimpleNamespace(tool_event_reasoning_mode=ReasoningMode.DISABLED)
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def complete(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(
+                content="```python\ndef change():\n    return 'new'\n```",
+                usage={"completion_tokens": 80},
+                finish_reason="stop",
+            )
+
+    budget = RuntimeBudgetMetadata()
+    llm = CapturingLLM()
+    input_metadata = ToolInputMetadata.from_mapping(
+        "code_editor",
+        {
+            "file_path": str(target),
+            "task_description": "Change the return value",
+            "language": "python",
+            "symbol_name": "change",
+            "code": target.read_text(encoding="utf-8"),
+        },
+    ).model_copy(
+        update={
+            "runtime_handles": {
+                "_llm_client": llm,
+                "_runtime_budget": budget,
+            }
+        }
+    )
+
+    result = code_editor_executor(input_metadata)
+
+    request = llm.requests[0]
+    assert request.max_tokens is not None
+    assert 400 <= request.max_tokens <= 1_600
+    assert request.trace_info["completion_budget"]["purpose"] == "code_edit"
+    assert request.trace_info["completion_budget"]["reserved_tokens"] == request.max_tokens
+    assert request.reasoning_policy.mode == ReasoningMode.DISABLED
+    assert budget.enhancement_completion_tokens_used == 80
+    assert budget.enhancement_completion_tokens_reserved == 0
+    assert "return 'new'" in result.result.code
 
 
 def test_file_mutation_tools_refresh_indexes_and_directory_sketch(tmp_path) -> None:

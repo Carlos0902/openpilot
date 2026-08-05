@@ -9,7 +9,18 @@ from autonomous_iteration.task_models import Task, TaskPriority
 from autonomous_iteration.tool_io import ExecutionToolIO
 from core.exceptions import LLMTimeoutError
 from core.tool_contracts import ToolDefinition
-from metadata import CodeArtifactMetadata, FileArtifactMetadata, ResultStatus, ToolContractMetadata, ToolInputMetadata, ToolResultMetadata
+from metadata import (
+    CodeArtifactMetadata,
+    FileArtifactMetadata,
+    ResultStatus,
+    RuntimeExecutionMode,
+    RuntimeStateMetadata,
+    ToolContractMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+)
+from runtime_diagnostics import DiagnosticRecorder
+from runtime_diagnostics.hooks import RuntimeDiagnosticsHooks
 from tools.code_generator import CODE_GENERATION_LLM_TIMEOUT_SECONDS
 from tools.tool_selection import ToolSelection
 
@@ -384,10 +395,145 @@ def test_fast_tool_code_generator_uses_metadata_without_mapping_error(tmp_path) 
     assert result.success is True
     assert isinstance(result.output, CodeArtifactMetadata)
     assert "print('ok')" in result.output.code
-    assert result.call_id == "task:test_code_generator"
-    assert result.tool_context.call_id == "task:test_code_generator"
+    assert result.call_id.startswith("task:test_code_generator:")
+    assert result.tool_context.call_id == result.call_id
+    assert result.tool_context.attributes["execution_route"] == "fast_registry"
     assert [event.event_type for event in result.tool_events] == ["pending", "running", "completed"]
     assert [event["event_type"] for event in autopilot.enhanced_ui.events] == ["pending", "running", "completed"]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "payload"),
+    [
+        (
+            "file_writer",
+            {
+                "operation_kind": "file_replace",
+                "content": "def value():\n    return 2\n",
+                "overwrite": True,
+            },
+        ),
+        (
+            "file_patch_writer",
+            {
+                "operation_kind": "modify_symbol",
+                "symbol_name": "value",
+                "replacement_text": "def value():\n    return 2",
+            },
+        ),
+    ],
+)
+def test_fast_mutation_rejects_write_under_read_only_root(tmp_path, tool_name, payload) -> None:
+    target = tmp_path / "app.py"
+    original = "def value():\n    return 1\n"
+    target.write_text(original, encoding="utf-8")
+    autopilot = IntelligentAutopilot(FakeLLM(), log_file=tmp_path / "autopilot.jsonl")
+    autopilot.runtime_controller.state = RuntimeStateMetadata(
+        goal="Inspect the project without changing files",
+        execution_mode=RuntimeExecutionMode.READ_ONLY,
+    )
+    task = Task(
+        id=f"read-only-{tool_name}",
+        description="Inspect app.py without mutation",
+        kind="inspect",
+        write_files=[],
+        priority=TaskPriority.HIGH,
+    )
+
+    result = autopilot._execute_fast_tool(
+        task=task,
+        step_id=f"blocked_{tool_name}",
+        tool_name=tool_name,
+        input_metadata=ToolInputMetadata.from_mapping(
+            tool_name,
+            {"file_path": str(target), **payload},
+        ),
+    )
+
+    assert result.success is False
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("declared_targets", "requested_name"),
+    [
+        ([], "app.py"),
+        (["allowed.py"], "outside.py"),
+    ],
+)
+def test_fast_mutation_rejects_missing_or_out_of_scope_task_target(
+    tmp_path,
+    declared_targets,
+    requested_name,
+) -> None:
+    requested = tmp_path / requested_name
+    autopilot = IntelligentAutopilot(FakeLLM(), log_file=tmp_path / "autopilot.jsonl")
+    task = Task(
+        id=f"scoped-{requested_name}",
+        description="Create the declared implementation file",
+        kind="implement",
+        write_files=[str(tmp_path / name) for name in declared_targets],
+        priority=TaskPriority.HIGH,
+    )
+
+    result = autopilot._execute_fast_tool(
+        task=task,
+        step_id="scoped_file_writer",
+        tool_name="file_writer",
+        input_metadata=ToolInputMetadata.from_mapping(
+            "file_writer",
+            {
+                "file_path": str(requested),
+                "content": "value = 1\n",
+                "operation_kind": "create_file",
+            },
+        ),
+    )
+
+    assert result.success is False
+    assert not requested.exists()
+
+
+def test_fast_mutation_cannot_succeed_without_observed_target_diff(tmp_path) -> None:
+    target = tmp_path / "app.py"
+    unchanged = "value = 1\n"
+    target.write_text(unchanged, encoding="utf-8")
+    autopilot = IntelligentAutopilot(FakeLLM(), log_file=tmp_path / "autopilot.jsonl")
+    observed = []
+    autopilot.runtime_controller = SimpleNamespace(
+        state=None,
+        replay_tool_result=lambda *_args: None,
+        prepare_tool_call=lambda *_args: True,
+        observe_tool_result=lambda _call, _selection, execution: observed.append(execution) or True,
+    )
+    task = Task(
+        id="no-observed-diff",
+        description="Update app.py",
+        kind="implement",
+        write_files=[str(target)],
+        priority=TaskPriority.HIGH,
+    )
+
+    result = autopilot._execute_fast_tool(
+        task=task,
+        step_id="unchanged_file_writer",
+        tool_name="file_writer",
+        input_metadata=ToolInputMetadata.from_mapping(
+            "file_writer",
+            {
+                "file_path": str(target),
+                "content": unchanged,
+                "operation_kind": "file_replace",
+                "overwrite": True,
+            },
+        ),
+    )
+
+    assert result.success is False
+    assert len(observed) == 1
+    assert observed[0].success is False
+    assert observed[0].error.error_type == "NoObservedFileMutation"
+    assert target.read_text(encoding="utf-8") == unchanged
 
 
 def test_fast_tool_failure_emits_error_event_with_recoverable_flag(tmp_path) -> None:
@@ -403,7 +549,206 @@ def test_fast_tool_failure_emits_error_event_with_recoverable_flag(tmp_path) -> 
     )
 
     assert result.success is False
-    assert result.call_id == "task:missing_step"
+    assert result.call_id.startswith("task:missing_step:")
     assert [event.event_type for event in result.tool_events] == ["pending", "running", "error"]
     assert result.tool_events[-1].recoverable == bool(result.failure.recoverable)
     assert autopilot.enhanced_ui.events[-1]["event_type"] == "error"
+
+
+def test_fast_tool_success_persists_exactly_one_called_and_succeeded_event(tmp_path) -> None:
+    recorder = DiagnosticRecorder(tmp_path / "diagnostics")
+    hooks = RuntimeDiagnosticsHooks(recorder)
+    autopilot = IntelligentAutopilot(
+        FakeLLM(),
+        log_file=tmp_path / "autopilot.jsonl",
+        runtime_diagnostics_hooks=hooks,
+    )
+    autopilot.session_id = "session-fast-success"
+    task = Task(id="task-fast-success", description="Generate hello world", priority=TaskPriority.HIGH)
+    run = recorder.ensure_run(str(task.id), session_id=autopilot.session_id)
+
+    result = autopilot._execute_fast_tool(
+        task=task,
+        step_id="generate",
+        tool_name="code_generator",
+        input_metadata=ToolInputMetadata.from_mapping(
+            "code_generator",
+            {"task_description": "write hello world", "language": "python"},
+        ),
+    )
+
+    events = [
+        event
+        for event in recorder.load_trajectory_events(run.run_id)
+        if event["event_type"] in {"tool_called", "tool_succeeded", "tool_failed"}
+    ]
+    assert result.success is True
+    assert [event["event_type"] for event in events] == ["tool_called", "tool_succeeded"]
+    assert all(event["payload"]["correlation"]["execution_id"] == result.call_id for event in events)
+
+
+def test_fast_tool_failure_persists_exactly_one_called_and_failed_event(tmp_path) -> None:
+    recorder = DiagnosticRecorder(tmp_path / "diagnostics")
+    hooks = RuntimeDiagnosticsHooks(recorder)
+    autopilot = IntelligentAutopilot(
+        FakeLLM(),
+        log_file=tmp_path / "autopilot.jsonl",
+        runtime_diagnostics_hooks=hooks,
+    )
+    autopilot.session_id = "session-fast-failure"
+    task = Task(id="task-fast-failure", description="Run missing tool", priority=TaskPriority.HIGH)
+    run = recorder.ensure_run(str(task.id), session_id=autopilot.session_id)
+
+    result = autopilot._execute_fast_tool(
+        task=task,
+        step_id="missing",
+        tool_name="missing_tool",
+        input_metadata=ToolInputMetadata.from_mapping("missing_tool", {}),
+    )
+
+    events = [
+        event
+        for event in recorder.load_trajectory_events(run.run_id)
+        if event["event_type"] in {"tool_called", "tool_succeeded", "tool_failed"}
+    ]
+    assert result.success is False
+    assert [event["event_type"] for event in events] == ["tool_called", "tool_failed"]
+    assert all(event["payload"]["correlation"]["execution_id"] == result.call_id for event in events)
+
+
+def test_fast_tool_retry_history_does_not_inflate_logical_durable_events(tmp_path, monkeypatch) -> None:
+    recorder = DiagnosticRecorder(tmp_path / "diagnostics")
+    autopilot = IntelligentAutopilot(
+        FakeLLM(),
+        log_file=tmp_path / "autopilot.jsonl",
+        runtime_diagnostics_hooks=RuntimeDiagnosticsHooks(recorder),
+    )
+    autopilot.session_id = "session-fast-retry"
+    task = Task(id="task-fast-retry", description="Generate after a retry", priority=TaskPriority.HIGH)
+    run = recorder.ensure_run(str(task.id), session_id=autopilot.session_id)
+    output = ToolResultMetadata(
+        tool_name="code_generator",
+        status=ResultStatus.SUCCESS,
+        result=CodeArtifactMetadata(code="print('ok')", language="python"),
+    )
+    execution = SimpleNamespace(
+        success=True,
+        error=None,
+        status="success",
+        output_metadata=output,
+        duration_seconds=0.1,
+        attempt_number=2,
+        retry_count=1,
+    )
+    monkeypatch.setattr(
+        autopilot,
+        "_execute_tool_with_fast_retry",
+        lambda _selection: (
+            execution,
+            [{"attempt": 1, "success": False, "error_type": "TransientError"}],
+        ),
+    )
+
+    result = autopilot._execute_fast_tool(
+        task=task,
+        step_id="generate",
+        tool_name="code_generator",
+        input_metadata=ToolInputMetadata.from_mapping(
+            "code_generator",
+            {"task_description": "write hello world", "language": "python"},
+        ),
+    )
+
+    events = [
+        event
+        for event in recorder.load_trajectory_events(run.run_id)
+        if event["event_type"] in {"tool_called", "tool_succeeded", "tool_failed"}
+    ]
+    assert result.attempts_used == 2
+    assert result.retry_count == 1
+    assert result.retry_history == [{"attempt": 1, "success": False, "error_type": "TransientError"}]
+    assert [event["event_type"] for event in events] == ["tool_called", "tool_succeeded"]
+
+
+def test_fast_tool_diagnostics_hook_failures_do_not_change_execution(tmp_path) -> None:
+    class ThrowingHooks(RuntimeDiagnosticsHooks):
+        def __init__(self) -> None:
+            super().__init__(DiagnosticRecorder(tmp_path / "throwing-diagnostics"))
+            self.started = 0
+            self.completed = 0
+
+        def on_tool_started(self, **_kwargs) -> None:
+            self.started += 1
+            raise RuntimeError("diagnostics start failed")
+
+        def on_tool_completed(self, **_kwargs) -> None:
+            self.completed += 1
+            raise RuntimeError("diagnostics terminal failed")
+
+        def on_tool_failed(self, _error) -> None:
+            raise AssertionError("successful execution must not report tool_failed")
+
+    llm = FakeLLM()
+    hooks = ThrowingHooks()
+    autopilot = IntelligentAutopilot(
+        llm,
+        log_file=tmp_path / "autopilot.jsonl",
+        runtime_diagnostics_hooks=hooks,
+    )
+
+    result = autopilot._execute_fast_tool(
+        task=Task(id="task-hook-failure", description="Generate once", priority=TaskPriority.HIGH),
+        step_id="generate",
+        tool_name="code_generator",
+        input_metadata=ToolInputMetadata.from_mapping(
+            "code_generator",
+            {"task_description": "write hello world", "language": "python"},
+        ),
+    )
+
+    assert result.success is True
+    assert len(llm.requests) == 1
+    assert hooks.started == 1
+    assert hooks.completed == 1
+
+
+def test_repeated_fast_tool_step_gets_distinct_invocation_ids(tmp_path) -> None:
+    recorder = DiagnosticRecorder(tmp_path / "diagnostics")
+    autopilot = IntelligentAutopilot(
+        FakeLLM(),
+        log_file=tmp_path / "autopilot.jsonl",
+        runtime_diagnostics_hooks=RuntimeDiagnosticsHooks(recorder),
+    )
+    autopilot.session_id = "session-repeated-fast-step"
+    task = Task(id="task-repeated-fast-step", description="Generate twice", priority=TaskPriority.HIGH)
+    run = recorder.ensure_run(str(task.id), session_id=autopilot.session_id)
+    tool_input = ToolInputMetadata.from_mapping(
+        "code_generator",
+        {"task_description": "write hello world", "language": "python"},
+    )
+
+    first = autopilot._execute_fast_tool(
+        task=task,
+        step_id="generate",
+        tool_name="code_generator",
+        input_metadata=tool_input,
+    )
+    second = autopilot._execute_fast_tool(
+        task=task,
+        step_id="generate",
+        tool_name="code_generator",
+        input_metadata=tool_input,
+    )
+
+    events = [
+        event
+        for event in recorder.load_trajectory_events(run.run_id)
+        if event["event_type"] in {"tool_called", "tool_succeeded", "tool_failed"}
+    ]
+    assert first.call_id != second.call_id
+    assert [event["event_type"] for event in events] == [
+        "tool_called",
+        "tool_succeeded",
+        "tool_called",
+        "tool_succeeded",
+    ]
