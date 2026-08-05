@@ -9,6 +9,7 @@ Execution -> Modification Evaluation -> Mind System.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import uuid
 from pathlib import Path
@@ -21,7 +22,24 @@ from autonomous_iteration.agents.task_decomposer import TaskDecomposerAgent
 from autonomous_iteration.agents.task_designer import TaskDesignerAgent
 from autonomous_iteration.pipeline import AutonomousIterationPipeline
 from autonomous_iteration.project_diagnosis import ProjectDiagnoser, ReferenceProvider
-from core.llm import LLMMessage, LLMRequest
+from autonomous_iteration.project_improvement_context import (
+    build_iteration_goal_candidates,
+    build_iteration_task_design_candidates,
+)
+from memory.context_projection import (
+    DerivedContextProjectionError,
+    build_derived_context_projection,
+)
+from core.exceptions import (
+    ContextAssemblyBudgetError,
+    ContextAssemblyGovernanceError,
+    ContextSourceError,
+    InvalidLLMResponseError,
+    LLMProviderError,
+)
+from core.reasoning import reasoning_policy_for_decision, routine_tool_reasoning_policy
+from autonomous_iteration.enhancement_completion_budget import EnhancementCompletionBudgetCoordinator
+from memory.context_assembly import build_context_candidate_request
 from autonomous_iteration.models import (
     AutonomousIterationResult,
     DesignedImprovementTask,
@@ -31,8 +49,23 @@ from autonomous_iteration.models import (
     ProjectStateSnapshot,
 )
 from memory.memory_models import MemoryRecord, MemoryType
+from memory.agents.git_manager_agent import GitManagerAgent, GitManagerError
 from autonomous_iteration.tool.project_improvement_tool import project_state_reader_executor
-from metadata import ProjectObjectiveMetadata, SuccessMetricMetadata, ToolInputMetadata
+from metadata import (
+    ContextRequestPurpose,
+    EnhancementCompletionComplexity,
+    EnhancementCompletionDecisionValue,
+    EnhancementCompletionRequest,
+    EnhancementCompletionRequirement,
+    ProjectObjectiveMetadata,
+    SuccessMetricMetadata,
+    ToolInputMetadata,
+    RuntimeBudgetMetadata,
+    DerivedContextProjection,
+    ReasoningDecisionComplexity,
+    SessionConstraintState,
+    SessionIngressState,
+)
 
 
 ApplyImprovement = Callable[[int, EvaluationResult, list[str], dict[str, Any], bool], IterationResult]
@@ -60,6 +93,8 @@ class AutonomousIterationAgent:
         disallowed_improvement_directions: list[str] | None = None,
         allow_reference_search: bool = True,
         reference_provider: ReferenceProvider | None = None,
+        runtime_budget: RuntimeBudgetMetadata | None = None,
+        enhancement_requirement: EnhancementCompletionRequirement = EnhancementCompletionRequirement.OPTIONAL,
     ):
         self.evaluator = evaluator
         if required_successful_iterations is not None:
@@ -73,6 +108,9 @@ class AutonomousIterationAgent:
         self.memory_store = memory_store
         self.memory_context_builder = memory_context_builder
         self.logger = logger
+        self.runtime_budget = runtime_budget or RuntimeBudgetMetadata()
+        self.enhancement_budget = EnhancementCompletionBudgetCoordinator(self.runtime_budget)
+        self.enhancement_requirement = enhancement_requirement
         self.project_diagnoser = ProjectDiagnoser(
             objective_override=project_objective_override,
             metric_overrides=success_metric_overrides,
@@ -104,6 +142,8 @@ class AutonomousIterationAgent:
         analyze_improvements: AnalyzeImprovements | None = None,
         read_project_state: ReadProjectState | None = None,
         on_progress: ProgressCallback | None = None,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
     ) -> dict[str, Any]:
         self._log_agent(
             "autonomous_iteration_started",
@@ -122,6 +162,8 @@ class AutonomousIterationAgent:
                 analyze_improvements=analyze_improvements,
                 read_project_state=read_project_state,
                 on_progress=on_progress,
+                session_constraints=session_constraints,
+                session_ingress_state=session_ingress_state,
             )
         except Exception as exc:
             self._log_agent(
@@ -156,6 +198,8 @@ class AutonomousIterationAgent:
         analyze_improvements: AnalyzeImprovements | None = None,
         read_project_state: ReadProjectState | None = None,
         on_progress: ProgressCallback | None = None,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
     ) -> dict[str, Any]:
         """Validate and improve through the full autonomous iteration pipeline."""
         evaluations: list[EvaluationResult] = []
@@ -219,8 +263,19 @@ class AutonomousIterationAgent:
                 goal=goal,
                 project_path=project_path,
                 iteration=completed_improvements,
+                session_constraints=session_constraints,
+                session_ingress_state=session_ingress_state,
             )
             project_state.memory_context = memory_context
+            context_projection: DerivedContextProjection | None = None
+            if session_ingress_state is not None:
+                try:
+                    context_projection = build_derived_context_projection(
+                        memory_context,
+                        session_ingress_state,
+                    )
+                except DerivedContextProjectionError as exc:
+                    raise ContextSourceError("context_projection", exc) from exc
             self._notify(
                 on_progress,
                 "context_loader",
@@ -280,9 +335,24 @@ class AutonomousIterationAgent:
                     current,
                     improvement_report,
                     completed_improvements,
+                    session_constraints=session_constraints,
+                    session_ingress_state=session_ingress_state,
+                    context_projection=context_projection,
                 )
-                selected_goal = goals[0]
                 iteration_goals.extend(goals)
+                selected_goal = self._select_uncompleted_goal(
+                    goals, completed_goal_titles
+                )
+                if selected_goal is None:
+                    failure_context = {
+                        "failure_stage": "Goal Maker",
+                        "failed_iteration": attempts_used + 1,
+                        "failed_tool": "goal_maker",
+                        "failure_reason": "Goal Maker repeated an already completed improvement goal.",
+                        "retry_attempted": False,
+                        "retry_history": [],
+                    }
+                    break
                 self._notify(
                     on_progress,
                     "goal_maker",
@@ -295,7 +365,20 @@ class AutonomousIterationAgent:
                     selected_goal,
                     improvement_report,
                     completed_improvements,
+                    session_constraints=session_constraints,
+                    session_ingress_state=session_ingress_state,
+                    context_projection=context_projection,
                 )
+                if not tasks:
+                    failure_context = {
+                        "failure_stage": "Task Designer",
+                        "failed_iteration": attempts_used + 1,
+                        "failed_tool": "task_designer",
+                        "failure_reason": "Task Designer produced no authorized target-compatible task.",
+                        "retry_attempted": False,
+                        "retry_history": [],
+                    }
+                    break
                 designed_tasks.extend(tasks)
                 self._notify(
                     on_progress,
@@ -414,6 +497,10 @@ class AutonomousIterationAgent:
                 },
             )
 
+            iteration_snapshot = self._create_iteration_snapshot(
+                project_path,
+                attempts_used,
+            )
             iteration_result = self._run_task_executor(
                 apply_improvement,
                 attempts_used,
@@ -423,6 +510,11 @@ class AutonomousIterationAgent:
                 is_repair,
             )
             if not iteration_result.success:
+                self._rollback_failed_iteration(
+                    project_path,
+                    iteration_snapshot,
+                    iteration_result,
+                )
                 known_project_files = self._merge_project_files(known_project_files, iteration_result.changed_files)
                 failure_context = self._failure_context(
                     iteration_result,
@@ -433,12 +525,14 @@ class AutonomousIterationAgent:
                     completed_improvements,
                 )
                 note = self._record_mind_note(
-                    goal,
-                    attempts_used,
-                    False,
-                    actions,
-                    iteration_result.failure_reason or iteration_result.error,
-                    failure_context,
+                    goal=goal,
+                    iteration=attempts_used,
+                    success=False,
+                    actions=actions,
+                    detail=iteration_result.failure_reason or iteration_result.error,
+                    project_path=project_path,
+                    improvement_report=improvement_report,
+                    failure_context=failure_context,
                 )
                 mind_notes.append(note)
                 self._notify(on_progress, "mind_system", {"note": note, "iteration": attempts_used})
@@ -471,6 +565,17 @@ class AutonomousIterationAgent:
             if is_repair and iteration_result.success and current.validation_passed:
                 iteration_result.repair_completed = True
                 repair_attempts += 1
+            stop_after_rollback = False
+            if not (
+                iteration_result.completed_successful_iteration
+                or iteration_result.repair_completed
+            ):
+                self._rollback_failed_iteration(
+                    project_path,
+                    iteration_snapshot,
+                    iteration_result,
+                )
+                stop_after_rollback = True
             evaluations.append(current)
             self._notify(
                 on_progress,
@@ -516,7 +621,7 @@ class AutonomousIterationAgent:
                         "result": iteration_result,
                     },
                 )
-            elif not is_repair:
+            else:
                 failure_context = self._failure_context(
                     iteration_result,
                     attempts_used,
@@ -530,13 +635,25 @@ class AutonomousIterationAgent:
                 iterations.append(iteration_result)
 
             note = self._record_mind_note(
-                goal,
-                attempts_used,
-                iteration_result.completed_successful_iteration or iteration_result.repair_completed,
-                actions,
-                "Repair completed; project validation passed." if iteration_result.repair_completed else iteration_result.error or current.summary,
-                improvement_report,
-                failure_context if not (iteration_result.completed_successful_iteration or iteration_result.repair_completed) else None,
+                goal=goal,
+                iteration=attempts_used,
+                success=iteration_result.completed_successful_iteration or iteration_result.repair_completed,
+                actions=actions,
+                detail=(
+                    "Repair completed; project validation passed."
+                    if iteration_result.repair_completed
+                    else iteration_result.error or current.summary
+                ),
+                project_path=project_path,
+                improvement_report=improvement_report,
+                failure_context=(
+                    failure_context
+                    if not (
+                        iteration_result.completed_successful_iteration
+                        or iteration_result.repair_completed
+                    )
+                    else None
+                ),
             )
             mind_notes.append(note)
             self._notify(on_progress, "mind_system", {"note": note, "iteration": attempts_used})
@@ -546,6 +663,8 @@ class AutonomousIterationAgent:
                 "iteration_completed",
                 {"iteration": attempts_used, "result": iteration_result, "evaluation": current},
             )
+            if stop_after_rollback:
+                break
 
         success = completed_improvements >= self.required_successful_improvements and current.validation_passed
         partial_success = bool(current.validation_passed or (evaluations and evaluations[0].validation_passed))
@@ -591,6 +710,41 @@ class AutonomousIterationAgent:
             "remaining_goals": remaining_goals,
         }
 
+    @staticmethod
+    def _create_iteration_snapshot(project_path: Path, iteration: int):
+        try:
+            return GitManagerAgent().snapshot(
+                project_path,
+                reason=f"iteration_{iteration}_transaction_boundary",
+            )
+        except GitManagerError:
+            return None
+
+    @staticmethod
+    def _rollback_failed_iteration(
+        project_path: Path,
+        snapshot: Any,
+        iteration_result: IterationResult,
+    ) -> None:
+        targets = list(dict.fromkeys(iteration_result.changed_files))
+        if not targets:
+            return
+        if snapshot is None or not snapshot.commit_hash:
+            iteration_result.rollback_error = "iteration safety snapshot is unavailable"
+            return
+        iteration_result.rollback_snapshot_ref = snapshot.commit_hash
+        try:
+            restored = GitManagerAgent().restore_files(
+                project_path,
+                source_ref=snapshot.commit_hash,
+                target_files=targets,
+            )
+        except GitManagerError as exc:
+            iteration_result.rollback_error = str(exc)
+            return
+        iteration_result.rollback_applied = True
+        iteration_result.rollback_files = restored
+
     def run(self, **kwargs) -> dict[str, Any]:
         """Backward-compatible entry point."""
         return self.run_project_pipeline(**kwargs)
@@ -608,20 +762,22 @@ class AutonomousIterationAgent:
         goal: str,
         project_path: str | Path,
         iteration: int,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
     ) -> dict[str, Any]:
         """Context Loader agent function with safe fallback."""
         try:
-            return self.pipeline.load_context(goal, project_path, iteration)
+            return self.pipeline.load_context(
+                goal,
+                project_path,
+                iteration,
+                session_constraints=session_constraints,
+                session_ingress_state=session_ingress_state,
+            )
+        except (ContextAssemblyBudgetError, ContextAssemblyGovernanceError, ContextSourceError):
+            raise
         except Exception as exc:
-            return {
-                "error": f"Context Loader failed: {type(exc).__name__}: {str(exc)[:300]}",
-                "system_prompt": "",
-                "dialog_context": [],
-                "related_memories": [],
-                "related_files": [],
-                "environment_context": [],
-                "prompt_text": "",
-            }
+            raise ContextSourceError("context_loader", exc) from exc
 
     def _run_goal_maker(
         self,
@@ -629,9 +785,23 @@ class AutonomousIterationAgent:
         evaluation: EvaluationResult,
         improvement_report: dict[str, Any],
         completed_iteration: int,
+        *,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
+        context_projection: DerivedContextProjection | None = None,
+        reasoning_complexity: ReasoningDecisionComplexity | None = None,
     ) -> list[ImprovementGoal]:
         """Goal Maker agent function."""
-        return self.pipeline.make_goals(project_state, evaluation, improvement_report, completed_iteration)
+        return self.pipeline.make_goals(
+            project_state,
+            evaluation,
+            improvement_report,
+            completed_iteration,
+            session_constraints=session_constraints,
+            session_ingress_state=session_ingress_state,
+            context_projection=context_projection,
+            reasoning_complexity=reasoning_complexity,
+        )
 
     def _run_task_designer(
         self,
@@ -639,9 +809,21 @@ class AutonomousIterationAgent:
         goal: ImprovementGoal,
         improvement_report: dict[str, Any],
         completed_iteration: int,
+        *,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
+        context_projection: DerivedContextProjection | None = None,
     ) -> list[DesignedImprovementTask]:
         """Task Designer agent function."""
-        return self.pipeline.design_tasks(project_state, goal, improvement_report, completed_iteration)
+        return self.pipeline.design_tasks(
+            project_state,
+            goal,
+            improvement_report,
+            completed_iteration,
+            session_constraints=session_constraints,
+            session_ingress_state=session_ingress_state,
+            context_projection=context_projection,
+        )
 
     def _run_task_decomposer(self, tasks: list[DesignedImprovementTask]) -> dict[str, Any]:
         """Task Decomposer agent function with a lightweight difficulty score."""
@@ -723,31 +905,47 @@ class AutonomousIterationAgent:
         evaluation: EvaluationResult,
         improvement_report: dict[str, Any],
         completed_iteration: int,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
+        context_projection: DerivedContextProjection | None = None,
+        reasoning_complexity: ReasoningDecisionComplexity | None = None,
     ) -> list[ImprovementGoal]:
         selected_candidate = improvement_report.get("selected_candidate") if isinstance(improvement_report, dict) else None
         candidate_goal = self._goal_from_candidate(selected_candidate, improvement_report, evaluation)
         if candidate_goal is not None:
             return [candidate_goal]
-        prompt = (
-            "You are OpenPilot's Goal Maker Agent. Create 1-3 concrete, evaluable project "
-            "improvement goals. Avoid vague goals like 'make it better'. Return ONLY JSON.\n"
-            "Respect any Prompt Context in the improvement report as parent intent. Treat product fit "
-            "and default user expectations as first-class evaluation criteria, not optional polish.\n\n"
-            f"Completed successful improvements: {completed_iteration}\n"
-            f"Project state JSON: {project_state.model_dump_json()}\n"
-            f"Validation JSON: {evaluation.model_dump_json()}\n"
-            f"Improvement report JSON: {json.dumps(improvement_report, ensure_ascii=False, default=str)}\n\n"
-            "Return: {\"goals\": [{\"id\":\"goal_1\",\"title\":\"specific goal\","
-            "\"category\":\"feature|ux|robustness|code_quality|documentation\","
-            "\"rationale\":\"public reason\",\"acceptance_criteria\":[\"observable criterion\"],"
-            "\"priority\":\"high|medium|low\"}]}"
+        payload, _ = self._complete_json_candidates(
+            build_iteration_goal_candidates(
+                project_state=project_state,
+                improvement_report=improvement_report,
+                completed_iteration=completed_iteration,
+                session_constraints=session_constraints,
+                session_ingress_state=session_ingress_state,
+                context_projection=context_projection,
+            ),
+            purpose=ContextRequestPurpose.ITERATION_GOAL,
+            complexity=EnhancementCompletionComplexity.STANDARD,
+            remaining_calls=max(1, self.max_iteration_attempts - completed_iteration),
+            remaining_value=(
+                EnhancementCompletionDecisionValue.HIGH
+                if (
+                    improvement_report.get("recommended_actions")
+                    or improvement_report.get("improvement_opportunities")
+                    or improvement_report.get("next_iteration_goal")
+                )
+                else EnhancementCompletionDecisionValue.LOW
+            ),
+            reasoning_complexity=reasoning_complexity,
         )
-        payload = self._complete_json(prompt)
         goals = []
         for index, raw_goal in enumerate((payload or {}).get("goals") or [], 1):
-            goal = self._coerce_goal(raw_goal, index)
+            goal = self._coerce_goal(raw_goal, index, project_state, completed_iteration)
             if goal is not None:
                 goals.append(goal)
+        if not goals and self.enhancement_requirement == EnhancementCompletionRequirement.REQUIRED:
+            raise InvalidLLMResponseError(
+                "Required iteration_goal response contained no valid goal."
+            )
         return goals or [self._fallback_goal(improvement_report, evaluation)]
 
     def _goal_from_candidate(
@@ -777,62 +975,298 @@ class AutonomousIterationAgent:
         goal: ImprovementGoal,
         improvement_report: dict[str, Any],
         completed_iteration: int,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
+        context_projection: DerivedContextProjection | None = None,
     ) -> list[DesignedImprovementTask]:
-        prompt = (
-            "You are OpenPilot's Task Designer Agent. Convert one improvement goal into 1-2 "
-            "specific implementation tasks with target files and acceptance criteria. Return ONLY JSON.\n"
-            "Carry forward the Prompt Context/rubric from the improvement report exactly. Do not dilute "
-            "a product-fit migration goal into terminal-only polish tasks. Assess UI impact for every "
-            "feature task: when behavior is user-facing, include the corresponding controls, visible states, "
-            "feedback, navigation, and frontend target files required by the persisted stack preset. "
-            "Do not silently change frontend/backend languages or frameworks; request an explicit stack preset revision.\n\n"
-            f"Completed successful improvements: {completed_iteration}\n"
-            f"Selected goal JSON: {goal.model_dump_json()}\n"
-            f"Project state JSON: {project_state.model_dump_json()}\n"
-            f"Improvement report JSON: {json.dumps(improvement_report, ensure_ascii=False, default=str)}\n\n"
-            "Return: {\"tasks\": [{\"id\":\"task_1\",\"goal_id\":\"goal_1\","
-            "\"description\":\"specific implementation task\",\"target_files\":[\"path\"],"
-            "\"acceptance_criteria\":[\"observable criterion\"],\"risk_notes\":[\"risk or empty\"]}]}"
+        candidates = build_iteration_task_design_candidates(
+            project_state=project_state,
+            goal=goal,
+            improvement_report=improvement_report,
+            completed_iteration=completed_iteration,
+            session_constraints=session_constraints,
+            session_ingress_state=session_ingress_state,
+            context_projection=context_projection,
         )
-        payload = self._complete_json(prompt)
-        tasks = []
-        for index, raw_task in enumerate((payload or {}).get("tasks") or [], 1):
-            task = self._coerce_task(raw_task, goal, project_state, index)
-            if task is not None:
-                tasks.append(task)
-        return (tasks or [self._fallback_task(goal, project_state)])[:1]
+        payload, retained_candidate_ids = self._complete_json_candidates(
+            candidates,
+            purpose=ContextRequestPurpose.ITERATION_TASK_DESIGN,
+            complexity=(
+                EnhancementCompletionComplexity.COMPLEX
+                if len(project_state.safe_target_files or project_state.written_files) > 1
+                else EnhancementCompletionComplexity.ROUTINE
+            ),
+            remaining_calls=max(1, self.max_iteration_attempts - completed_iteration),
+            remaining_value=EnhancementCompletionDecisionValue.HIGH,
+        )
+        payload = payload or {}
+        if set(payload) - {"task", "tasks"} or ("task" in payload and "tasks" in payload):
+            raw_task = None
+        else:
+            raw_task = payload.get("task")
+        if not isinstance(raw_task, dict) and "task" not in payload:
+            legacy_tasks = (payload or {}).get("tasks") or []
+            raw_task = (
+                legacy_tasks[0]
+                if isinstance(legacy_tasks, list)
+                and 0 < len(legacy_tasks) <= 2
+                and isinstance(legacy_tasks[0], dict)
+                else None
+            )
+        if isinstance(raw_task, dict) and set(raw_task) - {
+            "id",
+            "goal_id",
+            "description",
+            "target_files",
+            "acceptance_criteria",
+            "risk_notes",
+            "evidence_ids",
+        }:
+            raw_task = None
+        task = self._coerce_task(
+            raw_task,
+            goal,
+            project_state,
+            completed_iteration,
+            improvement_report,
+            retained_candidate_ids,
+        )
+        if task is None and self.enhancement_requirement == EnhancementCompletionRequirement.REQUIRED:
+            raise InvalidLLMResponseError(
+                "Required iteration_task_design response contained no valid authorized task."
+            )
+        if isinstance(raw_task, dict) and task is None:
+            return []
+        return [task or self._fallback_task(goal, project_state)]
 
-    def _complete_json(self, prompt: str) -> dict[str, Any] | None:
+    def _complete_json_candidates(
+        self,
+        candidates: list[Any],
+        *,
+        purpose: ContextRequestPurpose,
+        complexity: EnhancementCompletionComplexity = EnhancementCompletionComplexity.ROUTINE,
+        remaining_calls: int = 3,
+        remaining_value: EnhancementCompletionDecisionValue = EnhancementCompletionDecisionValue.NORMAL,
+        reasoning_complexity: ReasoningDecisionComplexity | None = None,
+    ) -> tuple[dict[str, Any] | None, set[str]]:
+        requirement = getattr(
+            self,
+            "enhancement_requirement",
+            EnhancementCompletionRequirement.OPTIONAL,
+        )
         if not self.llm_client or not hasattr(self.llm_client, "complete"):
-            return None
+            if requirement == EnhancementCompletionRequirement.REQUIRED:
+                raise LLMProviderError(
+                    f"Required {purpose.value} provider is unavailable."
+                )
+            return None, set()
+        candidate_identity = json.dumps(
+            [
+                candidate.model_dump(mode="json")
+                if hasattr(candidate, "model_dump")
+                else candidate
+                for candidate in candidates
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        reservation_key = (
+            f"{purpose.value}:"
+            f"{hashlib.sha256(candidate_identity.encode('utf-8')).hexdigest()}"
+        )
+        reservation = None
+        budget_request = EnhancementCompletionRequest(
+            logical_key=reservation_key,
+            purpose=purpose,
+            complexity=complexity,
+            prompt_tokens=0,
+            remaining_calls=remaining_calls,
+            remaining_value=remaining_value,
+            requirement=requirement,
+        )
         try:
-            response = self.llm_client.complete(
-                LLMRequest(
-                    messages=[LLMMessage(role="user", content=prompt)],
+            request = build_context_candidate_request(
+                    self.llm_client,
+                    candidates=candidates,
+                    purpose=purpose,
                     response_format="json_object",
                     temperature=0.2,
-                ),
-                max_retries=2,
+                )
+            prompt_tokens = int(
+                getattr(request.context_selection, "final_prompt_tokens", 0) or 0
+            )
+            budget_request = budget_request.model_copy(
+                update={"prompt_tokens": prompt_tokens}
+            )
+            reservation = self.enhancement_budget.reserve(
+                budget_request
+            )
+            if reservation is None:
+                if requirement == EnhancementCompletionRequirement.REQUIRED:
+                    raise ContextAssemblyBudgetError(
+                        [f"enhancement_completion_budget:{purpose.value}"]
+                    )
+                return None, set()
+            request = request.model_copy(
+                update={
+                    "max_tokens": reservation.max_tokens,
+                    "trace_info": {
+                        **request.trace_info,
+                        "completion_budget": {
+                            "purpose": purpose.value,
+                            "reservation_id": reservation.reservation_id,
+                            "reserved_tokens": reservation.max_tokens,
+                            "remaining_tokens": self.runtime_budget.enhancement_completion_tokens_remaining,
+                        },
+                    },
+                    "reasoning_policy": (
+                        reasoning_policy_for_decision(
+                            getattr(self.llm_client, "settings", None),
+                            reasoning_complexity,
+                        )
+                        if reasoning_complexity is not None
+                        else routine_tool_reasoning_policy(
+                            getattr(self.llm_client, "settings", None),
+                            routine=complexity == EnhancementCompletionComplexity.ROUTINE,
+                        )
+                    ),
+                }
+            )
+            response = self.llm_client.complete(
+                request,
+                max_retries=1,
                 use_cache=False,
             )
-        except Exception:
-            return None
+            usage = getattr(response, "usage", None)
+            actual_tokens = None
+            if isinstance(usage, dict):
+                actual_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+            self.enhancement_budget.reconcile(
+                reservation,
+                actual_tokens=int(actual_tokens) if actual_tokens is not None else None,
+                finish_reason=getattr(response, "finish_reason", None),
+                response_empty=not bool(str(getattr(response, "content", "") or "")),
+            )
+        except ContextAssemblyBudgetError:
+            raise
+        except Exception as exc:
+            if reservation is not None:
+                self.enhancement_budget.reconcile_failure(reservation, exc)
+            recovered = False
+            if (
+                reservation is not None
+                and isinstance(exc, InvalidLLMResponseError)
+                and str(getattr(exc, "finish_reason", "") or "").lower()
+                in {"length", "max_tokens"}
+            ):
+                recovery = self.enhancement_budget.reserve(
+                    budget_request.model_copy(
+                        update={
+                            "logical_key": f"{reservation_key}:length_recovery",
+                            "recovery_of": reservation.reservation_id,
+                        }
+                    )
+                )
+                if recovery is not None:
+                    recovery_request = request.model_copy(
+                        update={
+                            "max_tokens": recovery.max_tokens,
+                            "trace_info": {
+                                **request.trace_info,
+                                "completion_budget": {
+                                    "purpose": purpose.value,
+                                    "reservation_id": recovery.reservation_id,
+                                    "reserved_tokens": recovery.max_tokens,
+                                    "remaining_tokens": self.runtime_budget.enhancement_completion_tokens_remaining,
+                                    "recovery_of": reservation.reservation_id,
+                                },
+                            },
+                        }
+                    )
+                    try:
+                        response = self.llm_client.complete(
+                            recovery_request,
+                            max_retries=1,
+                            use_cache=False,
+                        )
+                        usage = getattr(response, "usage", None)
+                        actual_tokens = None
+                        if isinstance(usage, dict):
+                            actual_tokens = usage.get(
+                                "completion_tokens", usage.get("output_tokens")
+                            )
+                        self.enhancement_budget.reconcile(
+                            recovery,
+                            actual_tokens=(
+                                int(actual_tokens)
+                                if actual_tokens is not None
+                                else None
+                            ),
+                            finish_reason=getattr(response, "finish_reason", None),
+                            response_empty=not bool(
+                                str(getattr(response, "content", "") or "")
+                            ),
+                        )
+                        request = recovery_request
+                        recovered = True
+                    except Exception as recovery_exc:
+                        self.enhancement_budget.reconcile_failure(
+                            recovery, recovery_exc
+                        )
+                        exc = recovery_exc
+            if recovered:
+                pass
+            elif requirement == EnhancementCompletionRequirement.REQUIRED:
+                raise exc
+            else:
+                return None, set()
+        retained_candidate_ids = {
+            decision.candidate_id
+            for decision in (request.context_selection.candidate_decisions if request.context_selection else [])
+            if str(decision.action) not in {"omitted", "ContextCandidateAction.OMITTED"}
+        }
         if isinstance(response.parsed_json, dict):
-            return response.parsed_json
+            return response.parsed_json, retained_candidate_ids
         try:
-            return json.loads(response.content)
+            parsed = json.loads(response.content)
+            return (parsed if isinstance(parsed, dict) else None), retained_candidate_ids
         except (TypeError, json.JSONDecodeError):
-            return None
+            if requirement == EnhancementCompletionRequirement.REQUIRED:
+                raise InvalidLLMResponseError(
+                    f"Required {purpose.value} response was not a JSON object.",
+                    response_text=str(getattr(response, "content", "") or ""),
+                    usage=getattr(response, "usage", None),
+                    finish_reason=getattr(response, "finish_reason", None),
+                )
+            return None, retained_candidate_ids
 
-    def _coerce_goal(self, raw_goal: Any, index: int) -> ImprovementGoal | None:
+    def _coerce_goal(
+        self,
+        raw_goal: Any,
+        index: int,
+        project_state: ProjectStateSnapshot,
+        completed_iteration: int,
+    ) -> ImprovementGoal | None:
         if not isinstance(raw_goal, dict):
             return None
         title = str(raw_goal.get("title") or "").strip()
         if not title or title.lower() in {"make the project better", "improve the project", "make it better"}:
             return None
         criteria = self._coerce_string_list(raw_goal.get("acceptance_criteria"))
+        identity = json.dumps(
+            {
+                "project_path": project_state.project_path,
+                "iteration": completed_iteration,
+                "index": index,
+                "title": title,
+                "category": str(raw_goal.get("category") or "feature"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         return ImprovementGoal(
-            id=str(raw_goal.get("id") or f"goal_{index}"),
+            id=f"goal_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]}",
             title=title,
             category=str(raw_goal.get("category") or "feature"),
             rationale=str(raw_goal.get("rationale") or ""),
@@ -845,21 +1279,85 @@ class AutonomousIterationAgent:
         raw_task: Any,
         goal: ImprovementGoal,
         project_state: ProjectStateSnapshot,
-        index: int,
+        completed_iteration: int,
+        improvement_report: dict[str, Any],
+        valid_evidence_ids: set[str],
     ) -> DesignedImprovementTask | None:
         if not isinstance(raw_task, dict):
             return None
-        description = str(raw_task.get("description") or "").strip()
+        description = str(raw_task.get("description") or "").strip()[:1000]
         if not description:
             return None
-        target_files = self._coerce_string_list(raw_task.get("target_files")) or project_state.safe_target_files[:1]
+        project_root = Path(project_state.project_path).expanduser().resolve(strict=False)
+        safe_targets = {
+            str(
+                (Path(path).expanduser() if Path(path).expanduser().is_absolute() else project_root / path)
+                .resolve(strict=False)
+            ): str(path)
+            for path in project_state.safe_target_files
+        }
+        requested_targets = self._coerce_string_list(raw_task.get("target_files"))
+        target_files = []
+        for path in requested_targets:
+            candidate = Path(path).expanduser()
+            canonical = str(
+                (candidate if candidate.is_absolute() else project_root / candidate).resolve(strict=False)
+            )
+            if canonical in safe_targets and safe_targets[canonical] not in target_files:
+                target_files.append(safe_targets[canonical])
+            if len(target_files) >= 8:
+                break
+        if requested_targets and not target_files:
+            return None
+        if not target_files:
+            target_files = project_state.safe_target_files[:1]
+        criteria = self._bounded_unique_strings(
+            [*goal.acceptance_criteria, *self._coerce_string_list(raw_task.get("acceptance_criteria"))],
+            limit=8,
+            chars=500,
+        )
+        prompt_context = improvement_report.get("prompt_context") if isinstance(improvement_report.get("prompt_context"), dict) else {}
+        report_intent = prompt_context.get("product_intent") if isinstance(prompt_context.get("product_intent"), dict) else {}
+        validation_intent = (
+            project_state.validation_context.get("product_intent")
+            if isinstance(project_state.validation_context.get("product_intent"), dict)
+            else {}
+        )
+        product_intent = {**report_intent, **validation_intent}
+        safety_risks = [
+            *self._coerce_string_list(product_intent.get("non_regression_constraints")),
+            *self._coerce_string_list(product_intent.get("disallowed_substitutions")),
+        ]
+        risk_notes = self._bounded_unique_strings(
+            [*safety_risks, *self._coerce_string_list(raw_task.get("risk_notes"))],
+            limit=8,
+            chars=500,
+        )
+        evidence_ids = [
+            item for item in self._coerce_string_list(raw_task.get("evidence_ids"))
+            if item in valid_evidence_ids
+        ][:12]
+        identity_payload = json.dumps(
+            {
+                "goal_id": goal.id,
+                "project_path": project_state.project_path,
+                "iteration": completed_iteration,
+                "description": description,
+                "target_files": target_files,
+                "acceptance_criteria": criteria,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        task_id = f"task_{hashlib.sha256(identity_payload.encode('utf-8')).hexdigest()[:12]}"
         return DesignedImprovementTask(
-            id=str(raw_task.get("id") or f"task_{index}"),
-            goal_id=str(raw_task.get("goal_id") or goal.id),
+            id=task_id,
+            goal_id=goal.id,
             description=description,
             target_files=target_files,
-            acceptance_criteria=self._coerce_string_list(raw_task.get("acceptance_criteria")) or goal.acceptance_criteria,
-            risk_notes=self._coerce_string_list(raw_task.get("risk_notes")),
+            acceptance_criteria=criteria,
+            risk_notes=risk_notes,
+            evidence_ids=evidence_ids,
         )
 
     def _fallback_goal(self, report: dict[str, Any], evaluation: EvaluationResult) -> ImprovementGoal:
@@ -1089,6 +1587,7 @@ class AutonomousIterationAgent:
         success: bool,
         actions: list[str],
         detail: str | None,
+        project_path: str | Path,
         improvement_report: dict[str, Any] | None = None,
         failure_context: dict[str, Any] | None = None,
     ) -> str:
@@ -1105,6 +1604,9 @@ class AutonomousIterationAgent:
             try:
                 diagnosis = (improvement_report or {}).get("diagnosis") if isinstance(improvement_report, dict) else {}
                 selected_candidate = (improvement_report or {}).get("selected_candidate") if isinstance(improvement_report, dict) else {}
+                canonical_project_path = str(
+                    Path(project_path).expanduser().resolve(strict=False)
+                )
                 unmet_metrics = []
                 if isinstance(diagnosis, dict):
                     unmet_metrics = [
@@ -1120,11 +1622,17 @@ class AutonomousIterationAgent:
                         tags=["autonomous_iteration", state, "project"],
                         confidence=0.8 if success else 0.45,
                         attributes={
+                            "project_path": canonical_project_path,
                             "goal": goal,
                             "iteration": iteration,
                             "success": success,
                             "selected_candidate": (
                                 selected_candidate.get("title")
+                                if isinstance(selected_candidate, dict)
+                                else ""
+                            ),
+                            "selected_candidate_id": (
+                                selected_candidate.get("candidate_id")
                                 if isinstance(selected_candidate, dict)
                                 else ""
                             ),
@@ -1213,6 +1721,20 @@ class AutonomousIterationAgent:
             return [str(item).strip() for item in value if str(item).strip()]
         return [str(value)]
 
+    @staticmethod
+    def _bounded_unique_strings(values: list[str], *, limit: int, chars: int) -> list[str]:
+        bounded: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = str(value or "").strip()[:chars]
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            bounded.append(item)
+            if len(bounded) >= limit:
+                break
+        return bounded
+
     def _failure_context(
         self,
         iteration_result: IterationResult,
@@ -1289,6 +1811,24 @@ class AutonomousIterationAgent:
             if goal.title not in titles:
                 titles.append(goal.title)
         return titles
+
+    @staticmethod
+    def _select_uncompleted_goal(
+        goals: list[ImprovementGoal], completed_goal_titles: list[str]
+    ) -> ImprovementGoal | None:
+        completed = {
+            str(title).strip().casefold()
+            for title in completed_goal_titles
+            if str(title).strip()
+        }
+        return next(
+            (
+                goal
+                for goal in goals
+                if str(goal.title).strip().casefold() not in completed
+            ),
+            None,
+        )
 
     def _notify(self, callback: ProgressCallback | None, event: str, payload: dict[str, Any]) -> None:
         if callback:

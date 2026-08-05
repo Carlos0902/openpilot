@@ -43,7 +43,7 @@ def collect_from_tool_error(error: ToolErrorMetadata | dict[str, Any]) -> Proble
 
     raw_payload = error.to_json_dict() if hasattr(error, "to_json_dict") else dict(error)
     return ProblemSignalMetadata(
-        source="tool_error",
+        signal_source="tool_error",
         category=category,
         message=error_message or error_type,
         evidence=evidence,
@@ -70,7 +70,7 @@ def collect_from_failure(
     raw_payload = failure.to_json_dict() if hasattr(failure, "to_json_dict") else dict(failure)
 
     return ProblemSignalMetadata(
-        source=source,
+        signal_source=source,
         category=category,
         message=error_message or error_type,
         evidence=evidence,
@@ -95,7 +95,7 @@ def collect_from_runtime_state(state: RuntimeStateMetadata | dict[str, Any]) -> 
     if phase.endswith("blocked") or phase == "AgentPhase.BLOCKED":
         signals.append(
             ProblemSignalMetadata(
-                source="runtime_state",
+                signal_source="runtime_state",
                 category="state_transition",
                 message="Runtime entered blocked phase",
                 evidence=[f"phase={phase}", f"completion_reason={completion_reason}"],
@@ -106,7 +106,7 @@ def collect_from_runtime_state(state: RuntimeStateMetadata | dict[str, Any]) -> 
     if verification_status in {"failed", "fail", "error"}:
         signals.append(
             ProblemSignalMetadata(
-                source="runtime_state",
+                signal_source="runtime_state",
                 category="verification",
                 message="Runtime verification did not pass",
                 evidence=[f"verification_status={verification_status}"],
@@ -117,7 +117,7 @@ def collect_from_runtime_state(state: RuntimeStateMetadata | dict[str, Any]) -> 
     if no_progress_rounds >= 2:
         signals.append(
             ProblemSignalMetadata(
-                source="runtime_state",
+                signal_source="runtime_state",
                 category="planning",
                 message="Runtime made no progress for multiple rounds",
                 evidence=[f"no_progress_rounds={no_progress_rounds}"],
@@ -134,7 +134,7 @@ def collect_from_runtime_state(state: RuntimeStateMetadata | dict[str, Any]) -> 
         candidate_paths = list(_value(resolution, "candidate_paths", []) or [])
         signals.append(
             ProblemSignalMetadata(
-                source="runtime_state",
+                signal_source="runtime_state",
                 category="path_resolution",
                 message=f"Path grounding {status}",
                 evidence=[
@@ -163,7 +163,7 @@ def suspicious_success_signal(
 ) -> ProblemSignalMetadata:
     """Create a suspicious-success signal for final-result checks."""
     return ProblemSignalMetadata(
-        source="final_result",
+        signal_source="final_result",
         category="suspicious_success",
         message=message,
         evidence=evidence or [],

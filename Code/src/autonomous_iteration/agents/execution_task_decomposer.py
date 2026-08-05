@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 import uuid
 from typing import Any, Callable
 
 from core.graph import Graph, GraphNode, GraphEdge, GraphType
 from core.llm import LLMClient, LLMMessage, LLMRequest
+from memory.context_assembly import build_context_candidate_request, build_context_llm_request
+from memory.session_constraints import build_session_constraint_candidate
+from metadata import (
+    ContextCandidate,
+    ContextCandidateFreshness,
+    ContextCandidateKind,
+    ContextCandidateRetention,
+    ContextCandidateTrust,
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
+    SessionConstraintState,
+    SessionIngressState,
+)
 from autonomous_iteration.task_models import (
     Task,
     TaskStatus,
@@ -19,6 +33,24 @@ from autonomous_iteration.task_models import (
 
 class TaskDecomposer:
     """Agent for decomposing complex tasks into subtasks."""
+
+    _TASK_KIND_ALIASES = {
+        "analysis": "inspect",
+        "check": "inspect",
+        "codebase_understanding": "codebase_understanding",
+        "document": "document",
+        "documentation": "document",
+        "implement": "implement",
+        "implementation": "implement",
+        "inspect": "inspect",
+        "inspection": "inspect",
+        "investigate": "inspect",
+        "repair": "repair",
+        "test": "validate",
+        "validate": "validate",
+        "validation": "validate",
+        "verify": "validate",
+    }
 
     def __init__(
         self,
@@ -137,7 +169,8 @@ class TaskDecomposer:
 
         # First pass: create all subtasks with temporary index-based dependencies
         subtask_indices = []  # Store (subtask, original_dependencies_indices)
-        for subtask_desc in decomposition["subtasks"]:
+        for raw_subtask_desc in decomposition["subtasks"]:
+            subtask_desc = self._normalize_subtask_contract(raw_subtask_desc)
             # Store raw dependencies (might be integers)
             raw_deps = subtask_desc.get("dependencies", [])
 
@@ -228,6 +261,24 @@ class TaskDecomposer:
             decomposition_rationale=decomposition.get("rationale", ""),
             estimated_total_effort=total_effort
         )
+
+    @classmethod
+    def _normalize_subtask_contract(cls, raw_subtask: Any) -> dict[str, Any]:
+        if not isinstance(raw_subtask, dict):
+            raise ValueError("Each decomposed subtask must be a JSON object.")
+        normalized = dict(raw_subtask)
+        explicit_kind = normalized.get("kind") or normalized.get("task_kind")
+        legacy_type = normalized.get("type")
+        raw_kind = explicit_kind if explicit_kind is not None else legacy_type
+        if raw_kind is None:
+            normalized["kind"] = "general"
+            return normalized
+        kind_key = str(raw_kind).strip().lower().replace("-", "_")
+        canonical = cls._TASK_KIND_ALIASES.get(kind_key)
+        if canonical is None:
+            raise ValueError(f"Unsupported subtask kind: {raw_kind!r}")
+        normalized["kind"] = canonical
+        return normalized
 
     def build_task_graph(self, tasks: list[Task]) -> Graph:
         """Build a task dependency graph.
@@ -380,7 +431,9 @@ Consider:
 Respond with just a number between 0.0 and 1.0."""
 
         try:
-            request = LLMRequest(
+            request = build_context_llm_request(
+                self.llm_client,
+                purpose=ContextRequestPurpose.TASK_COMPLEXITY,
                 messages=[LLMMessage(role="user", content=prompt)],
                 temperature=0.3,
                 max_tokens=10,
@@ -409,33 +462,40 @@ Respond with just a number between 0.0 and 1.0."""
         Returns:
             Dictionary with subtasks and rationale
         """
-        context_str = "\n".join(f"- {k}: {v}" for k, v in context.items()) if context else "None"
+        context_without_ingress = {
+            key: value
+            for key, value in (context or {}).items()
+            if key not in {"session_constraints", "session_ingress_state"}
+        }
+        context_str = (
+            "\n".join(f"- {k}: {v}" for k, v in context_without_ingress.items())
+            if context_without_ingress
+            else "None"
+        )
+        raw_constraint_state = context.get("session_constraints") if context else None
+        raw_ingress = context.get("session_ingress_state") if context else None
+        if raw_constraint_state is not None and not isinstance(raw_constraint_state, SessionConstraintState):
+            raise TypeError("session_constraints must be a validated SessionConstraintState")
+        if raw_ingress is not None and not isinstance(raw_ingress, SessionIngressState):
+            raise TypeError("session_ingress_state must be a validated SessionIngressState")
+        constraint_state = raw_constraint_state
+        if isinstance(raw_ingress, SessionIngressState):
+            if isinstance(raw_constraint_state, SessionConstraintState) and raw_ingress.session_constraints != raw_constraint_state:
+                raise ValueError("session ingress and constraint state differ")
+            constraint_state = raw_ingress.session_constraints
 
-        prompt = f"""Decompose this task into subtasks.
-
-Task: {task.description}
-
-Context:
-{context_str}
-
-Provide a JSON response with:
+        instruction = """You decompose one task into a strict executable subtask contract.
+Return JSON only with this shape:
 {{
     "rationale": "Why this decomposition makes sense",
     "subtasks": [
         {{
             "description": "Subtask description",
             "kind": "inspect|implement|repair|validate|document|general",
-            "difficulty": "trivial|simple|moderate|hard",
-            "priority": "low|medium|high|critical",
-            "estimated_effort": 1.0,
-            "required_inputs": [],
-            "expected_outputs": [],
             "read_files": [],
             "write_files": [],
             "dependencies": [],
-            "can_run_parallel": true,
-            "validation_command": "",
-            "tags": []
+            "validation_command": ""
         }}
     ]
 }}
@@ -446,24 +506,69 @@ Guidelines:
   a named file/directory, create 1-3 subtasks and prefer one implementation
   task plus one validation task.
 - Each subtask should be independently executable
-- Put concrete project files in read_files/write_files when known
+- Every inspect subtask must list concrete read_files when file inspection is requested.
+- Every implement or repair subtask must list every permitted target in write_files.
 - Tasks that write the same file must depend on each other or set can_run_parallel=false
-- Validation subtasks should depend on implementation/repair subtasks and include validation_command when known
+- Every validate subtask must include the exact non-empty validation_command it is required to run.
 - Dependencies should be indices (0, 1, 2, etc.) of other subtasks in the list
-- Estimate effort (1.0 = 1 unit of work)
-- Keep descriptions clear and actionable"""
+- Keep descriptions clear and actionable
+- Do not replace kind with type or task_kind."""
+        prompt = f"""Decompose this task into subtasks.
+
+Task: {task.description}
+
+Context:
+{context_str}"""
 
         try:
-            request = LLMRequest(
-                messages=[LLMMessage(role="user", content=prompt)],
+            candidates = [
+                ContextCandidate(
+                    candidate_id="task_decomposition:instruction",
+                    kind=ContextCandidateKind.INSTRUCTION,
+                    source_id="execution_task_decomposer:instruction",
+                    content=instruction,
+                    role="system",
+                    retention=ContextCandidateRetention.REQUIRED,
+                    priority=100,
+                    source_order=0,
+                    truncation=ContextCandidateTruncation.FORBIDDEN,
+                    trust=ContextCandidateTrust.AUTHORITATIVE,
+                    freshness=ContextCandidateFreshness.CURRENT,
+                ),
+                ContextCandidate(
+                    candidate_id="task_decomposition:task",
+                    kind=ContextCandidateKind.USER_INPUT,
+                    source_id="execution_task_decomposer:task",
+                    content=prompt,
+                    role="user",
+                    retention=ContextCandidateRetention.PREFERRED,
+                    priority=80,
+                    source_order=1,
+                    truncation=ContextCandidateTruncation.HEAD,
+                    trust=ContextCandidateTrust.DIRECT,
+                    freshness=ContextCandidateFreshness.CURRENT,
+                ),
+            ]
+            if isinstance(constraint_state, SessionConstraintState):
+                constraint_candidate = build_session_constraint_candidate(constraint_state)
+                if constraint_candidate is not None:
+                    candidates.append(constraint_candidate)
+            request = build_context_candidate_request(
+                self.llm_client,
+                candidates=candidates,
+                purpose=ContextRequestPurpose.TASK_DECOMPOSITION,
                 response_format="json_object",
                 temperature=0.5,
-                max_tokens=2000,
+                max_tokens=3200,
                 timeout_seconds=45.0,
                 transport_retries=0,
             )
 
-            response = self.llm_client.complete(request)
+            complete = self.llm_client.complete
+            parameters = inspect.signature(complete).parameters
+            accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+            kwargs = {"max_retries": 1} if accepts_kwargs or "max_retries" in parameters else {}
+            response = complete(request, **kwargs)
 
             # Parse JSON response
             if response.parsed_json:

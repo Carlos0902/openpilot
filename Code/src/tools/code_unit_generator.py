@@ -6,7 +6,16 @@ import ast
 import re
 import uuid
 
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from core.llm import LLMMessage
+from memory.context_assembly import build_context_llm_request
+from metadata import (
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
+    ToolContractMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+    metadata_tool_result,
+)
 
 from core.tool_contracts import PermissionLevel, ToolCapability, ToolDefinition, ToolFailureMode
 
@@ -97,18 +106,22 @@ Return only the generated code unit in a fenced code block.
 
 
 def _call_llm(llm_client: object, prompt: str) -> str:
+    request = build_context_llm_request(
+        llm_client,
+        messages=[LLMMessage(role="user", content=prompt)],
+        purpose=ContextRequestPurpose.CODE_UNIT_GENERATION,
+        response_format="text",
+        temperature=0.2,
+        user_truncation=ContextCandidateTruncation.FORBIDDEN,
+    )
     if hasattr(llm_client, "complete"):
-        from core.llm import LLMMessage, LLMRequest
-
-        response = llm_client.complete(
-            LLMRequest(messages=[LLMMessage(role="user", content=prompt)], response_format="text", temperature=0.2)
-        )
+        response = llm_client.complete(request)
         return str(response.content)
     if hasattr(llm_client, "generate"):
-        return str(llm_client.generate(prompt))
+        return str(llm_client.generate("\n\n".join(message.content for message in request.messages)))
     if hasattr(llm_client, "chat"):
-        return str(llm_client.chat([{"role": "user", "content": prompt}]))
-    return str(llm_client(prompt))
+        return str(llm_client.chat([message.model_dump() for message in request.messages]))
+    return str(llm_client("\n\n".join(message.content for message in request.messages)))
 
 
 def _extract_code(raw_response: str, language: str) -> str:

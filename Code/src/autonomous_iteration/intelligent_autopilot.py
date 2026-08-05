@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import re
 import shlex
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -36,12 +38,19 @@ from tools.tool_selection import (
 from tools.tool_registry import ToolRegistry
 from tools.tool_executor import ToolExecutor
 from tools.environment_fix_tool import summarize_environment_failure
+from tools.mutation_descriptor import file_mutation_targets
+from tools.executor_models import ExecutionError, ExecutionStatus
 from core.openpilot_log import OpenPilotLogger
-from core.exceptions import ErrorCategory, classify_error
+from core.exceptions import ErrorCategory, OpenPilotError, classify_error
 from metadata import (
+    EnvironmentOperation,
+    EnvironmentReadiness,
     ExecutionStateMetadata,
     FailureMetadata,
     ProjectObjectiveMetadata,
+    ProjectImprovementPolicy,
+    ProjectImprovementPolicySource,
+    ProjectImprovementRequirement,
     ReferenceInsightMetadata,
     ResultStatus,
     SuccessMetricMetadata,
@@ -50,11 +59,20 @@ from metadata import (
     TaskGraphEdgeMetadata,
     TaskGraphNodeMetadata,
     ToolExecutionEnvelopeMetadata,
+    ToolCallMetadata,
+    ToolContextMetadata,
+    ToolErrorMetadata,
     ToolInputMetadata,
     ToolResultMetadata,
+    VerificationPlanMetadata,
+    RuntimeBudgetMetadata,
+    DerivedContextProjection,
+    SessionConstraintState,
+    SessionIngressState,
 )
 from autonomous_iteration.improvement_context import ImprovementContextHelper
 from autonomous_iteration.project_improvement_runtime import ProjectImprovementRuntime
+from memory.session_dialog import session_turn_ledger_hash
 from autonomous_iteration.task_executor import AutonomousTaskExecutor
 from autonomous_iteration.agents.execution_orchestrator import AgentOrchestrator
 from autonomous_iteration.agents.execution_task_decomposer import TaskDecomposer
@@ -90,6 +108,7 @@ class IntelligentAutopilot:
         required_successful_improvements: int = 2,
         required_successful_iterations: int | None = None,
         max_iteration_attempts: int = 4,
+        project_improvement_policy: ProjectImprovementPolicy | None = None,
         prompt_for_project_improvement_iterations: bool = False,
         project_objective_override: ProjectObjectiveMetadata | None = None,
         success_metric_overrides: list[SuccessMetricMetadata] | None = None,
@@ -120,14 +139,44 @@ class IntelligentAutopilot:
         self.console = console or Console()
         self.auto_approve = auto_approve
         self.use_enhanced_ui = use_enhanced_ui
-        self.enable_iterative_improvement = enable_iterative_improvement
         if required_successful_iterations is not None:
             required_successful_improvements = required_successful_iterations
-        self.required_successful_improvements = required_successful_improvements
-        self.max_iteration_attempts = max(
-            max_iteration_attempts,
-            AutonomousIterationAgent.minimum_attempt_budget(required_successful_improvements),
-        )
+        if project_improvement_policy is None:
+            if not enable_iterative_improvement or required_successful_improvements <= 0:
+                project_improvement_policy = ProjectImprovementPolicy(
+                    requirement=ProjectImprovementRequirement.DISABLED,
+                    source=ProjectImprovementPolicySource.LEGACY_CONFIG,
+                    target_successes=0,
+                    max_attempts=0,
+                )
+            else:
+                is_automatic_default = (
+                    required_successful_iterations is None
+                    and required_successful_improvements == 2
+                    and max_iteration_attempts == 4
+                )
+                target_attempts = max(
+                    max_iteration_attempts,
+                    AutonomousIterationAgent.minimum_attempt_budget(required_successful_improvements),
+                )
+                project_improvement_policy = ProjectImprovementPolicy(
+                    requirement=(
+                        ProjectImprovementRequirement.OPTIONAL
+                        if is_automatic_default
+                        else ProjectImprovementRequirement.REQUIRED
+                    ),
+                    source=(
+                        ProjectImprovementPolicySource.AUTOMATIC_DEFAULT
+                        if is_automatic_default
+                        else ProjectImprovementPolicySource.LEGACY_CONFIG
+                    ),
+                    target_successes=required_successful_improvements,
+                    max_attempts=target_attempts,
+                )
+        self.project_improvement_policy = project_improvement_policy
+        self.enable_iterative_improvement = project_improvement_policy.enabled
+        self.required_successful_improvements = project_improvement_policy.target_successes
+        self.max_iteration_attempts = project_improvement_policy.max_attempts
         self.prompt_for_project_improvement_iterations = prompt_for_project_improvement_iterations
         self.allow_reference_search = allow_reference_search
         code_root = Path(__file__).resolve().parents[2]
@@ -184,6 +233,7 @@ class IntelligentAutopilot:
 
         # Session tracking
         self.session_id: str | None = None
+        self.conversation_id: str | None = None
         self.stats = {
             "start_time": None,
             "end_time": None,
@@ -207,15 +257,21 @@ class IntelligentAutopilot:
         try:
             from memory.context_builder import MemoryContextBuilder
             from memory.agents.memory_vault_agent import MemoryVaultAgent
+            from core.token_counting import ProviderTokenCounter
 
             self.memory_vault_agent = MemoryVaultAgent(
                 memory_store=self.memory_store,
                 logger=self.logger,
                 session_id_getter=lambda: self.session_id,
             )
+            llm_settings = getattr(self.llm_client, "settings", None)
             self.memory_context_builder = MemoryContextBuilder(
                 memory_store=self.memory_store,
                 memory_vault_agent=self.memory_vault_agent,
+                token_counter=ProviderTokenCounter.from_settings(llm_settings),
+                max_prompt_tokens=int(
+                    getattr(llm_settings, "context_max_prompt_tokens", 4096) or 4096
+                ),
             )
         except Exception as exc:
             self.memory_vault_agent = None
@@ -230,6 +286,7 @@ class IntelligentAutopilot:
                 success=False,
                 error=str(exc),
             )
+        self._local_enhancement_runtime_budget = RuntimeBudgetMetadata()
         self.iterative_improvement = AutonomousIterationAgent(
             self.project_evaluator,
             required_successful_improvements=self.required_successful_improvements,
@@ -244,6 +301,7 @@ class IntelligentAutopilot:
             disallowed_improvement_directions=disallowed_improvement_directions,
             allow_reference_search=allow_reference_search,
             reference_provider=reference_provider or self._gather_project_reference_insights,
+            runtime_budget=self._local_enhancement_runtime_budget,
         )
         self.orchestrator = AgentOrchestrator(max_concurrent_tasks=3)
         self.semantic_analyzer = SemanticAnalyzer(self.llm_client)
@@ -386,9 +444,33 @@ class IntelligentAutopilot:
         Returns:
             Execution result
         """
-        self.session_id = str(uuid.uuid4())
         self.stats["start_time"] = datetime.now()
         context = self._normalize_execution_context(context or {})
+        raw_ingress = context.get("session_ingress_state")
+        if raw_ingress is not None and not isinstance(raw_ingress, SessionIngressState):
+            raise TypeError("session_ingress_state must be a validated SessionIngressState")
+        if isinstance(raw_ingress, SessionIngressState):
+            for identity_key in ("conversation_id", "session_id"):
+                supplied_identity = str(context.get(identity_key) or "").strip()
+                if supplied_identity and supplied_identity != raw_ingress.identity.conversation_id:
+                    raise ValueError("session ingress conversation identity mismatch")
+            supplied_project = str(context.get("project_path") or "").strip()
+            if supplied_project:
+                ingress_project = Path(raw_ingress.identity.project_root).expanduser().resolve(strict=False)
+                requested_project = Path(supplied_project).expanduser().resolve(strict=False)
+                if ingress_project != requested_project:
+                    raise ValueError("session ingress project identity mismatch")
+            context.setdefault("conversation_id", raw_ingress.identity.conversation_id)
+            context.setdefault("project_path", raw_ingress.identity.project_root)
+            context["session_constraints"] = raw_ingress.session_constraints
+        self.session_id = str(context.get("run_id") or uuid.uuid4())
+        self.conversation_id = str(
+            context.get("conversation_id")
+            or context.get("session_id")
+            or self.session_id
+        )
+        context["conversation_id"] = self.conversation_id
+        context["run_id"] = self.session_id
         self._current_execution_context = context
         self._current_goal = goal
         self._current_task_id = str(context.get("task_id") or self.session_id)
@@ -417,6 +499,39 @@ class IntelligentAutopilot:
                 return self._structured_execution_error(goal, e)
             raise
 
+    def resume(
+        self,
+        run_id: str,
+        checkpoint_id: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resume one explicit durable checkpoint without creating a new session identity."""
+        normalized_context = self._normalize_execution_context(context or {})
+        self._current_execution_context = normalized_context
+        self._reattach_resume_environment(normalized_context)
+        mode = "enhanced_ui" if self.use_enhanced_ui and self.enhanced_ui and self.tracker else "standard"
+        return self.runtime_controller.resume(
+            run_id,
+            checkpoint_id,
+            normalized_context,
+            mode=mode,
+        )
+
+    def _reattach_resume_environment(self, context: dict[str, Any]) -> None:
+        """Rebuild the ready-environment cache with a read-only resume preflight."""
+        raw_project_path = str(context.get("project_path") or context.get("cwd") or "").strip()
+        if not raw_project_path:
+            return
+        from memory.agents.project_environment_tool import inspect_project_environment
+
+        project_path = Path(raw_project_path).expanduser().resolve()
+        preflight = inspect_project_environment(project_path=project_path)
+        if not hasattr(self, "_project_environments"):
+            self._project_environments = {}
+        self._project_environments.pop(str(project_path), None)
+        if preflight.readiness == EnvironmentReadiness.READY:
+            self._project_environments[str(project_path)] = preflight.to_json_dict()
+
     def _normalize_execution_context(self, context: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(context or {})
         if not str(normalized.get("cwd") or "").strip():
@@ -424,7 +539,11 @@ class IntelligentAutopilot:
         return normalized
 
     def _task_parent_context(self, goal: str) -> dict[str, Any]:
-        parent_context: dict[str, Any] = {"goal": goal, "session_id": self.session_id}
+        parent_context: dict[str, Any] = {
+            "goal": goal,
+            "session_id": self.session_id,
+            "conversation_id": getattr(self, "conversation_id", None) or self.session_id,
+        }
         current_context = getattr(self, "_current_execution_context", {}) or {}
         for key in (
             "cwd",
@@ -435,6 +554,9 @@ class IntelligentAutopilot:
             "test_command",
             "validation_command",
             "validation_context",
+            "conversation_id",
+            "run_id",
+            "session_constraints",
         ):
             value = current_context.get(key)
             if value is not None and value != "":
@@ -505,6 +627,9 @@ class IntelligentAutopilot:
             id=str(uuid.uuid4()),
             description=f"Generate complete code artifact at {target_file}",
             priority=TaskPriority.HIGH,
+            kind="implement",
+            write_files=[str(target_file), str(target_file.parent / "README.md")],
+            validation_command=f"python {shlex.quote(target_file.name)}",
         )
         started = datetime.now()
         tool_results: list[ToolExecutionEnvelopeMetadata] = []
@@ -607,7 +732,8 @@ class IntelligentAutopilot:
             ))
 
         primary_results = [result for result in tool_results if result.tool_name != "readme_tool"]
-        success = all(result.success for result in primary_results)
+        core_success = all(result.success for result in primary_results)
+        success = core_success
         duration = (datetime.now() - started).total_seconds()
         error_msg = None
         if not success:
@@ -617,52 +743,68 @@ class IntelligentAutopilot:
         readme_error = readme_result.error_message if readme_result and not readme_result.success else None
         improvement_result = None
         iteration_error_msg = None
-        if success:
+        if core_success:
             run_command = f"python {shlex.quote(target_file.name)}"
             environment_result = next((r for r in tool_results if r.tool_name == "project_environment_tool" and r.success), None)
             if environment_result and environment_result.output is not None:
                 run_command = str(environment_result.output.get("run_command") or run_command)
-            improvement_result = self._run_iterative_improvement(
-                goal=goal,
-                project_path=target_file.parent,
-                written_files=[str(target_file)],
-                run_command=run_command,
-                readme_path=(
-                    readme_result.output.get("file_path")
-                    if readme_result and readme_result.output is not None
-                    else target_file.parent / "README.md"
-                ),
-            )
+            try:
+                improvement_result = self._run_iterative_improvement(
+                    goal=goal,
+                    project_path=target_file.parent,
+                    written_files=[str(target_file)],
+                    run_command=run_command,
+                    readme_path=(
+                        readme_result.output.get("file_path")
+                        if readme_result and readme_result.output is not None
+                        else target_file.parent / "README.md"
+                    ),
+                    session_ingress_state=(
+                        self._current_execution_context.get("session_ingress_state")
+                        if isinstance(getattr(self, "_current_execution_context", None), dict)
+                        else None
+                    ),
+                )
+            except Exception as exc:
+                improvement_result = {
+                    "success": False,
+                    "status": "interrupted",
+                    "error_type": type(exc).__name__,
+                    "failure_stage": "Project Improvement",
+                    "failed_tool": "project_improvement_runtime",
+                    "failure_reason": str(exc),
+                }
             if improvement_result is not None and not improvement_result.get("success", False):
                 iteration_error_msg = self._format_iteration_failure(improvement_result)
-                success = False
-                error_msg = iteration_error_msg
+                if self.project_improvement_policy.controls_top_level_success:
+                    success = False
+                    error_msg = iteration_error_msg
 
         task_result = TaskExecutionResult(
             task_id=task.id,
-            status=TaskStatus.COMPLETED if success else TaskStatus.FAILED,
+            status=TaskStatus.COMPLETED if core_success else TaskStatus.FAILED,
             result_metadata=TaskResultMetadata(
                 task_id=task.id,
-                status=ResultStatus.SUCCESS if success else ResultStatus.FAIL,
+                status=ResultStatus.SUCCESS if core_success else ResultStatus.FAIL,
                 result=TextArtifactMetadata(
-                    content="completed" if success else (error_msg or "failed"),
+                    content="completed" if core_success else (error_msg or "failed"),
                     attributes={
                         "description": task.description,
                         "tool_results": [tool_result.to_json_dict() for tool_result in tool_results],
-                        "all_tools_succeeded": success,
+                        "all_tools_succeeded": core_success,
                         "final_output": tool_results[-1].output.to_json_dict() if tool_results and tool_results[-1].output else None,
                     },
-                ) if success else None,
-                failure=None if success else FailureMetadata(error_type="FastPathError", error_message=error_msg or "Fast-path code generation failed"),
+                ) if core_success else None,
+                failure=None if core_success else FailureMetadata(error_type="FastPathError", error_message=error_msg or "Fast-path code generation failed"),
             ),
-            error=error_msg,
+            error=None if core_success else error_msg,
             duration=duration,
             annotations={"fast_path": True, "target_file": str(target_file)},
         )
 
         self.stats["success"] = success
-        self.stats["tasks_completed"] = 1 if success else 0
-        self.stats["tasks_failed"] = 0 if success else 1
+        self.stats["tasks_completed"] = 1 if core_success else 0
+        self.stats["tasks_failed"] = 0 if core_success else 1
         self.stats["end_time"] = datetime.now()
         self._stop_tracking_if_owned()
 
@@ -676,11 +818,12 @@ class IntelligentAutopilot:
                 fast_details += f"\nREADME: {readme_result.output.get('file_path', 'README.md')}"
             elif success and readme_error:
                 fast_details += f"\nREADME generation failed: {readme_error}"
-            if improvement_result and improvement_result.get("validation"):
-                fast_details += (
-                    f"\nImprovements applied: {improvement_result.get('completed_improvements', 0)}/"
-                    f"{improvement_result.get('required_improvements', self.required_successful_improvements)}"
-                )
+            if improvement_result:
+                if improvement_result.get("validation"):
+                    fast_details += (
+                        f"\nImprovements applied: {improvement_result.get('completed_improvements', 0)}/"
+                        f"{improvement_result.get('required_improvements', self.required_successful_improvements)}"
+                    )
                 if iteration_error_msg:
                     fast_details += f"\nIteration warning: {iteration_error_msg}"
             self.enhanced_ui.update_main_content(
@@ -707,6 +850,17 @@ class IntelligentAutopilot:
 
         return {
             "success": success,
+            "core_success": core_success,
+            "project_improvement_policy": self.project_improvement_policy.model_dump(mode="json"),
+            "project_improvement_status": (
+                "skipped"
+                if not self.project_improvement_policy.enabled or improvement_result is None
+                else "succeeded"
+                if improvement_result.get("success")
+                else "interrupted"
+                if improvement_result.get("status") == "interrupted"
+                else "failed"
+            ),
             "goal": goal,
             "semantic_analysis": semantic,
             "fast_path": True,
@@ -768,7 +922,7 @@ class IntelligentAutopilot:
         display_payload = typed_input.to_params()
         session_id = self.session_id or "unknown"
         task_id = str(task.id)
-        call_id = f"{task_id}:{step_id}"
+        call_id = self._new_non_loop_call_id(task_id, step_id)
         event_emitter = ToolEventEmitter(self)
         tool_context = event_emitter.build_context(
             task_id=task_id,
@@ -777,6 +931,15 @@ class IntelligentAutopilot:
             call_id=call_id,
             tool_name=tool_name,
             input_metadata=typed_input,
+        )
+        tool_context = tool_context.model_copy(
+            update={
+                "attributes": {
+                    **tool_context.attributes,
+                    "execution_route": "fast_registry",
+                    "runtime_phase": self._diagnostic_phase(),
+                }
+            }
         )
         tool_call = event_emitter.create_tool_call(
             session_id=session_id,
@@ -843,6 +1006,7 @@ class IntelligentAutopilot:
             session_id=self.session_id or "unknown",
             turn_id=1,
         )
+        self._record_durable_tool_started(tool_call)
 
         tool_events.append(
             event_emitter.emit(
@@ -854,7 +1018,146 @@ class IntelligentAutopilot:
                 tool_context=tool_context,
             )
         )
-        exec_result, retry_history = self._execute_tool_with_fast_retry(selection)
+        scope_failure = self._fast_mutation_scope_failure(task, selection)
+        if scope_failure is not None:
+            return self._fast_tool_failure_result(
+                tool_call=tool_call,
+                tool_context=tool_context,
+                input_metadata=typed_input,
+                tool_events=tool_events,
+                event_emitter=event_emitter,
+                failure=scope_failure,
+                timeout_override=timeout_override,
+            )
+
+        guard_error = self.tool_planning_task_executor.guard_preselected_tool_call(
+            task,
+            tool_call,
+            selection,
+        )
+        if guard_error is not None:
+            return self._fast_tool_failure_result(
+                tool_call=tool_call,
+                tool_context=tool_context,
+                input_metadata=typed_input,
+                tool_events=tool_events,
+                event_emitter=event_emitter,
+                failure=guard_error.failure or FailureMetadata(
+                    error_type=guard_error.error_type,
+                    error_message=guard_error.error_message,
+                ),
+                timeout_override=timeout_override,
+            )
+
+        controller = getattr(self, "runtime_controller", None)
+        if self._fast_mutation_targets(selection) and task.validation_command:
+            set_pending_verification = getattr(controller, "set_pending_verification", None)
+            if callable(set_pending_verification):
+                set_pending_verification(
+                    VerificationPlanMetadata(
+                        reason="Fast mutation must retain the task's exact validation command.",
+                        commands=[task.validation_command],
+                        target_files=list(task.write_files),
+                    )
+                )
+        replay_tool_result = getattr(controller, "replay_tool_result", None)
+        exec_result = (
+            replay_tool_result(tool_call, selection)
+            if callable(replay_tool_result)
+            else None
+        )
+        retry_history: list[dict[str, Any]] = []
+        before_hashes: dict[str, str | None] = {}
+        if exec_result is None:
+            prepare_tool_call = getattr(controller, "prepare_tool_call", None)
+            if callable(prepare_tool_call) and not prepare_tool_call(tool_call, selection):
+                return self._fast_tool_failure_result(
+                    tool_call=tool_call,
+                    tool_context=tool_context,
+                    input_metadata=typed_input,
+                    tool_events=tool_events,
+                    event_emitter=event_emitter,
+                    failure=FailureMetadata(
+                        error_type="CheckpointPrepareFailed",
+                        error_message="Mutation was not executed because its prepared checkpoint was not durable.",
+                        recovery_strategy="Restore checkpoint storage before retrying the mutation.",
+                    ),
+                    timeout_override=timeout_override,
+                )
+            before_hashes = self._fast_mutation_hashes(selection)
+            exec_result, retry_history = self._execute_tool_with_fast_retry(selection)
+            no_observed_diff = bool(
+                exec_result.success
+                and self._fast_mutation_targets(selection)
+                and not self._fast_mutation_has_observed_diff(selection, before_hashes)
+            )
+            observed_result = exec_result
+            if no_observed_diff:
+                failure_error = ExecutionError(
+                    error_type="NoObservedFileMutation",
+                    error_message="The requested fast mutation produced no target-file diff.",
+                    recoverable=False,
+                    retry_recommended=False,
+                )
+                if hasattr(exec_result, "model_copy"):
+                    observed_result = exec_result.model_copy(
+                        update={
+                            "success": False,
+                            "status": ExecutionStatus.FAILED,
+                            "error": failure_error,
+                        }
+                    )
+                else:
+                    observed_result = SimpleNamespace(
+                        **{
+                            **vars(exec_result),
+                            "success": False,
+                            "status": ExecutionStatus.FAILED,
+                            "error": failure_error,
+                        }
+                    )
+            observe_tool_result = getattr(controller, "observe_tool_result", None)
+            if callable(observe_tool_result) and not observe_tool_result(tool_call, selection, observed_result):
+                return self._fast_tool_failure_result(
+                    tool_call=tool_call,
+                    tool_context=tool_context,
+                    input_metadata=typed_input,
+                    tool_events=tool_events,
+                    event_emitter=event_emitter,
+                    failure=FailureMetadata(
+                        error_type="CheckpointObservationFailed",
+                        error_message="Tool returned, but its result could not be durably observed.",
+                        recovery_strategy="Reconcile the indeterminate side effect before retrying.",
+                    ),
+                    timeout_override=timeout_override,
+                    attempts_used=getattr(exec_result, "attempt_number", 1),
+                    retry_history=retry_history,
+                )
+            if no_observed_diff:
+                return self._fast_tool_failure_result(
+                    tool_call=tool_call,
+                    tool_context=tool_context,
+                    input_metadata=typed_input,
+                    tool_events=tool_events,
+                    event_emitter=event_emitter,
+                    failure=FailureMetadata(
+                        error_type="NoObservedFileMutation",
+                        error_message="The requested fast mutation produced no target-file diff.",
+                        details={"target_files": sorted(before_hashes)},
+                    ),
+                    timeout_override=timeout_override,
+                    attempts_used=getattr(exec_result, "attempt_number", 1),
+                    retry_history=retry_history,
+                )
+
+        state = getattr(controller, "state", None)
+        updater = getattr(controller, "state_updater", None)
+        if (
+            not bool(getattr(exec_result, "recovery_already_applied", False))
+            and state is not None
+            and updater is not None
+        ):
+            updater.apply_tool_result(state, selection, exec_result)
         if self.enhanced_ui:
             status = "completed" if exec_result.success else "failed"
             self._set_dashboard_tool_status(
@@ -916,6 +1219,7 @@ class IntelligentAutopilot:
             tool_context=tool_context,
             tool_events=tool_events,
         )
+        self._record_durable_tool_terminal(tool_call, result)
         self.logger.log_event(
             "tool_executed",
             {
@@ -934,6 +1238,255 @@ class IntelligentAutopilot:
             session_id=self.session_id or "unknown",
             turn_id=1,
         )
+        return result
+
+    def _build_durable_tool_identity(
+        self,
+        *,
+        task: Task,
+        step_id: str,
+        tool_name: str,
+        input_metadata: ToolInputMetadata,
+        execution_route: str = "module_owned",
+    ) -> tuple[ToolCallMetadata, ToolContextMetadata]:
+        """Build the existing typed call identity for non-loop tool execution."""
+        session_id = self.session_id or "unknown"
+        task_id = str(task.id)
+        call_id = self._new_non_loop_call_id(task_id, step_id)
+        emitter = ToolEventEmitter(self)
+        tool_context = emitter.build_context(
+            task_id=task_id,
+            session_id=session_id,
+            step_id=step_id,
+            call_id=call_id,
+            tool_name=tool_name,
+            input_metadata=input_metadata,
+        )
+        tool_context = tool_context.model_copy(
+            update={
+                "attributes": {
+                    **tool_context.attributes,
+                    "execution_route": execution_route,
+                    "runtime_phase": self._diagnostic_phase(),
+                }
+            }
+        )
+        tool_call = emitter.create_tool_call(
+            session_id=session_id,
+            task_id=task_id,
+            step_id=step_id,
+            call_id=call_id,
+            tool_name=tool_name,
+            input_metadata=input_metadata,
+            tool_context=tool_context,
+            status="pending",
+            reason=execution_route,
+        )
+        return tool_call, tool_context
+
+    @staticmethod
+    def _new_non_loop_call_id(task_id: str, step_id: str) -> str:
+        return f"{task_id}:{step_id}:{uuid.uuid4().hex[:12]}"
+
+    def _record_durable_tool_started(self, tool_call: ToolCallMetadata) -> None:
+        diagnostics = self.runtime_diagnostics_hooks
+        if diagnostics is None:
+            return
+        try:
+            diagnostics.on_tool_started(tool_call=tool_call)
+        except Exception as exc:
+            self._log_diagnostics_bridge_failure("started", tool_call, exc)
+
+    def _record_durable_tool_terminal(
+        self,
+        tool_call: ToolCallMetadata,
+        result: ToolExecutionEnvelopeMetadata,
+    ) -> None:
+        diagnostics = self.runtime_diagnostics_hooks
+        if diagnostics is None:
+            return
+        try:
+            if result.success:
+                diagnostics.on_tool_completed(
+                    tool_execution=result,
+                    task_id=tool_call.task_id,
+                    session_id=tool_call.session_id,
+                )
+                return
+            failure = result.failure or FailureMetadata(
+                error_type="ToolExecutionFailed",
+                error_message=f"{result.tool_name} failed",
+            )
+            diagnostics.on_tool_failed(
+                ToolErrorMetadata(
+                    session_id=tool_call.session_id,
+                    task_id=tool_call.task_id,
+                    step_id=tool_call.step_id,
+                    call_id=tool_call.call_id,
+                    tool_name=tool_call.tool_name,
+                    error_type=failure.error_type,
+                    error_message=failure.error_message,
+                    recoverable=failure.recoverable,
+                    suggested_recovery=failure.recovery_strategy or "",
+                    failure=failure,
+                    input_metadata=result.input_metadata,
+                    tool_context=result.tool_context,
+                    round_index=tool_call.round_index,
+                )
+            )
+        except Exception as exc:
+            self._log_diagnostics_bridge_failure("terminal", tool_call, exc)
+
+    def _log_diagnostics_bridge_failure(
+        self,
+        stage: str,
+        tool_call: ToolCallMetadata,
+        exc: Exception,
+    ) -> None:
+        try:
+            self.logger.log_event(
+                "runtime_diagnostics_hook_failed",
+                {
+                    "stage": stage,
+                    "tool": tool_call.tool_name,
+                    "call_id": tool_call.call_id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                session_id=tool_call.session_id,
+                turn_id=1,
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _fast_mutation_targets(selection: ToolSelection) -> list[str]:
+        return file_mutation_targets(selection)
+
+    @staticmethod
+    def _normalized_scope_path(raw_path: str) -> str:
+        return str(Path(raw_path).expanduser().resolve(strict=False))
+
+    def _fast_mutation_scope_failure(
+        self,
+        task: Task,
+        selection: ToolSelection,
+    ) -> FailureMetadata | None:
+        targets = self._fast_mutation_targets(selection)
+        if not targets:
+            return None
+        controller = getattr(self, "runtime_controller", None)
+        state = getattr(controller, "state", None)
+        execution_mode = str(getattr(getattr(state, "execution_mode", ""), "value", getattr(state, "execution_mode", "")))
+        if execution_mode == "read_only":
+            return FailureMetadata(
+                error_type="ReadOnlyExecutionMode",
+                error_message="Fast mutation is forbidden by the root read-only execution mode.",
+                details={"target_files": targets},
+            )
+        if str(task.kind).lower() in {"inspect", "inspection", "analysis", "investigate", "codebase_understanding"}:
+            return FailureMetadata(
+                error_type="ReadOnlyTaskKind",
+                error_message=f"Task kind {task.kind} cannot authorize a file mutation.",
+                details={"target_files": targets},
+            )
+        allowed = {
+            self._normalized_scope_path(str(path))
+            for path in task.write_files
+            if str(path).strip()
+        }
+        if not allowed:
+            return FailureMetadata(
+                error_type="MissingTaskWriteScope",
+                error_message="Fast mutation requires explicit Task.write_files authority.",
+                details={"target_files": targets},
+            )
+        requested = {self._normalized_scope_path(path) for path in targets}
+        outside = sorted(requested - allowed)
+        if outside:
+            return FailureMetadata(
+                error_type="TaskWriteScopeViolation",
+                error_message="Fast mutation target is outside Task.write_files authority.",
+                details={"target_files": sorted(requested), "allowed_write_files": sorted(allowed)},
+            )
+        constraint_check = getattr(controller, "session_constraint_violation", None)
+        if callable(constraint_check):
+            violation = constraint_check(
+                selection,
+                task_validation_command=str(task.validation_command or ""),
+            )
+            if violation is not None:
+                return FailureMetadata(
+                    error_type="SessionConstraintViolation",
+                    error_message=f"Active session constraint denied this mutation: {violation.value}",
+                    details={
+                        "violation_code": violation.value,
+                        "target_files": sorted(requested),
+                    },
+                )
+        return None
+
+    def _fast_mutation_hashes(self, selection: ToolSelection) -> dict[str, str | None]:
+        hashes: dict[str, str | None] = {}
+        for raw_path in self._fast_mutation_targets(selection):
+            normalized = self._normalized_scope_path(raw_path)
+            path = Path(normalized)
+            try:
+                hashes[normalized] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+            except OSError:
+                hashes[normalized] = None
+        return hashes
+
+    def _fast_mutation_has_observed_diff(
+        self,
+        selection: ToolSelection,
+        before_hashes: dict[str, str | None],
+    ) -> bool:
+        if not before_hashes:
+            return True
+        return self._fast_mutation_hashes(selection) != before_hashes
+
+    def _fast_tool_failure_result(
+        self,
+        *,
+        tool_call: ToolCallMetadata,
+        tool_context: ToolContextMetadata,
+        input_metadata: ToolInputMetadata,
+        tool_events: list[Any],
+        event_emitter: ToolEventEmitter,
+        failure: FailureMetadata,
+        timeout_override: int | None,
+        attempts_used: int = 0,
+        retry_history: list[dict[str, Any]] | None = None,
+    ) -> ToolExecutionEnvelopeMetadata:
+        tool_events.append(
+            event_emitter.emit(
+                task_id=tool_call.task_id,
+                tool_call=tool_call,
+                event_type="error",
+                status="error",
+                input_metadata=input_metadata,
+                tool_context=tool_context,
+                failure=failure,
+                recoverable=failure.recoverable,
+            )
+        )
+        result = ToolExecutionEnvelopeMetadata(
+            tool_name=tool_call.tool_name,
+            step_id=tool_call.step_id,
+            status=ResultStatus.FAIL,
+            success=False,
+            input_metadata=input_metadata,
+            failure=failure,
+            timeout_override=timeout_override,
+            attempts_used=attempts_used,
+            retry_count=max(0, attempts_used - 1),
+            retry_history=retry_history or [],
+            call_id=tool_call.call_id,
+            tool_context=tool_context,
+            tool_events=tool_events,
+        )
+        self._record_durable_tool_terminal(tool_call, result)
         return result
 
     def _apply_project_command_context(self, tool_name: str, input_metadata: ToolInputMetadata) -> ToolInputMetadata:
@@ -957,6 +1510,9 @@ class IntelligentAutopilot:
             rewritten_command = self._rewrite_project_command(input_metadata.command, environment)
             if rewritten_command != input_metadata.command:
                 updates["command"] = rewritten_command
+                updates["requested_command"] = input_metadata.requested_command or input_metadata.command
+                updates["effective_interpreter"] = str(environment.get("python_command") or "") or None
+        updates["environment_id"] = str(environment.get("environment_id") or "") or None
         if not updates:
             return input_metadata
         return input_metadata.model_copy(update=updates)
@@ -1030,8 +1586,9 @@ class IntelligentAutopilot:
             match = self._environment_for_path(candidate, environments)
             if match:
                 return match
-        if len(environments) == 1:
-            return next(iter(environments.values()))
+        ready_environments = [environment for environment in environments.values() if self._ready_environment(environment)]
+        if len(ready_environments) == 1:
+            return ready_environments[0]
         return {}
 
     def _environment_for_path(self, path: Path, environments: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1040,6 +1597,8 @@ class IntelligentAutopilot:
         except OSError:
             resolved = path
         for project_path, environment in environments.items():
+            if not self._ready_environment(environment):
+                continue
             try:
                 project = Path(project_path).expanduser().resolve()
             except OSError:
@@ -1047,6 +1606,15 @@ class IntelligentAutopilot:
             if resolved == project or project in resolved.parents:
                 return environment
         return {}
+
+    @staticmethod
+    def _ready_environment(environment: dict[str, Any]) -> bool:
+        return (
+            str(environment.get("readiness") or "") == "ready"
+            and bool(str(environment.get("environment_id") or "").strip())
+            and bool(str(environment.get("python_command") or environment.get("python_executable") or "").strip())
+            and bool(str(environment.get("command_cwd") or environment.get("project_path") or "").strip())
+        )
 
     def _rewrite_project_command(self, command: str, environment: dict[str, Any]) -> str:
         try:
@@ -1196,6 +1764,8 @@ class IntelligentAutopilot:
         results: list[TaskExecutionResult],
     ) -> ToolExecutionEnvelopeMetadata | None:
         """Generate README.md once after successful project/file creation."""
+        if not self._should_auto_finalize_readme(goal):
+            return None
         if self._results_include_tool(results, "readme_tool"):
             return None
 
@@ -1211,6 +1781,9 @@ class IntelligentAutopilot:
             id=str(uuid.uuid4()),
             description=f"Generate README.md for {project_path}",
             priority=TaskPriority.MEDIUM,
+            kind="documentation",
+            read_files=list(written_files),
+            write_files=[str(project_path / "README.md")],
         )
         readme_result = self._execute_fast_tool(
             task=task,
@@ -1252,6 +1825,42 @@ class IntelligentAutopilot:
         )
         return readme_result
 
+    @staticmethod
+    def _should_auto_finalize_readme(goal: str) -> bool:
+        lowered = str(goal or "").lower()
+        creation_intent = any(
+            term in lowered
+            for term in (
+                "build ",
+                "create ",
+                "develop ",
+                "generate ",
+                "scaffold ",
+                "创建",
+                "开发",
+                "搭建",
+                "新建",
+                "生成",
+            )
+        )
+        project_surface = any(
+            term in lowered
+            for term in (
+                " app",
+                " application",
+                " project",
+                " script",
+                " tool",
+                " website",
+                "应用",
+                "工具",
+                "项目",
+                "网站",
+                "脚本",
+            )
+        )
+        return creation_intent and project_surface
+
     def _run_iterative_improvement(
         self,
         *,
@@ -1260,6 +1869,8 @@ class IntelligentAutopilot:
         written_files: list[str],
         run_command: str = "",
         readme_path: str | Path | None = None,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
     ) -> dict[str, Any] | None:
         """Run fixed-count validation and improvement loop."""
         return self.project_improvement_runtime.run(
@@ -1268,6 +1879,22 @@ class IntelligentAutopilot:
             written_files=written_files,
             run_command=run_command,
             readme_path=readme_path,
+            session_constraints=(
+                session_constraints
+                if session_constraints is not None
+                else getattr(getattr(self, "runtime_controller", None), "state", None).session_constraints
+                if getattr(getattr(self, "runtime_controller", None), "state", None) is not None
+                else None
+            ),
+            session_ingress_state=(
+                session_ingress_state
+                if session_ingress_state is not None
+                else (
+                    self._current_execution_context.get("session_ingress_state")
+                    if isinstance(getattr(self, "_current_execution_context", None), dict)
+                    else None
+                )
+            ),
         )
 
     def _sync_project_environment(
@@ -1282,7 +1909,42 @@ class IntelligentAutopilot:
         goal: str = "",
         stack_preset_update: dict[str, Any] | None = None,
         parent_task_id: str | None = None,
+        environment_operation: EnvironmentOperation = EnvironmentOperation.SETUP,
+        approval_granted: bool = False,
     ) -> ToolExecutionEnvelopeMetadata:
+        if not self.auto_approve and not approval_granted:
+            from memory.agents.project_environment_tool import inspect_project_environment
+
+            preflight = inspect_project_environment(
+                project_path=project_path,
+                written_files=written_files,
+                entry_files=entry_files,
+                run_command=run_command,
+            )
+            if not self._confirm_environment_setup(preflight):
+                reason = "Environment setup approval was not granted."
+                return ToolExecutionEnvelopeMetadata(
+                    tool_name="project_environment_tool",
+                    step_id=step_id,
+                    status=ResultStatus.FAIL,
+                    success=False,
+                    input_metadata=ToolInputMetadata.from_mapping(
+                        "project_environment_tool",
+                        {
+                            "project_path": str(project_path),
+                            "environment_operation": environment_operation,
+                            "written_files": written_files,
+                            "entry_files": entry_files,
+                            "run_command": run_command,
+                        },
+                    ),
+                    failure=FailureMetadata(
+                        error_type="EnvironmentSetupApprovalRequired",
+                        error_message=reason,
+                        recoverable=True,
+                        retry_recommended=True,
+                    ),
+                )
         if self.enhanced_ui and parent_task_id:
             self._set_dashboard_task_status(parent_task_id, "running")
             self.enhanced_ui.set_current_task_state(
@@ -1298,6 +1960,7 @@ class IntelligentAutopilot:
             "goal": goal,
             "stack_preset_update": stack_preset_update or {},
             "env_name": ".venv",
+            "environment_operation": environment_operation,
             "install": True,
         }
         result = self._execute_project_environment_agent_tool(
@@ -1385,6 +2048,110 @@ class IntelligentAutopilot:
             )
         return result
 
+    def _ensure_environment_for_task(
+        self,
+        task: Task,
+        context: TaskExecutionContext,
+    ) -> str | None:
+        """Attach or prepare the project environment before Python validation."""
+
+        if not self._task_requires_python_environment(task):
+            return None
+        parent_context = context.parent_context or {}
+        raw_project = str(parent_context.get("project_path") or "").strip()
+        if not raw_project:
+            return "Environment not ready: Python validation requires an explicit project_path."
+        project_path = Path(raw_project).expanduser()
+        from memory.agents.project_environment_tool import inspect_project_environment
+
+        preflight = inspect_project_environment(
+            project_path=project_path,
+            written_files=[*task.read_files, *task.write_files],
+            entry_files=task.write_files,
+            run_command=task.validation_command,
+        )
+        if preflight.readiness == EnvironmentReadiness.READY:
+            self._project_environments[str(project_path.resolve())] = preflight.to_json_dict()
+            return None
+        if preflight.readiness == EnvironmentReadiness.BLOCKED:
+            return "Environment not ready: existing project environment is incomplete or corrupt."
+        if preflight.readiness not in {
+            EnvironmentReadiness.SETUP_REQUIRED,
+            EnvironmentReadiness.STALE,
+        }:
+            return f"Environment not ready: unsupported readiness {preflight.readiness.value}."
+        if not self.auto_approve and not self._confirm_environment_setup(preflight):
+            return "Environment setup approval was not granted; validation was not executed."
+        operation = (
+            EnvironmentOperation.SYNC
+            if preflight.readiness == EnvironmentReadiness.STALE
+            else EnvironmentOperation.SETUP
+        )
+        result = self._sync_project_environment(
+            task=task,
+            step_id=f"core_{task.id}_project_environment_{operation.value}",
+            project_path=project_path,
+            written_files=[*task.read_files, *task.write_files],
+            entry_files=task.write_files,
+            run_command=task.validation_command,
+            goal=str(parent_context.get("goal") or ""),
+            environment_operation=operation,
+            approval_granted=True,
+        )
+        if not result.success or result.output is None:
+            return f"Environment not ready: {result.error_message or 'project environment setup failed.'}"
+        payload = result.output.to_json_dict()
+        if not self._ready_environment(payload):
+            return "Environment not ready: setup did not produce a validated ready environment."
+        self._project_environments[str(project_path.resolve())] = payload
+        return None
+
+    def _prepare_session_environment(self, tasks: list[Task], goal: str) -> None:
+        """Run the shared pre-execution environment gate for the first Python validation."""
+
+        validation_task = next(
+            (task for task in tasks if self._task_requires_python_environment(task)),
+            None,
+        )
+        if validation_task is None:
+            return
+        context = TaskExecutionContext(
+            task=validation_task,
+            parent_context=self._task_parent_context(goal),
+        )
+        error = self._ensure_environment_for_task(validation_task, context)
+        if error:
+            raise RuntimeError(error)
+
+    @staticmethod
+    def _task_requires_python_environment(task: Task) -> bool:
+        command = str(task.validation_command or "").strip()
+        if not command:
+            return False
+        try:
+            executable = Path(shlex.split(command)[0]).name.lower()
+        except (ValueError, IndexError):
+            return False
+        return executable in {"python", "python3", "pytest", "py.test", "tox", "nox", "pip", "pip3"}
+
+    def _confirm_environment_setup(self, preflight: Any) -> bool:
+        if self.auto_approve:
+            return True
+        from ui.question_ui import QuestionUI
+
+        packages = ", ".join(preflight.missing_packages or preflight.detected_packages) or "none"
+        return QuestionUI(self.console).ask_confirm(
+            "environment_setup_approval",
+            "Prepare the project-local execution environment?",
+            title="Environment Setup Required",
+            description=(
+                f"Project: {preflight.project_path}\n"
+                f"Environment: {preflight.venv_path}\n"
+                f"Missing packages: {packages}"
+            ),
+            default=False,
+        )
+
     def _execute_project_environment_agent_tool(
         self,
         *,
@@ -1399,6 +2166,12 @@ class IntelligentAutopilot:
         tool_name = "project_environment_tool"
         typed_input = input_metadata
         input_payload = typed_input.to_params()
+        tool_call, tool_context = self._build_durable_tool_identity(
+            task=task,
+            step_id=step_id,
+            tool_name=tool_name,
+            input_metadata=typed_input,
+        )
         started = time.monotonic()
         if self.enhanced_ui:
             self._set_dashboard_tool_status(
@@ -1426,22 +2199,29 @@ class IntelligentAutopilot:
             session_id=self.session_id or "unknown",
             turn_id=1,
         )
+        self._record_durable_tool_started(tool_call)
 
         success = False
         output_metadata: ToolResultMetadata | None = None
-        error: str | None = None
-        error_type: str | None = None
+        failure: FailureMetadata | None = None
         try:
             typed_input.runtime_handles["_memory_store"] = self.memory_store
             output_metadata = project_environment_tool_executor(typed_input)
-            success = True
+            success = output_metadata.status == ResultStatus.SUCCESS
+            failure = output_metadata.failure if not success else None
         except Exception as exc:
-            error = str(exc)
-            error_type = exc.__class__.__name__
+            failure = FailureMetadata(
+                error_type=exc.__class__.__name__,
+                error_message=str(exc) or "Project environment sync failed.",
+            )
 
         duration_seconds = time.monotonic() - started
         status = ResultStatus.SUCCESS if success else ResultStatus.FAIL
-        failure = None if success else FailureMetadata(error_type=error_type or "ToolError", error_message=error or "Project environment sync failed.")
+        if not success and failure is None:
+            failure = FailureMetadata(
+                error_type="ToolError",
+                error_message="Project environment sync failed.",
+            )
         result = ToolExecutionEnvelopeMetadata(
             tool_name=tool_name,
             step_id=step_id,
@@ -1451,7 +2231,10 @@ class IntelligentAutopilot:
             output_metadata=output_metadata,
             failure=failure,
             duration_seconds=duration_seconds,
+            call_id=tool_call.call_id,
+            tool_context=tool_context,
         )
+        self._record_durable_tool_terminal(tool_call, result)
 
         if self.enhanced_ui:
             self._set_dashboard_tool_status(
@@ -1462,7 +2245,11 @@ class IntelligentAutopilot:
             )
             self.enhanced_ui.set_current_task_state(
                 title=f"Tool: {tool_name}",
-                details="Tool returned successfully" if success else summarize_environment_failure(error or ""),
+                details=(
+                    "Tool returned successfully"
+                    if success
+                    else summarize_environment_failure(failure.error_message if failure else "")
+                ),
                 status=status.value,
             )
 
@@ -1474,8 +2261,8 @@ class IntelligentAutopilot:
                 "tool": tool_name,
                 "success": success,
                 "status": status.value,
-                "error_type": error_type,
-                "error": error,
+                "error_type": failure.error_type if failure else None,
+                "error": failure.error_message if failure else None,
                 "duration_seconds": duration_seconds,
                 "attempts_used": 1,
                 "retry_count": 0,
@@ -1527,10 +2314,23 @@ class IntelligentAutopilot:
             input_metadata=input_metadata,
             executor=lambda metadata: (
                 metadata.runtime_handles.__setitem__("_llm_client", self.llm_client)
+                or metadata.runtime_handles.__setitem__("_runtime_budget", self._enhancement_runtime_budget())
+                or metadata.runtime_handles.__setitem__(
+                    "_enhancement_required",
+                    bool(self.project_improvement_policy.controls_top_level_success),
+                )
                 or project_improvement_tool_executor(metadata)
             ),
             parent_task_id=parent_task_id,
         )
+
+    def _enhancement_runtime_budget(self) -> RuntimeBudgetMetadata:
+        controller = getattr(self, "runtime_controller", None)
+        state = getattr(controller, "state", None)
+        budget = getattr(state, "budget", None)
+        if isinstance(budget, RuntimeBudgetMetadata):
+            return budget
+        return self._local_enhancement_runtime_budget
 
     def _execute_environment_fix_agent_tool(
         self,
@@ -1578,6 +2378,12 @@ class IntelligentAutopilot:
         """Run a module-owned tool and return the same envelope as registry-backed tools."""
         typed_input = input_metadata
         input_payload = typed_input.to_params()
+        tool_call, tool_context = self._build_durable_tool_identity(
+            task=task,
+            step_id=step_id,
+            tool_name=tool_name,
+            input_metadata=typed_input,
+        )
         started = time.monotonic()
         if self.enhanced_ui:
             self._set_dashboard_tool_status(
@@ -1605,21 +2411,28 @@ class IntelligentAutopilot:
             session_id=self.session_id or "unknown",
             turn_id=1,
         )
+        self._record_durable_tool_started(tool_call)
 
         success = False
         output_metadata: ToolResultMetadata | None = None
-        error: str | None = None
-        error_type: str | None = None
+        failure: FailureMetadata | None = None
         try:
             output_metadata = executor(typed_input)
-            success = True
+            success = output_metadata.status == ResultStatus.SUCCESS
+            failure = output_metadata.failure if not success else None
         except Exception as exc:
-            error = str(exc)
-            error_type = exc.__class__.__name__
+            failure = FailureMetadata(
+                error_type=exc.__class__.__name__,
+                error_message=str(exc) or f"{tool_name} failed.",
+            )
 
         duration_seconds = time.monotonic() - started
         status = ResultStatus.SUCCESS if success else ResultStatus.FAIL
-        failure = None if success else FailureMetadata(error_type=error_type or "ToolError", error_message=error or f"{tool_name} failed.")
+        if not success and failure is None:
+            failure = FailureMetadata(
+                error_type="ToolError",
+                error_message=f"{tool_name} failed.",
+            )
         result = ToolExecutionEnvelopeMetadata(
             tool_name=tool_name,
             step_id=step_id,
@@ -1629,7 +2442,10 @@ class IntelligentAutopilot:
             output_metadata=output_metadata,
             failure=failure,
             duration_seconds=duration_seconds,
+            call_id=tool_call.call_id,
+            tool_context=tool_context,
         )
+        self._record_durable_tool_terminal(tool_call, result)
 
         if self.enhanced_ui:
             self._set_dashboard_tool_status(
@@ -1640,7 +2456,11 @@ class IntelligentAutopilot:
             )
             self.enhanced_ui.set_current_task_state(
                 title=f"Tool: {tool_name}",
-                details="Tool returned successfully" if success else (error or f"{tool_name} failed."),
+                details=(
+                    "Tool returned successfully"
+                    if success
+                    else (failure.error_message if failure else f"{tool_name} failed.")
+                ),
                 status=status.value,
             )
 
@@ -1652,8 +2472,8 @@ class IntelligentAutopilot:
                 "tool": tool_name,
                 "success": success,
                 "status": status.value,
-                "error_type": error_type,
-                "error": error,
+                "error_type": failure.error_type if failure else None,
+                "error": failure.error_message if failure else None,
                 "duration_seconds": duration_seconds,
                 "attempts_used": 1,
                 "retry_count": 0,
@@ -1687,6 +2507,9 @@ class IntelligentAutopilot:
         readme_path: Path,
         completed_iteration: int,
         evaluation: EvaluationResult,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
+        context_projection: DerivedContextProjection | None = None,
     ) -> dict[str, Any]:
         prompt_context = self._build_prompt_context(
             original_goal=goal,
@@ -1719,11 +2542,44 @@ class IntelligentAutopilot:
                 "validation_result": evaluation.model_dump(),
                 "readme_path": str(readme_path),
                 "prompt_context": prompt_context,
+                "session_turn_source_hash": (
+                    session_turn_ledger_hash(session_ingress_state)
+                    if session_ingress_state is not None
+                    else None
+                ),
+                "_session_constraints": (
+                    session_constraints
+                    if session_constraints is not None
+                    else session_ingress_state.session_constraints
+                    if session_ingress_state is not None
+                    else None
+                ),
+                "_session_ingress_state": session_ingress_state,
+                "_context_projection": context_projection,
             }),
             parent_task_id=self._dashboard_stage_id("goal_maker"),
         )
         if tool_result.success and tool_result.output is not None:
             return tool_result.output.to_json_dict()
+        if self.project_improvement_policy.controls_top_level_success:
+            failure = tool_result.failure
+            failure_payload = (
+                failure.to_json_dict()
+                if hasattr(failure, "to_json_dict")
+                else failure.model_dump(mode="json")
+                if hasattr(failure, "model_dump")
+                else {"error_message": tool_result.error_message}
+            )
+            raise OpenPilotError(
+                tool_result.error_message
+                or "Required project_improvement_tool did not return a usable report.",
+                category=ErrorCategory.TERMINAL,
+                context={
+                    "failure_stage": "Project Improvement",
+                    "failed_tool": "project_improvement_tool",
+                    "tool_failure": failure_payload,
+                },
+            )
         fallback = {
             "summary": evaluation.summary,
             "improvement_opportunities": evaluation.improvement_opportunities,
@@ -2113,13 +2969,20 @@ class IntelligentAutopilot:
         files: list[str] = []
         seen: set[str] = set()
         for result in results:
+            observed_files = result.attributes.get("observed_modified_files") or []
+            if isinstance(observed_files, list):
+                for path in observed_files:
+                    normalized = str(path or "").strip()
+                    if normalized and normalized not in seen:
+                        files.append(normalized)
+                        seen.add(normalized)
             task_payload = result.result_metadata.result if result.result_metadata else None
             tool_results = getattr(task_payload, "attributes", {}).get("tool_results", []) if task_payload else []
             for tool_result in tool_results:
                 if not isinstance(tool_result, dict):
                     continue
                 tool_name = tool_result.get("tool_name") or tool_result.get("tool")
-                if tool_name != "file_writer" or not tool_result.get("success"):
+                if tool_name not in {"file_writer", "file_patch_writer", "file_delete_tool"} or not tool_result.get("success"):
                     continue
                 output = self._tool_result_payload(tool_result)
                 path = self._file_path_from_payload(output)
@@ -2158,6 +3021,10 @@ class IntelligentAutopilot:
         return None
 
     def _infer_project_path_from_files(self, goal: str, written_files: list[str]) -> Path | None:
+        current_context = getattr(self, "_current_execution_context", {}) or {}
+        explicit_project = str(current_context.get("project_path") or "").strip()
+        if explicit_project:
+            return Path(explicit_project).expanduser().resolve()
         goal_path = self._extract_goal_path(goal)
         if goal_path:
             path = Path(goal_path).expanduser()
@@ -2209,7 +3076,15 @@ class IntelligentAutopilot:
         """Execute with standard console output."""
         return self.runtime_controller.run(goal, context, mode="standard")
 
-    def _execute_tasks(self, tasks: list[Task], goal: str = "") -> list[TaskExecutionResult]:
+    def _execute_tasks(
+        self,
+        tasks: list[Task],
+        goal: str = "",
+        *,
+        prior_results: list[TaskExecutionResult] | None = None,
+        start_index: int = 0,
+        progress_sink: Any | None = None,
+    ) -> list[TaskExecutionResult]:
         """Execute tasks using the runtime task graph and selected UI mode."""
         self._log_task_execution_event(
             "task_execution_started",
@@ -2245,9 +3120,23 @@ class IntelligentAutopilot:
         )
 
         if self.use_enhanced_ui:
-            results = self._execute_tasks_enhanced_ui(tasks, execution_order, goal)
+            results = self._execute_tasks_enhanced_ui(
+                tasks,
+                execution_order,
+                goal,
+                prior_results=prior_results,
+                start_index=start_index,
+                progress_sink=progress_sink,
+            )
         else:
-            results = self._execute_tasks_standard(tasks, execution_order, goal)
+            results = self._execute_tasks_standard(
+                tasks,
+                execution_order,
+                goal,
+                prior_results=prior_results,
+                start_index=start_index,
+                progress_sink=progress_sink,
+            )
 
         execution_state = IntelligentAutopilot._execution_state_metadata(tasks, results, execution_batches)
         self._log_task_execution_event(
@@ -2312,6 +3201,8 @@ class IntelligentAutopilot:
             TaskGraphNodeMetadata(
                 task_id=task.id,
                 description=task.description,
+                priority=task.priority.value if hasattr(task.priority, "value") else str(task.priority),
+                estimated_effort=task.estimated_effort,
                 task_kind=task.kind,
                 difficulty=task.difficulty,
                 required_inputs=list(task.required_inputs),
@@ -2321,6 +3212,13 @@ class IntelligentAutopilot:
                 dependencies=list(task.dependencies),
                 can_run_parallel=task.can_run_parallel,
                 validation_command=task.validation_command,
+                tags=list(task.tags),
+                problem_resolution_depth=int(task.attributes.get("problem_resolution_depth") or 0),
+                problem_resolution_parent_task_id=(
+                    str(task.attributes.get("problem_resolution_parent_task_id"))
+                    if task.attributes.get("problem_resolution_parent_task_id")
+                    else None
+                ),
             )
             for task in tasks
         ]
@@ -2422,11 +3320,10 @@ class IntelligentAutopilot:
         failed = [result.task_id for result in results if result.status == TaskStatus.FAILED and not result.attributes.get("blocked")]
         blocked = [result.task_id for result in results if result.attributes.get("blocked")]
         changed_files: list[str] = []
-        task_by_id = {task.id: task for task in tasks}
         for result in results:
-            task = task_by_id.get(result.task_id)
-            if task is not None:
-                changed_files.extend(task.write_files)
+            observed = result.attributes.get("observed_modified_files") or []
+            if isinstance(observed, list):
+                changed_files.extend(str(path) for path in observed if str(path).strip())
         return ExecutionStateMetadata(
             completed_tasks=completed,
             failed_tasks=failed,
@@ -2503,6 +3400,11 @@ class IntelligentAutopilot:
                     "task_id": result.task_id,
                     "description": task.description if task else None,
                     "status": result.status.value if hasattr(result.status, "value") else str(result.status),
+                    "failure_type": (
+                        result.result_metadata.failure.error_type
+                        if result.result_metadata is not None and result.result_metadata.failure is not None
+                        else None
+                    ),
                     "error": result.error,
                     "result_summary": self._history_result_summary(result),
                     "observed_paths": self._history_observed_paths(result),
@@ -2511,6 +3413,8 @@ class IntelligentAutopilot:
         return history
 
     def _history_result_summary(self, result: TaskExecutionResult) -> Any:
+        if result.result_summary is not None:
+            return result.result_summary
         if result.result_metadata is None:
             return None
         summary: dict[str, Any] = {}
@@ -2535,6 +3439,8 @@ class IntelligentAutopilot:
         return summary
 
     def _history_observed_paths(self, result: TaskExecutionResult) -> list[str]:
+        if result.observed_paths:
+            return list(result.observed_paths)
         if result.result_metadata is None:
             return []
         artifact = result.result_metadata.result
@@ -2628,9 +3534,18 @@ class IntelligentAutopilot:
             return f"{value[:max_length]}..."
         return value
 
-    def _execute_tasks_enhanced_ui(self, tasks: list[Task], execution_order: list[str], goal: str) -> list[TaskExecutionResult]:
+    def _execute_tasks_enhanced_ui(
+        self,
+        tasks: list[Task],
+        execution_order: list[str],
+        goal: str,
+        *,
+        prior_results: list[TaskExecutionResult] | None = None,
+        start_index: int = 0,
+        progress_sink: Any | None = None,
+    ) -> list[TaskExecutionResult]:
         """Execute tasks with enhanced UI updates."""
-        results = []
+        results = list(prior_results or [])
 
         self.logger.log_event(
             "task_execution_started",
@@ -2648,7 +3563,11 @@ class IntelligentAutopilot:
             success=None,
         )
 
-        for index, task_id in enumerate(execution_order, 1):
+        for zero_based_index, task_id in enumerate(
+            execution_order[start_index:],
+            start=start_index,
+        ):
+            index = zero_based_index + 1
             task = next((candidate for candidate in tasks if candidate.id == task_id), None)
             if not task:
                 self.logger.log_event(
@@ -2673,6 +3592,8 @@ class IntelligentAutopilot:
                     details=result.error or "Task blocked",
                     status="failed",
                 )
+                if progress_sink is not None:
+                    progress_sink(tasks, execution_order, results, zero_based_index + 1)
                 self.enhanced_ui.log_activity("error", f"✗ Task {index} blocked: {result.error}")
                 self.logger.log_event(
                     "task_execution_blocked",
@@ -2806,6 +3727,9 @@ class IntelligentAutopilot:
                         task.error = result.error
                         task.result = result.result_metadata
 
+                if progress_sink is not None:
+                    progress_sink(tasks, execution_order, results, zero_based_index + 1)
+
             except Exception as exc:
                 error_msg = f"Task execution exception: {str(exc)}"
                 self.enhanced_ui.log_activity("error", f"✗ Task {index} exception: {str(exc)}")
@@ -2840,6 +3764,8 @@ class IntelligentAutopilot:
                     details=error_msg,
                     status="failed",
                 )
+                if progress_sink is not None:
+                    progress_sink(tasks, execution_order, results, zero_based_index + 1)
 
         completed = len([result for result in results if result.status == TaskStatus.COMPLETED])
         failed = len([result for result in results if result.status == TaskStatus.FAILED])
@@ -2869,9 +3795,18 @@ class IntelligentAutopilot:
 
         return results
 
-    def _execute_tasks_standard(self, tasks: list[Task], execution_order: list[str], goal: str) -> list[TaskExecutionResult]:
+    def _execute_tasks_standard(
+        self,
+        tasks: list[Task],
+        execution_order: list[str],
+        goal: str,
+        *,
+        prior_results: list[TaskExecutionResult] | None = None,
+        start_index: int = 0,
+        progress_sink: Any | None = None,
+    ) -> list[TaskExecutionResult]:
         """Execute tasks with standard console output."""
-        results = []
+        results = list(prior_results or [])
         self._log_task_execution_event(
             "standard_task_execution_started",
             input_summary={"total_tasks": len(tasks), "execution_order": execution_order},
@@ -2888,7 +3823,11 @@ class IntelligentAutopilot:
         ) as progress:
             task_progress = progress.add_task("Executing tasks...", total=len(tasks))
 
-            for index, task_id in enumerate(execution_order, 1):
+            for zero_based_index, task_id in enumerate(
+                execution_order[start_index:],
+                start=start_index,
+            ):
+                index = zero_based_index + 1
                 task = next((candidate for candidate in tasks if candidate.id == task_id), None)
                 if not task:
                     continue
@@ -2915,6 +3854,8 @@ class IntelligentAutopilot:
                         f"  [red]✗[/red] Task {index}: {task.description[:60]} (blocked)"
                     )
                     self.console.print(f"    [red]Error: {result.error}[/red]")
+                    if progress_sink is not None:
+                        progress_sink(tasks, execution_order, results, zero_based_index + 1)
                     progress.advance(task_progress)
                     continue
 
@@ -2962,6 +3903,9 @@ class IntelligentAutopilot:
 
                 if result.error:
                     self.console.print(f"    [red]Error: {result.error}[/red]")
+
+                if progress_sink is not None:
+                    progress_sink(tasks, execution_order, results, zero_based_index + 1)
 
                 progress.advance(task_progress)
 
@@ -3020,6 +3964,25 @@ class IntelligentAutopilot:
         goal: str,
     ) -> TaskExecutionResult:
         """Execute one task and locally decompose recoverable hard planning gaps."""
+        ensure_environment = getattr(runtime, "_ensure_environment_for_task", None)
+        if callable(ensure_environment):
+            environment_error = ensure_environment(task, context)
+            if environment_error:
+                return TaskExecutionResult(
+                    task_id=task.id,
+                    status=TaskStatus.FAILED,
+                    error=environment_error,
+                    result_metadata=TaskResultMetadata(
+                        task_id=task.id,
+                        status=ResultStatus.FAIL,
+                        failure=FailureMetadata(
+                            error_type="EnvironmentNotReady",
+                            error_message=environment_error,
+                            recoverable=True,
+                            retry_recommended=True,
+                        ),
+                    ),
+                )
         result = runtime._execute_task(task, context)
         resolution_plan = IntelligentAutopilot._failure_resolution_plan(result)
         if not resolution_plan or resolution_plan.get("strategy") != "decompose":

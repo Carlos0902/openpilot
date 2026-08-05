@@ -7,9 +7,23 @@ from pathlib import Path
 from typing import Any
 
 from autonomous_iteration.models import EvaluationResult, IterationResult
+from autonomous_iteration.enhancement_completion_budget import EnhancementCompletionBudgetCoordinator
 from autonomous_iteration.task_models import Task, TaskPriority
 from autonomous_iteration.tool.project_improvement_tool import project_state_reader_executor
-from metadata import FailureMetadata, ResultStatus, ToolExecutionEnvelopeMetadata, ToolInputMetadata
+from memory.context_projection import (
+    build_derived_context_projection,
+)
+from metadata import (
+    DerivedContextProjection,
+    EnhancementCompletionRequirement,
+    FailureMetadata,
+    ResultStatus,
+    RuntimeBudgetMetadata,
+    ToolExecutionEnvelopeMetadata,
+    ToolInputMetadata,
+    SessionConstraintState,
+    SessionIngressState,
+)
 from tools.environment_fix_tool import environment_fix_tool_executor, summarize_environment_failure
 
 
@@ -40,6 +54,8 @@ class ProjectImprovementRuntime:
         written_files: list[str],
         run_command: str = "",
         readme_path: str | Path | None = None,
+        session_constraints: SessionConstraintState | None = None,
+        session_ingress_state: SessionIngressState | None = None,
     ) -> dict[str, Any] | None:
         """Run the instruction-defined autonomous iteration pipeline."""
         if not self.autopilot.enable_iterative_improvement or not written_files:
@@ -51,6 +67,24 @@ class ProjectImprovementRuntime:
         project_path = Path(project_path).expanduser()
         readme_path = Path(readme_path).expanduser() if readme_path else project_path / "README.md"
         self._active_pipeline_task_id = f"{self.autopilot.session_id or 'session'}:project_improvement_runtime:{uuid.uuid4().hex[:8]}"
+        budget_resolver = getattr(self.autopilot, "_enhancement_runtime_budget", None)
+        runtime_budget = budget_resolver() if callable(budget_resolver) else getattr(
+            self.autopilot.iterative_improvement,
+            "runtime_budget",
+            RuntimeBudgetMetadata(),
+        )
+        self.autopilot.iterative_improvement.runtime_budget = runtime_budget
+        self.autopilot.iterative_improvement.enhancement_budget = EnhancementCompletionBudgetCoordinator(
+            runtime_budget
+        )
+        improvement_policy = getattr(self.autopilot, "project_improvement_policy", None)
+        self.autopilot.iterative_improvement.enhancement_requirement = (
+            EnhancementCompletionRequirement.REQUIRED
+            if bool(
+                getattr(improvement_policy, "controls_top_level_success", False)
+            )
+            else EnhancementCompletionRequirement.OPTIONAL
+        )
 
         self._log("pipeline_start", {"goal": goal, "project_path": str(project_path)}, {"written_files": len(written_files)})
         self._emit_trajectory_event(
@@ -90,7 +124,17 @@ class ProjectImprovementRuntime:
         environment_payload = environment_result.output
         run_command = str(environment_payload.get("run_command") or run_command)
 
+        latest_context_projection: DerivedContextProjection | None = None
+
         def on_progress(event: str, payload: dict[str, Any]) -> None:
+            nonlocal latest_context_projection
+            if event == "context_loader" and session_ingress_state is not None:
+                context_payload = payload.get("context") if isinstance(payload, dict) else None
+                if isinstance(context_payload, dict):
+                    latest_context_projection = build_derived_context_projection(
+                        context_payload,
+                        session_ingress_state,
+                    )
             self.autopilot._handle_iteration_progress(event, payload)
             self._emit_trajectory_event(
                 "pipeline_progress",
@@ -128,6 +172,9 @@ class ProjectImprovementRuntime:
                 readme_path=readme_path,
                 completed_iteration=completed_iteration,
                 evaluation=evaluation,
+                session_constraints=session_constraints,
+                session_ingress_state=session_ingress_state,
+                context_projection=latest_context_projection,
             )
 
         def read_project_state(evaluation: EvaluationResult, iteration: int) -> dict[str, Any]:
@@ -141,20 +188,54 @@ class ProjectImprovementRuntime:
                 iteration=iteration,
             )
 
-        result = self.autopilot.iterative_improvement.run_project_pipeline(
-            goal=goal,
-            project_path=project_path,
-            written_files=written_files,
-            run_command=run_command,
-            readme_path=readme_path,
-            apply_improvement=apply_improvement,
-            analyze_improvements=analyze_improvements,
-            read_project_state=read_project_state,
-            on_progress=on_progress,
-        )
+        interrupted = False
+        try:
+            result = self.autopilot.iterative_improvement.run_project_pipeline(
+                goal=goal,
+                project_path=project_path,
+                written_files=written_files,
+                run_command=run_command,
+                readme_path=readme_path,
+                apply_improvement=apply_improvement,
+                analyze_improvements=analyze_improvements,
+                read_project_state=read_project_state,
+                on_progress=on_progress,
+                session_constraints=session_constraints,
+                session_ingress_state=session_ingress_state,
+            )
+        except Exception as exc:
+            interrupted = True
+            error_type = type(exc).__name__
+            failure_reason = str(exc) or error_type
+            result = {
+                "success": False,
+                "status": "interrupted",
+                "error_type": error_type,
+                "failure_stage": "Project Improvement",
+                "failed_tool": "project_improvement_runtime",
+                "failure_reason": failure_reason,
+                "partial_success": False,
+                "completed_improvements": 0,
+                "required_improvements": self.autopilot.required_successful_improvements,
+                "completed_iterations": 0,
+                "required_iterations": self.autopilot.required_successful_improvements,
+            }
+            self._emit_trajectory_event(
+                "pipeline_failed",
+                input_summary={"goal": goal, "project_path": str(project_path)},
+                output_summary={
+                    "status": result["status"],
+                    "error_type": error_type,
+                    "failure_stage": result["failure_stage"],
+                    "failure_reason": failure_reason,
+                },
+                success=False,
+                error=failure_reason,
+            )
 
-        self._finalize_dashboard(result)
-        self._log_project_improvement_result(goal, project_path, written_files, result)
+        if not interrupted:
+            self._finalize_dashboard(result)
+            self._log_project_improvement_result(goal, project_path, written_files, result)
         self._log(
             "pipeline_end",
             {"goal": goal, "project_path": str(project_path)},
@@ -171,6 +252,8 @@ class ProjectImprovementRuntime:
             input_summary={"goal": goal, "project_path": str(project_path)},
             output_summary={
                 "success": bool(result.get("success")),
+                "status": result.get("status"),
+                "error_type": result.get("error_type"),
                 "failure_stage": result.get("failure_stage"),
                 "failed_tool": result.get("failed_tool"),
                 "completed_improvements": result.get("completed_improvements"),

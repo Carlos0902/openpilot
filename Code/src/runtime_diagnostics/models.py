@@ -33,6 +33,7 @@ class EventRecord(BaseModel):
     run_id: str
     sequence: int
     event_type: str
+    idempotency_key: str = ""
     task_id: str = ""
     session_id: str = ""
     phase: str = ""

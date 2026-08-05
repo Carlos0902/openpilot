@@ -15,6 +15,15 @@ from core.instrumented_llm import InstrumentedLLMClient
 from core.model_health import run_startup_model_health_check
 from core.openpilot_log import OpenPilotLogger
 from runtime_diagnostics.hooks import get_default_hooks
+from metadata import (
+    ConversationIdentity,
+    ProjectImprovementPolicy,
+    ProjectImprovementPolicySource,
+    ProjectImprovementRequirement,
+    SessionIngressState,
+    SessionTurn,
+)
+from memory.session_ingress import SessionIngress
 from ui.enhanced_ui import EnhancedUI
 from ui.progress_tracker import ProgressTracker
 
@@ -47,10 +56,32 @@ class OpenPilotRuntimeOptions:
 
     improvement_iterations: int = DEFAULT_IMPROVEMENT_ITERATIONS
     prompt_for_project_improvement_iterations: bool = False
+    improvement_requirement: ProjectImprovementRequirement = ProjectImprovementRequirement.OPTIONAL
+    improvement_policy_source: ProjectImprovementPolicySource = ProjectImprovementPolicySource.AUTOMATIC_DEFAULT
 
     @property
     def enable_iterative_improvement(self) -> bool:
         return self.improvement_iterations > 0
+
+    @property
+    def project_improvement_policy(self) -> ProjectImprovementPolicy:
+        if self.improvement_iterations <= 0:
+            return ProjectImprovementPolicy(
+                requirement=ProjectImprovementRequirement.DISABLED,
+                source=self.improvement_policy_source,
+                target_successes=0,
+                max_attempts=0,
+            )
+        from autonomous_iteration.agents.iteration_agent import AutonomousIterationAgent
+
+        return ProjectImprovementPolicy(
+            requirement=self.improvement_requirement,
+            source=self.improvement_policy_source,
+            target_successes=self.improvement_iterations,
+            max_attempts=AutonomousIterationAgent.minimum_attempt_budget(
+                self.improvement_iterations
+            ),
+        )
 
 
 def _format_failure_details(result: dict) -> str:
@@ -274,6 +305,28 @@ def run_enhanced_cli(
         logger = None
 
     # Check for once mode
+    resume_run_id = str(getattr(args, "resume_run_id", None) or "").strip()
+    resume_checkpoint_id = str(getattr(args, "resume_checkpoint_id", None) or "").strip()
+    if bool(resume_run_id) != bool(resume_checkpoint_id):
+        enhanced_ui.show_error(
+            "Resume arguments incomplete",
+            "--resume-run-id and --resume-checkpoint-id must be provided together.",
+        )
+        return 2
+    if resume_run_id and resume_checkpoint_id:
+        runtime_options = _runtime_options_from_args(args, project_prompt_default=False)
+        return _run_resume_mode(
+            run_id=resume_run_id,
+            checkpoint_id=resume_checkpoint_id,
+            project_path=str(getattr(args, "project_path", None) or "").strip(),
+            ui=enhanced_ui,
+            tracker=tracker,
+            logger=logger,
+            settings=settings,
+            runtime_options=runtime_options,
+            llm_client=llm_client,
+        )
+
     if hasattr(args, 'once') and args.once:
         runtime_options = _runtime_options_from_args(args, project_prompt_default=False)
         return _run_once_mode(
@@ -284,6 +337,8 @@ def run_enhanced_cli(
             settings,
             runtime_options,
             llm_client,
+            checkpointing_enabled=bool(getattr(args, "checkpointing", False)),
+            project_path=str(getattr(args, "project_path", None) or "").strip(),
         )
 
     runtime_options = _runtime_options_from_args(args, project_prompt_default=True)
@@ -315,6 +370,12 @@ def _runtime_options_from_args(
         return OpenPilotRuntimeOptions(
             improvement_iterations=configured,
             prompt_for_project_improvement_iterations=False,
+            improvement_requirement=(
+                ProjectImprovementRequirement.REQUIRED
+                if configured > 0
+                else ProjectImprovementRequirement.DISABLED
+            ),
+            improvement_policy_source=ProjectImprovementPolicySource.USER_SELECTED,
         )
 
     return OpenPilotRuntimeOptions(
@@ -331,6 +392,9 @@ def _run_once_mode(
     settings: LLMSettings,
     runtime_options: OpenPilotRuntimeOptions,
     llm_client = None,
+    *,
+    checkpointing_enabled: bool = False,
+    project_path: str = "",
 ) -> int:
     """Run a single goal and exit."""
     from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
@@ -344,6 +408,9 @@ def _run_once_mode(
         classification = _classify_task_route(goal)
         _show_task_route(ui, classification)
         execution_context = _build_task_execution_context(source="cli_once", classification=classification)
+        execution_context["checkpointing_enabled"] = checkpointing_enabled
+        if project_path:
+            execution_context["project_path"] = str(Path(project_path).expanduser().resolve())
         if _runtime_diagnostics_enabled() and classification.route != "agent_generator":
             get_default_hooks().on_route_selected(
                 task_id=str(execution_context["task_id"]),
@@ -368,6 +435,7 @@ def _run_once_mode(
             tracker=tracker,
             enable_iterative_improvement=runtime_options.enable_iterative_improvement,
             required_successful_improvements=runtime_options.improvement_iterations,
+            project_improvement_policy=runtime_options.project_improvement_policy,
             prompt_for_project_improvement_iterations=runtime_options.prompt_for_project_improvement_iterations,
             runtime_diagnostics_hooks=diagnostics_hooks,
         )
@@ -400,6 +468,97 @@ def _run_once_mode(
         traceback.print_exc()
         return 2
 
+
+def _run_resume_mode(
+    *,
+    run_id: str,
+    checkpoint_id: str,
+    project_path: str,
+    ui: EnhancedUI,
+    tracker: ProgressTracker,
+    logger,
+    settings: LLMSettings,
+    runtime_options: OpenPilotRuntimeOptions,
+    llm_client=None,
+) -> int:
+    """Resume one explicitly identified checkpoint and show its preflight result."""
+    from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
+    from core.llm import LLMClient
+
+    if not project_path:
+        ui.show_error("Resume blocked", "--project-path is required for project identity verification.")
+        return 2
+    diagnostics_hooks = get_default_hooks() if _runtime_diagnostics_enabled() else None
+    if diagnostics_hooks is None:
+        ui.show_error("Resume blocked", "Runtime diagnostics/checkpoint storage is disabled.")
+        return 2
+    autopilot = IntelligentAutopilot(
+        llm_client=llm_client or LLMClient(settings),
+        console=ui.console,
+        auto_approve=True,
+        logger=logger,
+        use_enhanced_ui=True,
+        enhanced_ui=ui,
+        tracker=tracker,
+        enable_iterative_improvement=runtime_options.enable_iterative_improvement,
+        required_successful_improvements=runtime_options.improvement_iterations,
+        project_improvement_policy=runtime_options.project_improvement_policy,
+        prompt_for_project_improvement_iterations=runtime_options.prompt_for_project_improvement_iterations,
+        runtime_diagnostics_hooks=diagnostics_hooks,
+    )
+    try:
+        with ui.live_session(f"Resuming checkpoint {checkpoint_id[:12]}..."):
+            result = autopilot.resume(
+                run_id,
+                checkpoint_id,
+                {"project_path": str(Path(project_path).expanduser().resolve())},
+            )
+        title, message, succeeded = _resume_outcome_display(result)
+        if succeeded:
+            ui.show_success(title, message)
+            return 0
+        ui.show_error(title, message)
+        return 2
+    except Exception as exc:
+        ui.show_error("Resume failed", str(exc))
+        return 2
+
+
+def _resume_outcome_display(result: dict[str, object]) -> tuple[str, str, bool]:
+    """Render typed recovery control fields; explanation text is display-only."""
+    decision_value = result.get("resume_decision")
+    decision = decision_value if isinstance(decision_value, dict) else {}
+    fallback_value = decision.get("fallback")
+    fallback = fallback_value if isinstance(fallback_value, dict) else {}
+    recoverability = str(decision.get("recoverability") or "")
+    reason_code = str(decision.get("reason_code") or "")
+    fallback_action = str(fallback.get("action") or "none")
+    explanation = str(decision.get("reason") or "").strip()
+    instructions = str(fallback.get("instructions") or "").strip()
+    succeeded = bool(result.get("success"))
+
+    if succeeded and recoverability == "already_complete":
+        title = "Checkpoint already completed"
+    elif succeeded:
+        title = "Checkpoint resumed successfully"
+    elif recoverability == "not_recoverable":
+        title = "Checkpoint is not recoverable"
+    elif recoverability == "recoverable_after_action":
+        title = "Resume action required"
+    else:
+        title = "Resume failed"
+
+    control_summary = ", ".join(
+        item
+        for item in (
+            f"reason={reason_code}" if reason_code else "",
+            f"fallback={fallback_action}" if fallback_action else "",
+        )
+        if item
+    )
+    details = [item for item in (control_summary, explanation, instructions) if item]
+    message = "\n".join(details) or str(result.get("resume_status") or "resume result unavailable")
+    return title, message, succeeded
 
 def _run_interactive_mode(
     ui: EnhancedUI,
@@ -439,6 +598,15 @@ def _run_interactive_mode(
         complete_while_typing=True,  # 输入时自动显示补全菜单
         vi_mode=False,  # 确保使用 Emacs 模式（支持上下键历史）
     )
+    conversation_id = f"conversation_{uuid4().hex}"
+    ingress_state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id=conversation_id,
+            run_id=f"run_{uuid4().hex}",
+            turn_index=0,
+            project_root=str(Path.cwd().expanduser().resolve()),
+        )
+    )
 
     ui.console.print()
     ui.console.print("[bold green]Welcome to OpenPilot Interactive Mode[/bold green]")
@@ -477,6 +645,10 @@ def _run_interactive_mode(
                     _show_config(ui, settings, runtime_options)
                     continue
 
+                if user_input.startswith("/constraints"):
+                    ingress_state = _handle_constraint_command(user_input, ingress_state, ui)
+                    continue
+
                 # Handle clear command
                 if user_input.strip() == "/clear":
                     ui.console.clear()
@@ -485,7 +657,15 @@ def _run_interactive_mode(
 
                 # Handle goal execution
                 if not user_input.startswith("/"):
-                    _execute_goal_interactive(user_input, ui, tracker, llm_client, logger, runtime_options)
+                    ingress_state = _execute_goal_interactive(
+                        user_input,
+                        ui,
+                        tracker,
+                        llm_client,
+                        logger,
+                        runtime_options,
+                        ingress_state=ingress_state,
+                    )
                 else:
                     ui.console.print(f"[yellow]Unknown command: {user_input}[/yellow]")
                     ui.console.print("[dim]Type /help for available commands[/dim]")
@@ -509,14 +689,38 @@ def _execute_goal_interactive(
     llm_client,
     logger,
     runtime_options: OpenPilotRuntimeOptions,
+    *,
+    ingress_state: SessionIngressState | None = None,
 ):
     """Execute a goal in interactive mode."""
     if _handle_shell_state_command(goal, ui):
-        return None
+        return ingress_state if ingress_state is not None else None
 
     classification = _classify_task_route(goal)
     _show_task_route(ui, classification)
+    if ingress_state is not None:
+        run_id = f"run_{uuid4().hex}"
+        turn = SessionTurn(
+            identity=ConversationIdentity(
+                conversation_id=ingress_state.identity.conversation_id,
+                run_id=run_id,
+                turn_index=ingress_state.identity.turn_index + 1,
+                project_root=ingress_state.identity.project_root,
+            ),
+            message_id=f"message_{uuid4().hex}",
+            role="user",
+            content=goal,
+        )
+        ingress_state = SessionIngress.open_turn(ingress_state, turn)
     execution_context = _build_task_execution_context(source="interactive", classification=classification)
+    if ingress_state is not None:
+        execution_context.update(
+            {
+                "conversation_id": ingress_state.identity.conversation_id,
+                "run_id": ingress_state.identity.run_id,
+                "session_ingress_state": ingress_state,
+            }
+        )
     if _runtime_diagnostics_enabled() and classification.route != "agent_generator":
         get_default_hooks().on_route_selected(
             task_id=str(execution_context["task_id"]),
@@ -525,8 +729,58 @@ def _execute_goal_interactive(
             reason=classification.reason,
         )
     if classification.route == "agent_generator":
-        return _execute_agent_generator(goal, ui, llm_client, logger)
-    return _execute_autopilot(goal, ui, tracker, llm_client, logger, runtime_options, context=execution_context)
+        result = _execute_agent_generator(goal, ui, llm_client, logger)
+    else:
+        result = _execute_autopilot(goal, ui, tracker, llm_client, logger, runtime_options, context=execution_context)
+    if ingress_state is None:
+        return result
+    assistant_turn = SessionTurn(
+        identity=ConversationIdentity(
+            conversation_id=ingress_state.identity.conversation_id,
+            run_id=ingress_state.identity.run_id,
+            turn_index=ingress_state.identity.turn_index + 1,
+            project_root=ingress_state.identity.project_root,
+        ),
+        message_id=f"message_{uuid4().hex}",
+        role="assistant",
+        content=f"Execution result: {str(result)[:2000]}",
+    )
+    return SessionIngress.open_turn(ingress_state, assistant_turn)
+
+
+def _handle_constraint_command(
+    user_input: str,
+    ingress_state: SessionIngressState,
+    ui: EnhancedUI,
+) -> SessionIngressState:
+    """Apply explicit in-session constraint commands without Provider calls."""
+    parts = user_input.strip().split()
+    command = parts[0].casefold() if parts else "/constraints"
+    if command == "/constraints" and len(parts) == 1:
+        pending = [proposal.proposal_id for proposal in ingress_state.pending_proposals if proposal.status == "proposed"]
+        active = [entry.constraint_key for entry in ingress_state.session_constraints.active_entries]
+        ui.console.print(f"[dim]Pending constraint proposals: {pending or 'none'}[/dim]")
+        ui.console.print(f"[dim]Active session constraints: {active or 'none'}[/dim]")
+        return ingress_state
+    try:
+        if command in {"/confirm", "/reject"} and len(parts) == 2:
+            if command == "/confirm":
+                return SessionIngress.confirm_proposal(
+                    ingress_state,
+                    proposal_id=parts[1],
+                    confirmation_turn=ingress_state.identity.turn_index + 1,
+                )
+            return SessionIngress.reject_proposal(ingress_state, proposal_id=parts[1])
+        if command == "/revoke" and len(parts) == 2:
+            return SessionIngress.revoke_constraint(
+                ingress_state,
+                constraint_key=parts[1],
+                turn_index=ingress_state.identity.turn_index + 1,
+            )
+        ui.console.print("[yellow]Usage: /constraints | /confirm <proposal_id> | /reject <proposal_id> | /revoke <constraint_key>[/yellow]")
+    except ValueError as exc:
+        ui.console.print(f"[yellow]Constraint command rejected: {exc}[/yellow]")
+    return ingress_state
 
 
 def _classify_task_route(task: str) -> "TaskRouteMetadata":
@@ -644,6 +898,7 @@ def _execute_autopilot(
             tracker=tracker,
             enable_iterative_improvement=runtime_options.enable_iterative_improvement,
             required_successful_improvements=runtime_options.improvement_iterations,
+            project_improvement_policy=runtime_options.project_improvement_policy,
             prompt_for_project_improvement_iterations=runtime_options.prompt_for_project_improvement_iterations,
             runtime_diagnostics_hooks=diagnostics_hooks,
         )
@@ -674,6 +929,7 @@ def _execute_autopilot(
                 ui.show_success("Goal completed!")
         else:
             ui.show_error("Autopilot execution failed", _format_failure_details(result))
+        return result
 
     except Exception as e:
         ui.console.print()
@@ -681,6 +937,11 @@ def _execute_autopilot(
         ui.show_error("Autopilot execution failed", str(e))
         import traceback
         traceback.print_exc()
+        return {
+            "success": False,
+            "failure_stage": "CLI",
+            "failure_reason": str(e),
+        }
 
 
 def _execute_agent_generator(task: str, ui: EnhancedUI, llm_client = None, logger = None) -> bool:

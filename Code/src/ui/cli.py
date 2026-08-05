@@ -33,6 +33,14 @@ def _add_run_parser(subparsers, name: str, help_text: str) -> None:
     run_parser.add_argument("--log-file", default=str(DEFAULT_OPENPILOT_LOG), help="JSONL log file")
     run_parser.add_argument("--constraint", action="append", default=[], help="Reserved for compatibility")
     run_parser.add_argument("--once", help="Run one goal and exit")
+    run_parser.add_argument(
+        "--checkpointing",
+        action="store_true",
+        help="Persist durable runtime checkpoints for this run",
+    )
+    run_parser.add_argument("--project-path", help="Explicit project root used for checkpoint identity")
+    run_parser.add_argument("--resume-run-id", help="Existing trajectory run ID to resume")
+    run_parser.add_argument("--resume-checkpoint-id", help="Explicit checkpoint ID to resume")
     run_parser.add_argument("--ignore-memory", action="store_true", help="Reserved for compatibility")
     run_parser.add_argument(
         "--improvement-iterations",

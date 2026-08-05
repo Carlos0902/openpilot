@@ -3,12 +3,37 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from core.llm import LLMMessage, LLMRequest
+from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from metadata import (
+    EnhancementCompletionComplexity,
+    EnhancementCompletionDecisionValue,
+    EnhancementCompletionRequest,
+    EnhancementCompletionRequirement,
+    RuntimeBudgetMetadata,
+)
+
+from core.exceptions import (
+    ContextAssemblyBudgetError,
+    InvalidLLMResponseError,
+    LLMProviderError,
+)
+from core.reasoning import routine_tool_reasoning_policy
+from autonomous_iteration.enhancement_completion_budget import EnhancementCompletionBudgetCoordinator
+from memory.context_assembly import build_context_candidate_request
+from metadata import ContextRequestPurpose
+from autonomous_iteration.models import ProjectStateSnapshot
+from autonomous_iteration.project_improvement_context import (
+    build_project_improvement_analysis_candidates,
+    compact_project_memory_record,
+)
+from memory.session_dialog import session_turn_ledger_hash
+from metadata import DerivedContextProjection, SessionConstraintState, SessionIngressState
 from core.project_stack import load_project_stack_preset
 from memory.memory_models import MemoryType
 from memory.agents.project_environment_tool import (
@@ -25,10 +50,68 @@ from core.tool_contracts import (
 
 
 README_PREVIEW_LIMIT = 1200
-VALIDATION_PREVIEW_LIMIT = 1800
-PRODUCT_RUBRIC_PREVIEW_LIMIT = 1800
 PROJECT_FILE_PREVIEW_LIMIT = 2400
 MAX_PROJECT_PREVIEWS = 6
+MAX_PROJECT_MANIFEST_FILES = 40
+_MANIFEST_EXCLUDED_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"}
+_DELTA_TEXT_LIMIT = 480
+_DELTA_LIST_LIMIT = 5
+
+
+class _ProjectImprovementDelta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    changed_signals: list[str] = Field(default_factory=list, max_length=_DELTA_LIST_LIMIT)
+    proposed_actions: list[str] = Field(default_factory=list, max_length=_DELTA_LIST_LIMIT)
+    next_decision_or_goal: str = Field(default="", max_length=_DELTA_TEXT_LIMIT)
+    must_satisfy: list[str] = Field(default_factory=list, max_length=_DELTA_LIST_LIMIT)
+    blocking_risks: list[str] = Field(default_factory=list, max_length=_DELTA_LIST_LIMIT)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=8)
+    stack_preset_patch: "_StackPresetPatch" = Field(default_factory=lambda: _StackPresetPatch())
+
+    @model_validator(mode="after")
+    def _validate_bounded_values(self) -> "_ProjectImprovementDelta":
+        for values in (
+            self.changed_signals,
+            self.proposed_actions,
+            self.must_satisfy,
+            self.blocking_risks,
+        ):
+            if any(not value.strip() or len(value) > _DELTA_TEXT_LIMIT for value in values):
+                raise ValueError("delta list values must be non-empty and bounded")
+        if any(not value.strip() or len(value) > 160 for value in self.evidence_ids):
+            raise ValueError("evidence IDs must be non-empty and bounded")
+        return self
+
+
+class _StackPresetPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_surface: str | None = Field(default=None, max_length=80)
+    architecture: str | None = Field(default=None, max_length=80)
+    frontend_language: str | None = Field(default=None, max_length=80)
+    frontend_frameworks: list[str] | None = Field(default=None, max_length=6)
+    backend_language: str | None = Field(default=None, max_length=80)
+    backend_frameworks: list[str] | None = Field(default=None, max_length=6)
+    ui_strategy: str | None = Field(default=None, max_length=120)
+    ui_review_required: bool | None = None
+    rationale: list[str] | None = Field(default=None, max_length=6)
+    evidence: list[str] | None = Field(default=None, max_length=8)
+
+    @model_validator(mode="after")
+    def _bound_lists(self) -> "_StackPresetPatch":
+        for values in (
+            self.frontend_frameworks,
+            self.backend_frameworks,
+            self.rationale,
+            self.evidence,
+        ):
+            if values and any(not item.strip() or len(item) > 240 for item in values):
+                raise ValueError("stack patch list values must be non-empty and bounded")
+        return self
+
+
+_ProjectImprovementDelta.model_rebuild()
 
 
 PROJECT_STATE_READER_DEFINITION = ToolDefinition(
@@ -96,7 +179,7 @@ PROJECT_IMPROVEMENT_TOOL_DEFINITION = ToolDefinition(
 def project_state_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
     params = input_metadata.to_params()
     """Read current project state using a strict tool-style contract."""
-    project_path = Path(params["project_path"]).expanduser()
+    project_path = Path(params["project_path"]).expanduser().resolve(strict=False)
     goal = str(params.get("goal") or "")
     written_files = _coerce_path_list(params.get("written_files", []))
     readme_path = Path(params.get("readme_path") or project_path / "README.md").expanduser()
@@ -119,36 +202,52 @@ def project_state_reader_executor(input_metadata: ToolInputMetadata) -> ToolResu
                 limit=8,
             )
             memory_records = [
-                {
-                    "id": memory.id,
-                    "type": memory.memory_type.value,
-                    "content": memory.content[:500],
-                    "tags": memory.tags,
-                    "confidence": memory.confidence,
-                    "attributes": memory.attributes,
-                }
+                compact_project_memory_record(_memory_mapping(memory))
                 for memory in query_result.memories
+                if _memory_matches_project(memory, project_path)
             ]
             if hasattr(memory_store, "load_all"):
+                all_iteration_memories = sorted(
+                    (
+                        memory
+                        for memory_type in (MemoryType.PROJECT, MemoryType.TASK)
+                        for memory in memory_store.load_all(memory_type)
+                        if "autonomous_iteration" in memory.tags
+                        and _memory_matches_project(memory, project_path)
+                    ),
+                    key=lambda memory: memory.timestamp,
+                )
+                latest_iteration_memories = all_iteration_memories[-3:]
+                exact_iteration_memories = [
+                    memory
+                    for memory in all_iteration_memories
+                    if _memory_matches_exact_identity(
+                        memory,
+                        goal=goal,
+                        memory_query=memory_query,
+                    )
+                ][-3:]
+                iteration_memories = [
+                    *latest_iteration_memories,
+                    *exact_iteration_memories,
+                ]
+                known_ids = {item["id"] for item in memory_records}
+                for memory in iteration_memories:
+                    if memory.id in known_ids:
+                        continue
+                    memory_records.append(compact_project_memory_record(_memory_mapping(memory)))
+                    known_ids.add(memory.id)
                 env_memories = [
                     memory
                     for memory in memory_store.load_all(MemoryType.SHORT_TERM)
-                    if "project_environment" in memory.tags and project_path.name in memory.tags
+                    if "project_environment" in memory.tags
+                    and _memory_matches_project(memory, project_path)
                 ][-3:]
-                known_ids = {item["id"] for item in memory_records}
                 for memory in env_memories:
                     if memory.id in known_ids:
                         continue
-                    memory_records.append(
-                        {
-                            "id": memory.id,
-                            "type": memory.memory_type.value,
-                            "content": memory.content[:500],
-                            "tags": memory.tags,
-                            "confidence": memory.confidence,
-                            "attributes": memory.attributes,
-                        }
-                    )
+                    memory_records.append(compact_project_memory_record(_memory_mapping(memory)))
+                    known_ids.add(memory.id)
         except Exception:
             memory_records = []
 
@@ -168,6 +267,19 @@ def project_state_reader_executor(input_metadata: ToolInputMetadata) -> ToolResu
             }
         )
         safe_target_files.append(str(path))
+    known_summary_paths = {str(item.get("path") or "") for item in file_summaries}
+    for path in _project_file_manifest(project_path):
+        if str(path) in known_summary_paths:
+            continue
+        file_summaries.append(
+            {
+                "path": str(path),
+                "name": path.name,
+                "suffix": path.suffix,
+                "chars": "",
+                "preview": "",
+            }
+        )
 
     validation_errors = validation_context.get("validation_errors") if isinstance(validation_context, dict) else []
     validation_warnings = validation_context.get("warnings") if isinstance(validation_context, dict) else []
@@ -211,6 +323,62 @@ def project_state_reader_executor(input_metadata: ToolInputMetadata) -> ToolResu
     }
 
 
+def _memory_mapping(memory: Any) -> dict[str, Any]:
+    return {
+        "id": memory.id,
+        "type": memory.memory_type.value,
+        "content": memory.content,
+        "tags": memory.tags,
+        "confidence": memory.confidence,
+        "timestamp": memory.timestamp,
+        "attributes": memory.attributes,
+    }
+
+
+def _memory_matches_project(memory: Any, project_path: Path) -> bool:
+    """Fail closed for project-scoped memories without current-project identity."""
+
+    attributes = getattr(memory, "attributes", {}) or {}
+    raw_path = attributes.get("project_path") if isinstance(attributes, dict) else None
+    if raw_path:
+        try:
+            return Path(str(raw_path)).expanduser().resolve() == project_path.resolve()
+        except OSError:
+            return False
+    memory_type = getattr(memory, "memory_type", None)
+    if memory_type in {MemoryType.FEEDBACK, MemoryType.LONG_TERM}:
+        return True
+    canonical_project = str(project_path.expanduser().resolve(strict=False)).casefold()
+    tags = {str(tag).strip().casefold() for tag in getattr(memory, "tags", []) if str(tag).strip()}
+    return canonical_project in tags
+
+
+def _memory_matches_exact_identity(
+    memory: Any,
+    *,
+    goal: str,
+    memory_query: str,
+) -> bool:
+    """Match typed iteration identity fields without fuzzy text inference."""
+
+    requested = {
+        str(value).strip().casefold()
+        for value in (goal, memory_query)
+        if str(value).strip()
+    }
+    if not requested:
+        return False
+    attributes = getattr(memory, "attributes", {}) or {}
+    if not isinstance(attributes, dict):
+        return False
+    recorded = {
+        str(attributes.get(key) or "").strip().casefold()
+        for key in ("goal", "selected_candidate_id", "selected_candidate")
+        if str(attributes.get(key) or "").strip()
+    }
+    return bool(requested & recorded)
+
+
 @metadata_tool_result('project_improvement_tool')
 def project_improvement_tool_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
     params = input_metadata.to_params()
@@ -224,11 +392,50 @@ def project_improvement_tool_executor(input_metadata: ToolInputMetadata) -> Tool
     readme_path = Path(params.get("readme_path") or project_path / "README.md").expanduser()
     prompt_context = params.get("prompt_context") if isinstance(params.get("prompt_context"), dict) else {}
     llm_client = params.get("_llm_client")
+    session_constraints = params.get("_session_constraints")
+    session_ingress_state = params.get("_session_ingress_state")
+    context_projection = params.get("_context_projection")
+    if session_constraints is not None and not isinstance(session_constraints, SessionConstraintState):
+        raise TypeError("session constraints must be a validated SessionConstraintState")
+    if session_ingress_state is not None and not isinstance(session_ingress_state, SessionIngressState):
+        raise TypeError("session ingress state must be a validated SessionIngressState")
+    if session_ingress_state is not None:
+        if session_constraints is not None and session_constraints.canonical_hash != session_ingress_state.session_constraints.canonical_hash:
+            raise ValueError("session ingress and explicit constraints differ")
+        session_constraints = session_ingress_state.session_constraints
+        expected_turn_hash = str(input_metadata.session_turn_source_hash or "")
+        if expected_turn_hash and expected_turn_hash != session_turn_ledger_hash(session_ingress_state):
+            raise ValueError("session turn source hash mismatch")
+    if context_projection is not None and not isinstance(context_projection, DerivedContextProjection):
+        raise TypeError("context projection must be a validated DerivedContextProjection")
+    if context_projection is not None:
+        if session_ingress_state is None or session_constraints is None:
+            raise ValueError("context projection requires session ingress and constraints")
+        if context_projection.session_turn_source_hash != session_turn_ledger_hash(session_ingress_state):
+            raise ValueError("context projection turn source hash mismatch")
+        if context_projection.session_constraints_hash != session_constraints.canonical_hash:
+            raise ValueError("context projection constraint hash mismatch")
+    runtime_budget = params.get("_runtime_budget")
+    if not isinstance(runtime_budget, RuntimeBudgetMetadata):
+        runtime_budget = RuntimeBudgetMetadata()
+    completion_budget = EnhancementCompletionBudgetCoordinator(runtime_budget)
 
     file_previews = _read_project_previews(project_path, written_files)
     fallback = _fallback_report(goal, validation_result)
-    fallback = _attach_prompt_context(fallback, prompt_context)
+    deterministic_stack_update = _deterministic_stack_patch(prompt_context)
+    fallback.update(
+        {
+            "project_path": str(project_path),
+            "goal": goal,
+            "iteration": iteration,
+            "stack_preset_update": deterministic_stack_update,
+        }
+    )
     if not llm_client or not hasattr(llm_client, "complete"):
+        if bool(params.get("_enhancement_required")):
+            raise LLMProviderError(
+                "Required project_improvement provider is unavailable."
+            )
         return _mark_fallback(fallback, "No LLM client available for project_improvement_tool.")
 
     readme_preview = _truncate_text(_read_text(readme_path), README_PREVIEW_LIMIT)
@@ -236,107 +443,241 @@ def project_improvement_tool_executor(input_metadata: ToolInputMetadata) -> Tool
     quality_rubric = prompt_context.get("quality_rubric") or []
     stack_preset = prompt_context.get("stack_preset") or {}
     ui_iteration_contract = prompt_context.get("ui_iteration_contract") or {}
-    product_rubric_text = _truncate_text(json.dumps(
-        {
-            "product_judgment": product_judgment,
-            "quality_rubric": quality_rubric,
-            "stack_preset": stack_preset,
-            "ui_iteration_contract": ui_iteration_contract,
-        },
-        ensure_ascii=False,
-        default=str,
-    ), PRODUCT_RUBRIC_PREVIEW_LIMIT)
-    validation_json = _truncate_text(
-        json.dumps(validation_result, ensure_ascii=False, default=str),
-        VALIDATION_PREVIEW_LIMIT,
+    project_state = ProjectStateSnapshot(
+        project_path=str(project_path),
+        goal=goal,
+        written_files=[str(path) for path in written_files],
+        file_summaries=[
+            {
+                "path": str(written_files[index]) if index < len(written_files) else f"preview-{index + 1}",
+                "name": Path(written_files[index]).name if index < len(written_files) else f"preview-{index + 1}",
+                "preview": preview,
+            }
+            for index, preview in enumerate(file_previews)
+        ]
+        + [
+            {
+                "path": str(path),
+                "name": path.name,
+                "suffix": path.suffix,
+                "chars": "",
+                "preview": "",
+            }
+            for path in _project_file_manifest(project_path)
+            if _canonical_path_key(path) not in {
+                _canonical_path_key(Path(item).expanduser()) for item in written_files
+            }
+        ],
+        readme_summary=readme_preview,
+        run_command=run_command,
+        validation_context=validation_result if isinstance(validation_result, dict) else {},
+        safe_target_files=[str(path) for path in written_files],
+        runtime_evidence=[run_command] if run_command else [],
+        test_evidence=_coerce_string_list(
+            validation_result.get("test_evidence") if isinstance(validation_result, dict) else []
+        ),
     )
-    prompt = f"""You are OpenPilot's Project Improvement Tool.
-Analyze the generated project after a successful hard validation pass.
-Return ONLY valid JSON. Do not include markdown.
-Do not reveal hidden chain-of-thought or private reasoning; provide concise public assessment only.
+    analysis_context = {
+        "summary": str(validation_result.get("summary") or "") if isinstance(validation_result, dict) else "",
+        "prompt_context": prompt_context,
+        "product_judgment": product_judgment,
+        "quality_rubric": quality_rubric,
+        "stack_preset": stack_preset,
+        "ui_iteration_contract": ui_iteration_contract,
+    }
 
-Original goal: {goal}
-Project path: {project_path}
-Completed successful iteration: {iteration}
-Run command: {run_command}
-Validation result JSON: {validation_json}
-Parent Prompt Context product rubric JSON: {product_rubric_text}
-
-README preview:
-{readme_preview}
-
-Project file previews:
-{chr(10).join(file_previews)}
-
-If a preview says it is truncated, do not assume the project file is incomplete merely because the preview ended.
-
-Evaluate improvement space comprehensively across:
-- functional completeness against the original goal
-- usability and user experience
-- runtime robustness and error handling
-- code structure, maintainability, and clarity
-- documentation, setup, and run instructions
-- installation/runtime environment risks
-- product fit: runtime shape, target platform, and whether the result matches normal expectations for this project type
-- UI impact: whether each user-facing capability has coherent controls, visible states, feedback, and navigation on the planned surface
-- technology-stack fit: whether frontend/backend languages and frameworks still match the persisted project stack preset
-
-Product-fit rule:
-- Treat the parent project objective, success metrics, and diagnosed evidence as the source of truth.
-- Prefer improvements with clear user or maintainer value over low-signal polish.
-- Do not replace the delivery surface or interaction model just because another implementation is easier.
-- Treat UI as part of a user-facing feature, not as optional polish after backend behavior is complete.
-- If the best next improvement changes delivery surface, frontend/backend languages, or frameworks, state that the project stack preset must be explicitly revised.
-
-Return JSON with exactly these keys:
-{{
-  "summary": "short public assessment",
-  "improvement_opportunities": ["specific opportunity"],
-  "recommended_actions": ["prioritized concrete action"],
-  "next_iteration_goal": "one focused goal for the next implementation iteration",
-  "must_implement_next": ["observable acceptance point for the next implementation"],
-  "blocking_risks": ["risk or empty"],
-  "stack_preset_update": {{"optional_field": "only include when an explicit architecture, language, framework, or UI-surface revision is necessary"}}
-}}
-"""
-
+    reservation = None
     try:
-        response = llm_client.complete(
-            LLMRequest(
-                messages=[LLMMessage(role="user", content=prompt)],
+        analysis_candidates = build_project_improvement_analysis_candidates(
+            project_state=project_state,
+            analysis_context=analysis_context,
+            completed_iteration=iteration,
+            session_constraints=session_constraints,
+            session_ingress_state=session_ingress_state,
+            context_projection=context_projection,
+        )
+        request = build_context_candidate_request(
+                llm_client,
+                purpose=ContextRequestPurpose.PROJECT_IMPROVEMENT,
+                candidates=analysis_candidates,
                 response_format="json_object",
                 temperature=0.2,
+            )
+        reservation_key = (
+            "project_improvement:"
+            f"{Path(project_path).resolve()}:{iteration}:"
+            f"{str(goal).strip()}"
+        )
+        budget_request = EnhancementCompletionRequest(
+            logical_key=reservation_key,
+            purpose=ContextRequestPurpose.PROJECT_IMPROVEMENT,
+            complexity=EnhancementCompletionComplexity.ROUTINE,
+            prompt_tokens=int(getattr(request.context_selection, "final_prompt_tokens", 0) or 0),
+            remaining_calls=max(1, 4 - iteration),
+            remaining_value=EnhancementCompletionDecisionValue.NORMAL,
+            requirement=(
+                EnhancementCompletionRequirement.REQUIRED
+                if bool(params.get("_enhancement_required"))
+                else EnhancementCompletionRequirement.OPTIONAL
             ),
-            max_retries=2,
+        )
+        reservation = completion_budget.reserve(
+            budget_request
+        )
+        if reservation is None:
+            if bool(params.get("_enhancement_required")):
+                raise ContextAssemblyBudgetError(["enhancement_completion_budget:project_improvement"])
+            return _mark_fallback(fallback, "Enhancement completion budget is insufficient for project analysis.")
+        request = request.model_copy(
+            update={
+                "max_tokens": reservation.max_tokens,
+                "trace_info": {
+                    **request.trace_info,
+                    "completion_budget": {
+                        "purpose": ContextRequestPurpose.PROJECT_IMPROVEMENT.value,
+                        "reservation_id": reservation.reservation_id,
+                        "reserved_tokens": reservation.max_tokens,
+                        "remaining_tokens": runtime_budget.enhancement_completion_tokens_remaining,
+                    },
+                },
+                "reasoning_policy": routine_tool_reasoning_policy(
+                    getattr(llm_client, "settings", None),
+                    routine=True,
+                ),
+            }
+        )
+        response = llm_client.complete(
+            request,
+            max_retries=1,
             use_cache=False,
         )
+        usage = getattr(response, "usage", None)
+        actual_tokens = None
+        if isinstance(usage, dict):
+            actual_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        completion_budget.reconcile(
+            reservation,
+            actual_tokens=int(actual_tokens) if actual_tokens is not None else None,
+            finish_reason=getattr(response, "finish_reason", None),
+            response_empty=not bool(str(getattr(response, "content", "") or "")),
+        )
+    except ContextAssemblyBudgetError:
+        raise
     except Exception as exc:
-        return _mark_fallback(fallback, f"LLM improvement analysis failed: {type(exc).__name__}: {str(exc)[:300]}")
+        if reservation is not None:
+            completion_budget.reconcile_failure(reservation, exc)
+        recovered = False
+        if (
+            reservation is not None
+            and isinstance(exc, InvalidLLMResponseError)
+            and str(getattr(exc, "finish_reason", "") or "").lower()
+            in {"length", "max_tokens"}
+        ):
+            recovery = completion_budget.reserve(
+                budget_request.model_copy(
+                    update={
+                        "logical_key": f"{reservation_key}:length_recovery",
+                        "recovery_of": reservation.reservation_id,
+                    }
+                )
+            )
+            if recovery is not None:
+                recovery_request = request.model_copy(
+                    update={
+                        "max_tokens": recovery.max_tokens,
+                        "trace_info": {
+                            **request.trace_info,
+                            "completion_budget": {
+                                "purpose": ContextRequestPurpose.PROJECT_IMPROVEMENT.value,
+                                "reservation_id": recovery.reservation_id,
+                                "reserved_tokens": recovery.max_tokens,
+                                "remaining_tokens": runtime_budget.enhancement_completion_tokens_remaining,
+                                "recovery_of": reservation.reservation_id,
+                            },
+                        },
+                    }
+                )
+                try:
+                    response = llm_client.complete(
+                        recovery_request,
+                        max_retries=1,
+                        use_cache=False,
+                    )
+                    usage = getattr(response, "usage", None)
+                    actual_tokens = None
+                    if isinstance(usage, dict):
+                        actual_tokens = usage.get(
+                            "completion_tokens", usage.get("output_tokens")
+                        )
+                    completion_budget.reconcile(
+                        recovery,
+                        actual_tokens=(
+                            int(actual_tokens) if actual_tokens is not None else None
+                        ),
+                        finish_reason=getattr(response, "finish_reason", None),
+                        response_empty=not bool(
+                            str(getattr(response, "content", "") or "")
+                        ),
+                    )
+                    request = recovery_request
+                    recovered = True
+                except Exception as recovery_exc:
+                    completion_budget.reconcile_failure(recovery, recovery_exc)
+                    exc = recovery_exc
+        if not recovered:
+            if bool(params.get("_enhancement_required")):
+                raise exc
+            return _mark_fallback(fallback, f"LLM improvement analysis failed: {type(exc).__name__}: {str(exc)[:300]}")
 
     payload = response.parsed_json if isinstance(response.parsed_json, dict) else None
     if payload is None:
         try:
             payload = json.loads(response.content)
         except (TypeError, json.JSONDecodeError):
+            if bool(params.get("_enhancement_required")):
+                raise InvalidLLMResponseError(
+                    "Required project_improvement response was not valid JSON.",
+                    response_text=str(getattr(response, "content", "") or ""),
+                    usage=getattr(response, "usage", None),
+                    finish_reason=getattr(response, "finish_reason", None),
+                )
             return _mark_fallback(fallback, "LLM improvement analysis returned non-JSON content.")
 
-    deterministic_stack_update = (
-        product_judgment.get("recommended_stack_preset_update")
-        if isinstance(product_judgment, dict) and isinstance(product_judgment.get("recommended_stack_preset_update"), dict)
-        else {}
-    )
-    llm_stack_update = payload.get("stack_preset_update") if isinstance(payload.get("stack_preset_update"), dict) else {}
+    try:
+        delta = _validate_improvement_delta(payload)
+    except (ValidationError, ValueError, TypeError) as exc:
+        if bool(params.get("_enhancement_required")):
+            raise InvalidLLMResponseError(
+                "Required project_improvement response violated the bounded delta contract.",
+                response_text=str(getattr(response, "content", "") or ""),
+                usage=getattr(response, "usage", None),
+                finish_reason=getattr(response, "finish_reason", None),
+            ) from exc
+        return _mark_fallback(
+            fallback,
+            f"LLM improvement analysis violated the bounded delta contract: {type(exc).__name__}",
+        )
     report = {
-        "summary": str(payload.get("summary") or fallback["summary"]),
-        "improvement_opportunities": _coerce_string_list(payload.get("improvement_opportunities")) or fallback["improvement_opportunities"],
-        "recommended_actions": _coerce_string_list(payload.get("recommended_actions")) or fallback["recommended_actions"],
-        "next_iteration_goal": str(payload.get("next_iteration_goal") or fallback["next_iteration_goal"]),
-        "must_implement_next": _coerce_string_list(payload.get("must_implement_next")) or fallback["must_implement_next"],
-        "blocking_risks": _coerce_string_list(payload.get("blocking_risks")) or fallback["blocking_risks"],
-        "stack_preset_update": llm_stack_update or deterministic_stack_update,
+        "project_path": str(project_path),
+        "goal": goal,
+        "iteration": iteration,
+        "summary": delta.changed_signals[0] if delta.changed_signals else fallback["summary"],
+        "improvement_opportunities": delta.changed_signals or fallback["improvement_opportunities"],
+        "recommended_actions": delta.proposed_actions or fallback["recommended_actions"],
+        "next_iteration_goal": delta.next_decision_or_goal or fallback["next_iteration_goal"],
+        "must_implement_next": delta.must_satisfy or fallback["must_implement_next"],
+        "blocking_risks": delta.blocking_risks or fallback["blocking_risks"],
+        "evidence_ids": [
+            evidence_id
+            for evidence_id in delta.evidence_ids
+            if evidence_id in _retained_candidate_ids(request)
+        ],
+        "stack_preset_update": {
+            **delta.stack_preset_patch.model_dump(exclude_none=True),
+            **deterministic_stack_update,
+        },
         "source": "llm",
     }
-    report = _attach_prompt_context(report, prompt_context)
     return _sanitize_public_report(report)
 
 
@@ -349,33 +690,92 @@ def _fallback_report(goal: str, validation_result: Any) -> dict[str, Any]:
     next_goal = validation.get("next_iteration_goal") or (actions[0] if actions else f"Improve the project for the original goal: {goal}")
     return {
         "summary": "Generated deterministic improvement report from validation context.",
-        "improvement_opportunities": opportunities or ["Improve functional polish, runtime robustness, and user-facing documentation."],
-        "recommended_actions": actions or ["Apply one focused improvement that better satisfies the original goal."],
-        "next_iteration_goal": str(next_goal),
-        "must_implement_next": actions[:2] or ["The next version should include at least one visible behavior improvement."],
-        "blocking_risks": errors,
+        "improvement_opportunities": _bounded_strings(
+            opportunities or ["Improve functional polish, runtime robustness, and user-facing documentation."]
+        ),
+        "recommended_actions": _bounded_strings(
+            actions or ["Apply one focused improvement that better satisfies the original goal."]
+        ),
+        "next_iteration_goal": _bounded_text(str(next_goal)),
+        "must_implement_next": _bounded_strings(
+            actions[:2] or ["The next version should include at least one visible behavior improvement."]
+        ),
+        "blocking_risks": _bounded_strings(errors),
+        "evidence_ids": [],
         "stack_preset_update": {},
     }
 
 
-def _attach_prompt_context(report: dict[str, Any], prompt_context: dict[str, Any]) -> dict[str, Any]:
-    if not prompt_context:
-        return report
+def _deterministic_stack_patch(prompt_context: dict[str, Any]) -> dict[str, Any]:
     product_judgment = prompt_context.get("product_judgment") if isinstance(prompt_context.get("product_judgment"), dict) else {}
-    deterministic_stack_update = (
+    return (
         product_judgment.get("recommended_stack_preset_update")
         if isinstance(product_judgment.get("recommended_stack_preset_update"), dict)
         else {}
     )
-    stack_preset_update = report.get("stack_preset_update") if isinstance(report.get("stack_preset_update"), dict) else {}
-    return {
-        **report,
-        "prompt_context": prompt_context,
-        "product_judgment": product_judgment or report.get("product_judgment") or {},
-        "stack_preset": prompt_context.get("stack_preset") or report.get("stack_preset") or {},
-        "stack_preset_update": stack_preset_update or deterministic_stack_update,
-        "ui_iteration_contract": prompt_context.get("ui_iteration_contract") or report.get("ui_iteration_contract") or {},
+
+
+def _validate_improvement_delta(payload: Any) -> _ProjectImprovementDelta:
+    if not isinstance(payload, dict):
+        raise TypeError("improvement delta must be a JSON object")
+    new_keys = {
+        "changed_signals",
+        "proposed_actions",
+        "next_decision_or_goal",
+        "must_satisfy",
+        "blocking_risks",
+        "evidence_ids",
+        "stack_preset_patch",
     }
+    legacy_keys = {
+        "summary",
+        "improvement_opportunities",
+        "recommended_actions",
+        "next_iteration_goal",
+        "must_implement_next",
+        "blocking_risks",
+        "evidence_ids",
+        "stack_preset_update",
+    }
+    allowed = new_keys | legacy_keys
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError(f"forbidden delta fields: {sorted(unknown)}")
+    canonical = {
+        "changed_signals": payload.get("changed_signals") or payload.get("improvement_opportunities") or [],
+        "proposed_actions": payload.get("proposed_actions") or payload.get("recommended_actions") or [],
+        "next_decision_or_goal": payload.get("next_decision_or_goal") or payload.get("next_iteration_goal") or "",
+        "must_satisfy": payload.get("must_satisfy") or payload.get("must_implement_next") or [],
+        "blocking_risks": payload.get("blocking_risks") or [],
+        "evidence_ids": payload.get("evidence_ids") or [],
+        "stack_preset_patch": payload.get("stack_preset_patch") or payload.get("stack_preset_update") or {},
+    }
+    return _ProjectImprovementDelta.model_validate(canonical)
+
+
+def _retained_candidate_ids(request: Any) -> set[str]:
+    selection = getattr(request, "context_selection", None)
+    decisions = getattr(selection, "candidate_decisions", []) if selection is not None else []
+    retained: set[str] = set()
+    for decision in decisions:
+        action = str(getattr(decision, "action", "") or "")
+        if action not in {"omitted", "ContextCandidateAction.OMITTED"}:
+            candidate_id = str(getattr(decision, "candidate_id", "") or "")
+            if candidate_id:
+                retained.add(candidate_id)
+    return retained
+
+
+def _bounded_text(value: str) -> str:
+    return str(value or "").strip()[:_DELTA_TEXT_LIMIT]
+
+
+def _bounded_strings(value: Any) -> list[str]:
+    return [
+        _bounded_text(item)
+        for item in _coerce_string_list(value)[:_DELTA_LIST_LIMIT]
+        if _bounded_text(item)
+    ]
 
 
 def _read_project_previews(project_path: Path, written_files: list[str]) -> list[str]:
@@ -429,6 +829,41 @@ def _resolve_project_files(project_path: Path, written_files: list[str]) -> list
         for path in sorted(project_path.iterdir())
         if path.is_file() and path.name != "README.md"
     ][:12]
+
+
+def _project_file_manifest(project_path: Path) -> list[Path]:
+    """List bounded in-project files without loading their contents."""
+    if not project_path.exists() or not project_path.is_dir():
+        return []
+    try:
+        project_root = project_path.expanduser().resolve(strict=False)
+    except OSError:
+        return []
+    manifest: list[Path] = []
+    try:
+        for root, directory_names, file_names in os.walk(project_root, topdown=True):
+            directory_names[:] = sorted(
+                name for name in directory_names
+                if name not in _MANIFEST_EXCLUDED_DIRS
+                and not (Path(root) / name).is_symlink()
+            )
+            for file_name in sorted(file_names):
+                path = Path(root) / file_name
+                if path.is_symlink():
+                    continue
+                manifest.append(path)
+                if len(manifest) >= MAX_PROJECT_MANIFEST_FILES:
+                    return manifest
+    except OSError:
+        return manifest
+    return manifest
+
+
+def _canonical_path_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve(strict=False))
+    except OSError:
+        return str(path.expanduser().absolute())
 
 
 def _read_text(path: Path) -> str:

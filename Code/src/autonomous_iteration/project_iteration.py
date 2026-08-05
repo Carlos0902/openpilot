@@ -6,6 +6,12 @@ import math
 from pathlib import Path
 from typing import Any
 
+from metadata import (
+    ProjectImprovementPolicy,
+    ProjectImprovementPolicySource,
+    ProjectImprovementRequirement,
+)
+
 
 class ProjectIterationHelper:
     """Small adapter for project iteration context and configuration."""
@@ -102,13 +108,28 @@ class ProjectIterationHelper:
             )
             return autopilot.required_successful_improvements > 0
 
-        autopilot.required_successful_improvements = iterations
-        autopilot.enable_iterative_improvement = iterations > 0
-        autopilot.iterative_improvement.required_successful_improvements = iterations
         minimum_attempts = self.minimum_attempt_budget(iterations)
-        if autopilot.max_iteration_attempts < minimum_attempts:
-            autopilot.max_iteration_attempts = minimum_attempts
-            autopilot.iterative_improvement.max_iteration_attempts = minimum_attempts
+        attempts = max(int(getattr(autopilot, "max_iteration_attempts", 0) or 0), minimum_attempts)
+        if iterations <= 0:
+            policy = ProjectImprovementPolicy(
+                requirement=ProjectImprovementRequirement.DISABLED,
+                source=ProjectImprovementPolicySource.USER_SELECTED,
+                target_successes=0,
+                max_attempts=0,
+            )
+        else:
+            policy = ProjectImprovementPolicy(
+                requirement=ProjectImprovementRequirement.REQUIRED,
+                source=ProjectImprovementPolicySource.USER_SELECTED,
+                target_successes=iterations,
+                max_attempts=attempts,
+            )
+        autopilot.project_improvement_policy = policy
+        autopilot.required_successful_improvements = policy.target_successes
+        autopilot.enable_iterative_improvement = policy.enabled
+        autopilot.max_iteration_attempts = policy.max_attempts
+        autopilot.iterative_improvement.required_successful_improvements = policy.target_successes
+        autopilot.iterative_improvement.max_iteration_attempts = policy.max_attempts
         if autopilot.enhanced_ui:
             autopilot.enhanced_ui.log_activity(
                 "info",

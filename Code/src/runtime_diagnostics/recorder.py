@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import fcntl
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -68,6 +70,10 @@ class DiagnosticRecorder:
         existing_run_id = self._run_ids_by_key.get(task_key)
         if existing_run_id is None and session_id:
             existing_run_id = self._run_ids_by_key.get(str(session_id))
+        if existing_run_id is None:
+            direct_run = self.load_run(task_key)
+            if direct_run is not None and direct_run.run_id == task_key:
+                existing_run_id = direct_run.run_id
         if existing_run_id:
             run = self.load_run(existing_run_id)
             if run is None:
@@ -121,6 +127,27 @@ class DiagnosticRecorder:
             self._register_run_alias(run_id, updated.session_id)
         return updated
 
+    def attach_existing_run(
+        self,
+        run_id: str,
+        *,
+        expected_task_id: str = "",
+        expected_session_id: str = "",
+    ) -> RunRecord:
+        """Bind persisted run aliases in a replacement process without creating a run."""
+        run = self.load_run(run_id)
+        if run is None or run.run_id != str(run_id):
+            raise ValueError(f"existing run not found: {run_id}")
+        if expected_task_id and run.task_id != str(expected_task_id):
+            raise ValueError("existing run task identity does not match")
+        if expected_session_id and run.session_id != str(expected_session_id):
+            raise ValueError("existing run session identity does not match")
+        self._register_run_alias(run.run_id, run.run_id)
+        self._register_run_alias(run.run_id, run.task_id)
+        if run.session_id:
+            self._register_run_alias(run.run_id, run.session_id)
+        return run
+
     def load_run(self, run_key: str) -> RunRecord | None:
         run_id = self._resolve_run_id(run_key) or str(run_key)
         path = self._run_file(run_id)
@@ -145,6 +172,7 @@ class DiagnosticRecorder:
         session_id: str = "",
         phase: str = "",
         summary: str = "",
+        idempotency_key: str = "",
     ) -> EventRecord:
         normalized_payload_kind, normalized_payload = self._normalize_event_payload(payload_kind=payload_kind, payload=payload)
         resolved_task_key = str(self._payload_task_id(normalized_payload) or task_key or self._payload_session_id(normalized_payload) or "").strip()
@@ -162,33 +190,59 @@ class DiagnosticRecorder:
             root_task_id=run.task_id,
             session_id=run.session_id or resolved_session_id,
         )
-        sequence = self._next_event_sequence(run.run_id)
-        event = EventRecord(
-            run_id=run.run_id,
-            sequence=sequence,
-            event_type=event_type,
-            task_id=run.task_id,
-            session_id=run.session_id or resolved_session_id,
-            phase=phase or str(normalized_payload.get("phase") or self._payload_phase(normalized_payload) or ""),
-            summary=summary or self._default_summary(event_type, normalized_payload),
-            payload_kind=normalized_payload_kind,
-            payload=normalized_payload,
-        )
-        self._append_jsonl(self._events_file(run.run_id), event.model_dump(mode="python"))
-        legacy_payload = {
-            "run_id": run.run_id,
-            "event_id": event.event_id,
-            "sequence": event.sequence,
-            "event": event_type,
-            "payload_kind": normalized_payload_kind,
-            "payload": normalized_payload,
-        }
-        legacy_payload.setdefault("task_id", run.task_id)
-        if run.session_id:
-            legacy_payload.setdefault("session_id", run.session_id)
-        self.record_run(legacy_payload, mirror_to_trajectory=False)
+        with self._event_write_lock(run.run_id):
+            event = self._find_idempotent_event(run.run_id, event_type, idempotency_key)
+            created = event is None
+            if event is None:
+                sequence = self._next_event_sequence(run.run_id)
+                event = EventRecord(
+                    run_id=run.run_id,
+                    sequence=sequence,
+                    event_type=event_type,
+                    idempotency_key=idempotency_key,
+                    task_id=run.task_id,
+                    session_id=run.session_id or resolved_session_id,
+                    phase=phase or str(normalized_payload.get("phase") or self._payload_phase(normalized_payload) or ""),
+                    summary=summary or self._default_summary(event_type, normalized_payload),
+                    payload_kind=normalized_payload_kind,
+                    payload=normalized_payload,
+                )
+                self._append_jsonl(self._events_file(run.run_id), event.model_dump(mode="python"))
+        if created:
+            legacy_payload = {
+                "run_id": run.run_id,
+                "event_id": event.event_id,
+                "sequence": event.sequence,
+                "event": event_type,
+                "payload_kind": normalized_payload_kind,
+                "payload": normalized_payload,
+            }
+            legacy_payload.setdefault("task_id", run.task_id)
+            if run.session_id:
+                legacy_payload.setdefault("session_id", run.session_id)
+            self.record_run(legacy_payload, mirror_to_trajectory=False)
         self._apply_run_update_from_event(run, event)
         return event
+
+    def _find_idempotent_event(
+        self,
+        run_id: str,
+        event_type: str,
+        idempotency_key: str,
+    ) -> EventRecord | None:
+        if not idempotency_key:
+            return None
+        path = self._events_file(run_id)
+        if not path.exists():
+            return None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = EventRecord.model_validate(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if event.event_type == event_type and event.idempotency_key == idempotency_key:
+                return event
+        return None
 
     def record_artifact(
         self,
@@ -308,18 +362,19 @@ class DiagnosticRecorder:
             root_task_id=root_task_id,
             session_id=resolved_session_id,
         )
-        event = EventRecord(
-            run_id=run_id,
-            sequence=self._next_event_sequence(run_id),
-            event_type=event_type,
-            task_id=root_task_id,
-            session_id=resolved_session_id,
-            phase=str(payload.get("phase") or normalized_payload.get("phase") or ""),
-            summary=self._default_summary(event_type, normalized_payload),
-            payload_kind=normalized_payload_kind,
-            payload=normalized_payload,
-        )
-        self._append_jsonl(self._events_file(run_id), event.model_dump(mode="python"))
+        with self._event_write_lock(run_id):
+            event = EventRecord(
+                run_id=run_id,
+                sequence=self._next_event_sequence(run_id),
+                event_type=event_type,
+                task_id=root_task_id,
+                session_id=resolved_session_id,
+                phase=str(payload.get("phase") or normalized_payload.get("phase") or ""),
+                summary=self._default_summary(event_type, normalized_payload),
+                payload_kind=normalized_payload_kind,
+                payload=normalized_payload,
+            )
+            self._append_jsonl(self._events_file(run_id), event.model_dump(mode="python"))
         run = self.load_run(run_id)
         if run:
             self._apply_run_update_from_event(run, event)
@@ -372,9 +427,31 @@ class DiagnosticRecorder:
             self._run_ids_by_key[key] = run_id
 
     def _next_event_sequence(self, run_id: str) -> int:
-        current = self._event_sequences.get(run_id, 0) + 1
+        current = self._event_sequences.get(run_id, 0)
+        events_path = self._events_file(run_id)
+        if events_path.exists():
+            for line in events_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    current = max(current, int(json.loads(line).get("sequence") or 0))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+        self._event_sequences[run_id] = current
+        current = self._event_sequences[run_id] + 1
         self._event_sequences[run_id] = current
         return current
+
+    @contextmanager
+    def _event_write_lock(self, run_id: str):
+        run_dir = self._run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with (run_dir / ".events.lock").open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _run_dir(self, run_id: str) -> Path:
         return self.trajectory_dir / run_id

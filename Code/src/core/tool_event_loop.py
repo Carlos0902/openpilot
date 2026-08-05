@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.exceptions import InvalidLLMResponseError, LLMProviderError, LLMTimeoutError
+from core.exceptions import ContextAssemblyBudgetError, InvalidLLMResponseError, LLMProviderError, LLMTimeoutError
 from core.llm import LLMMessage, LLMRequest
+from core.reasoning import routine_tool_reasoning_policy
+from memory.context_assembly import build_context_llm_request
+from memory.session_constraints import session_constraint_prompt_text
 from core.tool_event_emitter import ToolEventEmitter
 from metadata import (
     AgentPhase,
+    ContextRequestPurpose,
     EditPlanMetadata,
     FailureMetadata,
     ResultStatus,
+    ReasoningPolicy,
+    RuntimeBudgetMetadata,
     ToolCallMetadata,
     ToolContextMetadata,
     ToolErrorMetadata,
@@ -24,8 +32,11 @@ from metadata import (
     ToolInputMetadata,
     ToolLoopMetadata,
     ToolResultMetadata,
+    VerificationPlanMetadata,
+    VerificationCommandSpec,
 )
 from tools.tool_selection import ToolSelection
+from tools.mutation_descriptor import FILE_MUTATION_TOOLS, file_mutation_targets
 
 
 def _phase_value(phase: AgentPhase | str) -> str:
@@ -44,6 +55,111 @@ class ToolEventLoopRunResult:
 class ToolEventLoopRunner:
     """Run LLM-planned tool calls as a recoverable typed event loop."""
 
+    _RECOVERY_OBSERVATION_MASK_THRESHOLD = 2_048
+    _RECOVERY_SENSITIVE_KEY = re.compile(
+        r"(?:api[_-]?key|token|secret|password|authorization|cookie|credential|env)",
+        re.IGNORECASE,
+    )
+    _RECOVERY_CONTROL_FIELDS = frozenset(
+        {
+            "cleanup_instruction",
+            "command",
+            "continuation_iterations",
+            "create_dirs",
+            "cwd",
+            "directory_path",
+            "effective_interpreter",
+            "encoding",
+            "entry_files",
+            "env_name",
+            "environment_id",
+            "environment_operation",
+            "file_path",
+            "file_paths",
+            "files",
+            "fix_instruction",
+            "follow_redirects",
+            "freshness",
+            "include_environment",
+            "insertion_hint",
+            "install",
+            "instruction",
+            "iteration",
+            "language",
+            "limit",
+            "line_end",
+            "line_start",
+            "llm_cleanup",
+            "max_files",
+            "max_iterations",
+            "max_lines",
+            "max_page_chars",
+            "max_pages",
+            "max_redirect_candidates",
+            "max_redirect_depth",
+            "max_redirect_pages",
+            "max_results",
+            "max_search_attempts",
+            "max_size_mb",
+            "max_tokens",
+            "max_total_chars",
+            "memory_query",
+            "mode",
+            "model",
+            "offset",
+            "operation_kind",
+            "overwrite",
+            "patch_mode",
+            "pattern",
+            "project_path",
+            "provider",
+            "query",
+            "read_mode",
+            "readme_path",
+            "recursive",
+            "requested_command",
+            "requires_user_input",
+            "risk_level",
+            "run_command",
+            "safe_search",
+            "search_budget_seconds",
+            "setup_commands",
+            "step_id",
+            "symbol_name",
+            "symbol_type",
+            "system_prompt",
+            "target_scope",
+            "tbs",
+            "test_command",
+            "time_range",
+            "timeout",
+            "tool_name",
+            "use_cache",
+            "validation_context",
+            "warning_check_required",
+            "written_files",
+        }
+    )
+    _RECOVERY_OBSERVATION_FIELDS = frozenset(
+        {
+            "code",
+            "content",
+            "generated_unit",
+            "memory_context",
+            "patch",
+            "project_summary",
+            "prompt_context",
+            "replacement_text",
+            "stack_preset_update",
+            "stderr",
+            "stdout",
+            "text",
+            "validation_result",
+            "warning_check_result",
+            "warnings",
+        }
+    )
+
     def __init__(self, owner: Any, *, max_steps: int = 5, doom_loop_threshold: int = 3) -> None:
         self.owner = owner
         self.runtime = owner.runtime
@@ -56,6 +172,7 @@ class ToolEventLoopRunner:
         self.tool_results: list[dict[str, Any]] = []
         self.event_emitter = ToolEventEmitter(self.runtime, log_hook=self.owner._log)
         self._seen_signatures: dict[str, int] = {}
+        self._local_completion_budget = RuntimeBudgetMetadata()
 
     def run(self, task: Any, initial_prompt: str) -> ToolEventLoopRunResult:
         task_id = str(getattr(task, "id", "unknown"))
@@ -75,16 +192,58 @@ class ToolEventLoopRunner:
                 pending_retry_requests = None
             else:
                 try:
-                    llm_response = self.runtime.llm_client.complete(
-                        LLMRequest(
-                            messages=[LLMMessage(role="user", content=prompt)],
-                            response_format="json_object",
-                            timeout_seconds=45.0,
-                            transport_retries=0,
-                        )
+                    budget = self._completion_budget()
+                    calls_remaining = self.max_steps - round_index + 1
+                    completion_limit = budget.tool_event_completion_limit(
+                        round_index=round_index,
+                        calls_remaining=calls_remaining,
                     )
+                    if completion_limit <= 0:
+                        final_error = FailureMetadata(
+                            error_type="CompletionBudgetExhausted",
+                            error_message="Tool-event completion token budget is exhausted.",
+                            recoverable=False,
+                        )
+                        return self._finish(task_id, session_id, False, rounds_used, last_output, final_error, final_error.error_message)
+                    request = build_context_llm_request(
+                        self.runtime.llm_client,
+                        purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
+                        messages=[LLMMessage(role="user", content=prompt)],
+                        response_format="json_object",
+                        max_tokens=completion_limit,
+                        timeout_seconds=45.0,
+                        transport_retries=0,
+                        trace_info={
+                            "completion_budget": {
+                                "purpose": ContextRequestPurpose.TOOL_EVENT_DECISION.value,
+                                "round_index": round_index,
+                                "calls_remaining": calls_remaining,
+                                "static_ceiling": budget.tool_event_completion_ceiling,
+                                "dynamic_limit": completion_limit,
+                                "total_remaining": budget.tool_event_completion_tokens_remaining,
+                            }
+                        },
+                        reasoning_policy=self._reasoning_policy_for_task(task),
+                    )
+                    constraint_resolver = getattr(self.owner, "_session_constraints_from_context", None)
+                    if callable(constraint_resolver):
+                        constraint_state = constraint_resolver(getattr(self.owner, "_active_context", None))
+                        constraint_prompt = (
+                            session_constraint_prompt_text(constraint_state)
+                            if constraint_state is not None
+                            else ""
+                        )
+                        rendered_request = "\n\n".join(
+                            str(message.content or "") for message in request.messages
+                        )
+                        if constraint_prompt and constraint_prompt not in rendered_request:
+                            raise ContextAssemblyBudgetError(["session_constraints"])
+                    budget.consume_tool_event_completion(completion_limit)
+                    llm_response = self._complete_tool_event_request(request)
+                    self._reconcile_completion_usage(budget, llm_response, reserved=completion_limit)
                     tool_requests = self.owner._parse_decision_needs(llm_response)
                 except (InvalidLLMResponseError, LLMProviderError, LLMTimeoutError) as exc:
+                    self._reconcile_completion_failure(budget, exc, reserved=completion_limit)
                     fallback = getattr(self.owner, "_fallback_tool_requests", None)
                     tool_requests = fallback(reason=str(exc)) if callable(fallback) else []
                     if not tool_requests:
@@ -225,8 +384,80 @@ class ToolEventLoopRunner:
                     diagnostics.on_tool_started(
                         tool_call=tool_call_metadata,
                     )
-                exec_result = self.runtime.tool_executor.execute_single(selection, context=None)
-                self._update_runtime_state(selection, exec_result)
+                controller = getattr(self.runtime, "runtime_controller", None)
+                set_pending_verification = getattr(controller, "set_pending_verification", None)
+                if callable(set_pending_verification) and selection.tool_name in {
+                    "file_writer",
+                    "file_patch_writer",
+                    "file_delete_tool",
+                }:
+                    set_pending_verification(
+                        self._pending_verification_plan(tool_requests, index, selection)
+                    )
+                replay_tool_result = getattr(controller, "replay_tool_result", None)
+                exec_result = (
+                    replay_tool_result(tool_call_metadata, selection)
+                    if callable(replay_tool_result)
+                    else None
+                )
+                prepare_tool_call = getattr(controller, "prepare_tool_call", None)
+                if exec_result is None and callable(prepare_tool_call) and not prepare_tool_call(tool_call_metadata, selection):
+                    checkpoint_error = self._protocol_error(
+                        session_id,
+                        task_id,
+                        step_id,
+                        call_id,
+                        tool_name,
+                        "CheckpointPrepareFailed",
+                        "Mutation was not executed because its prepared checkpoint was not durable.",
+                        input_metadata,
+                        tool_context,
+                        suggested_recovery="Restore checkpoint storage before retrying the mutation.",
+                    )
+                    self._record_tool_error(task_id, tool_call_metadata, checkpoint_error, round_index)
+                    self._append_tool_result(tool_call_metadata, input_metadata, False, checkpoint_error.error_message)
+                    return self._finish(
+                        task_id,
+                        session_id,
+                        False,
+                        rounds_used,
+                        last_output,
+                        checkpoint_error.failure,
+                        checkpoint_error.error_message,
+                    )
+                if exec_result is None:
+                    exec_result = self.runtime.tool_executor.execute_single(selection, context=None)
+                observe_tool_result = getattr(controller, "observe_tool_result", None)
+                if (
+                    not hasattr(exec_result, "recovery_already_applied")
+                    and callable(observe_tool_result)
+                    and not observe_tool_result(tool_call_metadata, selection, exec_result)
+                ):
+                    checkpoint_error = self._protocol_error(
+                        session_id,
+                        task_id,
+                        step_id,
+                        call_id,
+                        tool_name,
+                        "CheckpointObservationFailed",
+                        "Tool returned, but its result could not be durably recorded before state application.",
+                        input_metadata,
+                        tool_context,
+                        suggested_recovery="Reconcile the indeterminate side effect before continuing.",
+                    )
+                    self._record_tool_error(task_id, tool_call_metadata, checkpoint_error, round_index)
+                    self._append_tool_result(tool_call_metadata, input_metadata, False, checkpoint_error.error_message)
+                    return self._finish(
+                        task_id,
+                        session_id,
+                        False,
+                        rounds_used,
+                        last_output,
+                        checkpoint_error.failure,
+                        checkpoint_error.error_message,
+                    )
+                if not bool(getattr(exec_result, "recovery_already_applied", False)):
+                    self._update_runtime_state(selection, exec_result)
                 self.owner._show_tool_result(tool_name, exec_result)
                 log_output = self.owner._summarize_metadata_output(exec_result.output_metadata)
                 self.owner._log_tool_complete(task, tool_name, exec_result, log_output)
@@ -372,6 +603,62 @@ class ToolEventLoopRunner:
             details=self._last_recoverable_error_details(),
         )
         return self._finish(task_id, session_id, False, rounds_used, last_output, final_error, final_error.error_message)
+
+    def _completion_budget(self) -> RuntimeBudgetMetadata:
+        controller = getattr(self.runtime, "runtime_controller", None)
+        state = getattr(controller, "state", None)
+        budget = getattr(state, "budget", None)
+        return budget if isinstance(budget, RuntimeBudgetMetadata) else self._local_completion_budget
+
+    def _complete_tool_event_request(self, request: LLMRequest) -> Any:
+        complete = self.runtime.llm_client.complete
+        parameters = inspect.signature(complete).parameters
+        accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+        kwargs = {"max_retries": 1} if accepts_kwargs or "max_retries" in parameters else {}
+        return complete(request, **kwargs)
+
+    def _reasoning_policy_for_task(self, task: Any) -> ReasoningPolicy:
+        policy_for_task = getattr(self.owner, "_reasoning_policy_for_task", None)
+        if callable(policy_for_task):
+            return policy_for_task(task)
+        return routine_tool_reasoning_policy(
+            getattr(self.runtime.llm_client, "settings", None),
+            routine=False,
+        )
+
+    def _reconcile_completion_usage(self, budget: RuntimeBudgetMetadata, response: Any, *, reserved: int) -> None:
+        provider_details = getattr(response, "provider_details", None)
+        if isinstance(provider_details, dict) and provider_details.get("recovery_replay"):
+            budget.reconcile_tool_event_completion(reserved=reserved, actual=0)
+            return
+        usage = getattr(response, "usage", None)
+        if not isinstance(usage, dict):
+            return
+        tokens = usage.get("completion_tokens")
+        if tokens is None:
+            tokens = usage.get("output_tokens")
+        if tokens is not None:
+            budget.reconcile_tool_event_completion(reserved=reserved, actual=int(tokens))
+
+    def _reconcile_completion_failure(
+        self,
+        budget: RuntimeBudgetMetadata,
+        error: Exception,
+        *,
+        reserved: int,
+    ) -> None:
+        usage = getattr(error, "usage", None)
+        tokens = None
+        if isinstance(usage, dict):
+            tokens = usage.get("completion_tokens")
+            if tokens is None:
+                tokens = usage.get("output_tokens")
+        if tokens is not None:
+            budget.reconcile_tool_event_completion(reserved=reserved, actual=int(tokens))
+        elif isinstance(error, InvalidLLMResponseError) and not str(getattr(error, "response_text", "") or ""):
+            budget.reconcile_tool_event_completion(reserved=reserved, actual=0)
+        if str(getattr(error, "finish_reason", "") or "").lower() in {"length", "max_tokens"}:
+            budget.grant_tool_event_completion_recovery(budget.tool_event_completion_recovery_step)
 
     def _build_tool_context(
         self,
@@ -600,10 +887,47 @@ class ToolEventLoopRunner:
         return None
 
     def _guard_project_state_change_if_needed(self, task: Any, tool_call: ToolCallMetadata, selection: ToolSelection) -> ToolErrorMetadata | None:
-        if not self._requires_edit_guard(selection):
-            return None
         controller = getattr(self.runtime, "runtime_controller", None)
         state = getattr(controller, "state", None)
+        session_constraint_check = getattr(controller, "session_constraint_violation", None)
+        if state is not None and callable(session_constraint_check):
+            command_is_mutation = bool(file_mutation_targets(selection)) or (
+                selection.tool_name == "command_executor"
+                and bool(
+                    getattr(controller, "_command_may_modify_project", lambda _command: False)(
+                        str(selection.input_metadata.command or "")
+                    )
+                )
+            )
+            violation = session_constraint_check(
+                selection,
+                task_validation_command=str(getattr(task, "validation_command", "") or ""),
+            )
+            if violation is not None:
+                constraint_state = getattr(state, "session_constraints", None)
+                state_hash = (
+                    str(getattr(constraint_state, "canonical_hash", ""))
+                    if constraint_state is not None
+                    else ""
+                )
+                return self._protocol_error(
+                    tool_call.session_id,
+                    tool_call.task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "SessionConstraintViolation",
+                    f"Active session constraint denied this tool call: {violation.value}",
+                    selection.input_metadata,
+                    tool_call.tool_context,
+                    details={
+                        "violation_code": violation.value,
+                        "constraint_state_hash": state_hash,
+                        "command_is_mutation": command_is_mutation,
+                    },
+                )
+        if not self._requires_edit_guard(selection):
+            return None
         guard = getattr(controller, "edit_guard", None)
         file_selector = getattr(controller, "file_selector", None)
         if state is None or guard is None:
@@ -696,7 +1020,7 @@ class ToolEventLoopRunner:
         )
 
     def _requires_edit_guard(self, selection: ToolSelection) -> bool:
-        if selection.tool_name in {"file_writer", "file_patch_writer", "file_delete_tool"}:
+        if selection.tool_name in FILE_MUTATION_TOOLS:
             return True
         if selection.tool_name != "command_executor":
             return False
@@ -742,8 +1066,8 @@ class ToolEventLoopRunner:
 
     def _edit_target_files(self, selection: ToolSelection) -> list[str]:
         params = selection.input_metadata.to_params()
-        if selection.tool_name in {"file_writer", "file_patch_writer", "file_delete_tool"}:
-            return [str(params["file_path"])] if params.get("file_path") else []
+        if selection.tool_name in FILE_MUTATION_TOOLS:
+            return file_mutation_targets(selection)
         if selection.tool_name == "command_executor":
             explicit = params.get("file_paths") or params.get("files") or []
             if explicit:
@@ -762,9 +1086,50 @@ class ToolEventLoopRunner:
                 return list(plan.commands)
             if plan.fallback_checks:
                 return list(plan.fallback_checks)
-        if selection.tool_name in {"file_writer", "file_patch_writer", "file_delete_tool"}:
+        if selection.tool_name in FILE_MUTATION_TOOLS:
             return ["Run the runtime-selected verification after the file change."]
         return [f"Verify command side effects for: {', '.join(target_files)}"]
+
+    def _pending_verification_plan(
+        self,
+        tool_requests: list[dict[str, Any]],
+        current_index: int,
+        selection: ToolSelection,
+    ) -> VerificationPlanMetadata | None:
+        if selection.tool_name not in {"file_writer", "file_patch_writer", "file_delete_tool"}:
+            return None
+        commands: list[str] = []
+        specs: list[VerificationCommandSpec] = []
+        for request in tool_requests[current_index + 1 :]:
+            if not isinstance(request, dict) or request.get("tool_name") != "command_executor":
+                continue
+            raw_input = request.get("input_metadata") or {}
+            if isinstance(raw_input, ToolInputMetadata):
+                params = raw_input.to_params()
+            elif isinstance(raw_input, dict):
+                params = dict(raw_input)
+            else:
+                continue
+            command = str(params.get("command") or "").strip()
+            if not command:
+                continue
+            commands.append(command)
+            specs.append(
+                VerificationCommandSpec(
+                    command=command,
+                    cwd=str(params.get("cwd")) if params.get("cwd") else None,
+                    mode=str(params.get("mode") or "automatic"),
+                    timeout=int(params["timeout"]) if params.get("timeout") else None,
+                )
+            )
+        if not commands:
+            return None
+        return VerificationPlanMetadata(
+            reason="Persisted required validation following a file mutation.",
+            commands=commands,
+            command_specs=specs,
+            target_files=self._edit_target_files(selection),
+        )
 
     def _allowed_change_description(self, selection: ToolSelection, target_files: list[str]) -> str:
         if selection.tool_name == "file_writer":
@@ -1204,7 +1569,7 @@ class ToolEventLoopRunner:
                 "error_type": error.error_type,
                 "error_message": error.error_message,
                 "suggested_recovery": error.suggested_recovery,
-                "input_metadata": error.input_metadata.to_json_dict() if error.input_metadata else None,
+                "input_metadata": self._recovery_input_projection(error.input_metadata),
                 "tool_contract": self._contract_summary(error.tool_name),
             }
             for error in errors
@@ -1215,6 +1580,61 @@ class ToolEventLoopRunner:
             "Revise the decision_needs JSON and try again. Focus on the unresolved information need only; "
             "do not repeat needs that already produced useful state, and do not repeat the same invalid need/input.\n"
             f"Recoverable errors:\n{json.dumps(errors_payload, ensure_ascii=False, indent=2)}"
+        )
+
+    @classmethod
+    def _recovery_input_projection(
+        cls,
+        input_metadata: ToolInputMetadata | None,
+    ) -> dict[str, Any] | None:
+        """Return a bounded model-facing view without changing authoritative tool input."""
+        if input_metadata is None:
+            return None
+        source = input_metadata.to_json_dict()
+        allowed_fields = cls._RECOVERY_CONTROL_FIELDS | cls._RECOVERY_OBSERVATION_FIELDS
+        projected = {
+            field_name: cls._redact_recovery_value(source[field_name])
+            for field_name in allowed_fields
+            if field_name in source and source[field_name] is not None
+        }
+        for field_name in cls._RECOVERY_OBSERVATION_FIELDS:
+            if field_name not in projected or projected[field_name] is None:
+                continue
+            serialized = cls._canonical_observation(projected[field_name])
+            if len(serialized) <= cls._RECOVERY_OBSERVATION_MASK_THRESHOLD:
+                continue
+            projected[field_name] = {
+                "observation_masked": True,
+                "chars": len(serialized),
+                "sha256": f"sha256:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}",
+            }
+        return projected
+
+    @classmethod
+    def _redact_recovery_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for raw_key, item in value.items():
+                key = str(raw_key)
+                redacted[key] = (
+                    {"redacted": True}
+                    if cls._RECOVERY_SENSITIVE_KEY.search(key)
+                    else cls._redact_recovery_value(item)
+                )
+            return redacted
+        if isinstance(value, list):
+            return [cls._redact_recovery_value(item) for item in value]
+        return value
+
+    @staticmethod
+    def _canonical_observation(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
     def _call_signature(self, tool_name: str, input_metadata: ToolInputMetadata) -> str:

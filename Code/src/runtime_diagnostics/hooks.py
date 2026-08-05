@@ -7,11 +7,14 @@ from typing import Any
 
 from metadata import (
     FailureMetadata,
+    GuardDecisionMetadata,
     LogEventMetadata,
     LLMRequestMetadata,
     LLMResponseMetadata,
     MetadataBase,
     ProblemSignalMetadata,
+    RuntimeCheckpointMetadata,
+    RuntimeResumeDecisionMetadata,
     RuntimeStateMetadata,
     TaskRouteMetadata,
     ToolCallMetadata,
@@ -95,6 +98,7 @@ class RuntimeDiagnosticsHooks:
         raw_input: str = "",
         goal: str = "",
         route: str = "",
+        idempotency_key: str = "",
     ):
         if not self.enabled:
             return None
@@ -111,6 +115,7 @@ class RuntimeDiagnosticsHooks:
                 goal=goal,
                 route=route,
                 payload_kind=str(getattr(payload, "kind", "") or ""),
+                idempotency_key=idempotency_key,
             )
         except Exception:
             return None
@@ -158,6 +163,93 @@ class RuntimeDiagnosticsHooks:
             session_id=session_id,
             payload=log_event,
         )
+
+    def on_checkpoint_created(self, checkpoint: RuntimeCheckpointMetadata) -> None:
+        if not self.enabled:
+            return
+        payload = self._with_correlation(
+            checkpoint,
+            task_id=checkpoint.root_task_id,
+            session_id=checkpoint.session_id,
+        )
+        self._record_event(
+            checkpoint.run_id,
+            event_type="checkpoint_created",
+            session_id=checkpoint.session_id,
+            phase=str(checkpoint.runtime_state.phase),
+            summary=f"checkpoint {checkpoint.safe_boundary} generation {checkpoint.generation}",
+            payload=payload,
+        )
+
+    def on_checkpoint_write_failed(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        safe_boundary: str,
+        error: str,
+    ) -> None:
+        self.on_log_event(
+            task_id=task_id,
+            session_id=session_id,
+            source_name="autonomous_iteration.checkpoint_store",
+            phase="recover",
+            event_type="checkpoint_write_failed",
+            success=False,
+            output_summary={"safe_boundary": safe_boundary},
+            error=error,
+        )
+
+    def on_resume_preflight_completed(self, decision: RuntimeResumeDecisionMetadata) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.recorder.attach_existing_run(
+                decision.run_id,
+                expected_task_id=decision.root_task_id,
+                expected_session_id=decision.session_id,
+            )
+        except (OSError, ValueError):
+            return
+        payload = self._with_correlation(
+            decision,
+            task_id=decision.root_task_id,
+            session_id=decision.session_id,
+        )
+        self._record_event(
+            decision.run_id,
+            event_type="resume_preflight_completed",
+            session_id=decision.session_id,
+            phase="recover",
+            summary=f"resume preflight: {decision.recoverability}/{decision.recovery_mode}",
+            payload=payload,
+        )
+
+    def on_guard_decision(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        decision: GuardDecisionMetadata,
+    ) -> None:
+        if not self.enabled:
+            return
+        try:
+            payload = self._with_correlation(
+                decision,
+                task_id=task_id,
+                session_id=session_id,
+            )
+            self._record_event(
+                task_id or session_id,
+                event_type="decision_need_blocked" if not decision.approved else "decision_need_approved",
+                session_id=session_id,
+                phase="tool_routing",
+                summary=decision.reason,
+                payload=payload,
+            )
+        except Exception:
+            return
 
     def on_log_event(
         self,
@@ -351,6 +443,7 @@ class RuntimeDiagnosticsHooks:
         session_id: str = "",
         phase: str = "",
         call_id: str = "",
+        failed_response_text: str = "",
     ) -> None:
         if not self.enabled:
             return
@@ -360,7 +453,7 @@ class RuntimeDiagnosticsHooks:
             session_id=session_id,
             call_id=call_id,
         )
-        self._record_event(
+        event = self._record_event(
             task_id or session_id,
             event_type="llm_failed",
             session_id=session_id,
@@ -368,6 +461,18 @@ class RuntimeDiagnosticsHooks:
             summary=f"llm failed: {failure.error_type}",
             payload=failure,
         )
+        if failed_response_text and event is not None:
+            try:
+                self.recorder.record_artifact(
+                    task_id or session_id,
+                    kind="llm_failed_response",
+                    content=failed_response_text,
+                    filename=f"{call_id or event.event_id}_failed_response.txt",
+                    content_type="text/plain",
+                    source_event_id=event.event_id,
+                )
+            except Exception:
+                return
 
     def on_runtime_phase_changed(
         self,
@@ -507,10 +612,11 @@ class RuntimeDiagnosticsHooks:
         success: bool,
         summary: dict[str, Any] | None = None,
         session_id: str = "",
-    ) -> None:
+        finalization_id: str = "",
+    ):
         if not self.enabled:
             return
-        self._record_event(
+        return self._record_event(
             task_id or session_id,
             event_type="task_finished",
             session_id=session_id,
@@ -526,11 +632,13 @@ class RuntimeDiagnosticsHooks:
                         "task_id": task_id,
                         "summary": summary or {},
                         "session_id": session_id,
+                        "finalization_id": finalization_id,
                     },
                 ),
                 task_id=task_id,
                 session_id=session_id,
             ),
+            idempotency_key=(f"task_finished:{finalization_id}" if finalization_id else ""),
         )
 
     def on_tool_failed(self, error: Any) -> list[str]:
