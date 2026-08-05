@@ -17,7 +17,7 @@ def test_project_path_resolver_corrects_hallucinated_workspace_root(tmp_path: Pa
         raw_path="/workspace/openpilot",
         intent_kind="existing_directory",
         operation="read",
-        source="decision_need",
+        path_source="decision_need",
     )
 
     resolution = resolver.resolve(intent)
@@ -42,7 +42,7 @@ def test_project_path_resolver_uses_file_index_for_dropped_repo_segment(tmp_path
         raw_path=str(tmp_path / "src" / "ui" / "cli.py"),
         intent_kind="existing_file",
         operation="read",
-        source="decision_need",
+        path_source="decision_need",
     )
 
     resolution = resolver.resolve(intent)
@@ -73,7 +73,7 @@ def test_project_path_resolver_marks_ambiguous_suffix_matches(tmp_path: Path) ->
         raw_path=str(tmp_path / "external" / "app.py"),
         intent_kind="existing_file",
         operation="read",
-        source="decision_need",
+        path_source="decision_need",
     )
 
     resolution = resolver.resolve(intent)

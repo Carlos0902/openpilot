@@ -150,6 +150,7 @@ def test_memory_context_tool_accepts_injected_memory_vault_agent(tmp_path) -> No
         MemoryType.PROJECT,
         tags=["tool", "pygame"],
         confidence=0.9,
+        attributes={"project_path": str(tmp_path)},
     )
     result = memory_context_executor(
         ToolInputMetadata.from_mapping("memory_context", {

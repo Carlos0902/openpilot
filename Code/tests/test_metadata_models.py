@@ -1,35 +1,77 @@
 from __future__ import annotations
 
+import inspect
 import json
+from pathlib import Path
+from typing import Literal, get_args, get_origin
 
 import pytest
+import metadata as metadata_module
 
 from metadata import (
     BugFixAttemptMetadata,
     BugFixResultMetadata,
     CodeArtifactMetadata,
     CommandArtifactMetadata,
+    ContextSelectionMetadata,
+    ContextAssemblyPolicy,
+    ContextAssemblyResult,
+    ContextAssemblyStatus,
+    ContextCandidate,
+    ContextCandidateDecision,
+    ContextCandidateFreshness,
+    ContextCandidateKind,
+    ContextCandidateRetention,
+    ContextCandidateTrust,
+    ContextCandidateTruncation,
+    ContextCompactionBinding,
+    ContextCompactionRecord,
+    ContextQualityEvaluation,
+    ContextQualityExpectation,
+    ContextQualityIssueCode,
+    ContextRequestPurpose,
     DependencyStrategyMetadata,
     DifficultyAssessmentMetadata,
+    DurableArtifactReference,
     ExecutionStateMetadata,
     FailureMetadata,
     GitDiffContextMetadata,
     GitRepositoryMetadata,
     GitSnapshotMetadata,
+    MetadataBase,
     MetadataKind,
+    MetadataSource,
+    PathIntentMetadata,
+    PathResolutionMetadata,
     ProductIntentMetadata,
     ProblemJudgmentMetadata,
     ProblemSignalMetadata,
     ProjectDiagnosisMetadata,
     ProjectDimensionAssessmentMetadata,
     ProjectDependencyMetadata,
+    ProjectImprovementPolicy,
+    ProjectImprovementPolicySource,
+    ProjectImprovementRequirement,
     ProjectObjectiveMetadata,
     ProjectStackPresetMetadata,
     ImprovementCandidateMetadata,
     ReferenceInsightMetadata,
     RelatedProjectFileMetadata,
     ResolutionPlanMetadata,
+    Recoverability,
+    RecoveryAutomationPolicy,
+    RecoveryBlocker,
+    RecoveryFallback,
+    RecoveryFallbackAction,
+    RecoveryMode,
+    RecoveryReasonCode,
+    RecoveryStatus,
     ResultStatus,
+    RuntimeResumeDecisionMetadata,
+    RuntimeFinalizationCursor,
+    RuntimeFinalizationStage,
+    RuntimePromptContextSnapshot,
+    RuntimeBudgetMetadata,
     RuntimeStateMetadata,
     SuccessMetricMetadata,
     TaskResultMetadata,
@@ -45,6 +87,9 @@ from metadata import (
     ToolInputMetadata,
     ToolLoopMetadata,
     ToolResultMetadata,
+    VerificationCommandSpec,
+    VerificationPlanMetadata,
+    VerificationStatus,
     ValidationIssueMetadata,
     WarningCheckResultMetadata,
     WarningItemMetadata,
@@ -52,6 +97,469 @@ from metadata import (
     json_safe,
     metadata_summary,
 )
+
+
+def test_project_improvement_policy_has_one_typed_completion_authority() -> None:
+    automatic = ProjectImprovementPolicy()
+
+    assert automatic.requirement == ProjectImprovementRequirement.OPTIONAL
+    assert automatic.source == ProjectImprovementPolicySource.AUTOMATIC_DEFAULT
+    assert automatic.target_successes == 2
+    assert automatic.max_attempts == 4
+    assert automatic.enabled is True
+    assert automatic.controls_top_level_success is False
+    assert ProjectImprovementPolicy.model_validate_json(automatic.model_dump_json()) == automatic
+
+    required = ProjectImprovementPolicy(
+        requirement=ProjectImprovementRequirement.REQUIRED,
+        source=ProjectImprovementPolicySource.USER_SELECTED,
+        target_successes=1,
+        max_attempts=3,
+    )
+    assert required.controls_top_level_success is True
+
+
+def test_project_improvement_policy_rejects_ambiguous_disabled_and_enabled_counts() -> None:
+    with pytest.raises(ValueError, match="disabled"):
+        ProjectImprovementPolicy(
+            requirement=ProjectImprovementRequirement.DISABLED,
+            target_successes=1,
+            max_attempts=1,
+        )
+    with pytest.raises(ValueError, match="enabled"):
+        ProjectImprovementPolicy(
+            requirement=ProjectImprovementRequirement.OPTIONAL,
+            target_successes=0,
+            max_attempts=0,
+        )
+    with pytest.raises(ValueError, match="max_attempts"):
+        ProjectImprovementPolicy(
+            requirement=ProjectImprovementRequirement.REQUIRED,
+            target_successes=3,
+            max_attempts=2,
+        )
+
+
+def test_runtime_finalization_cursor_enforces_monotonic_stage_evidence() -> None:
+    report_ref = DurableArtifactReference(
+        artifact_id="report-1",
+        kind="runtime_report",
+        integrity_checksum="sha256:" + "a" * 64,
+        bytes=128,
+    )
+    report_persisted = RuntimeFinalizationCursor(
+        finalization_id="final-1",
+        stage=RuntimeFinalizationStage.REPORT_PERSISTED,
+        outcome="success",
+        report_source_hash="sha256:" + "b" * 64,
+        report_artifact=report_ref,
+    )
+    finalized = report_persisted.model_copy(
+        update={
+            "stage": RuntimeFinalizationStage.RUN_FINALIZED,
+            "run_finalized_event_id": "event-1",
+        }
+    )
+
+    assert RuntimeFinalizationCursor.model_validate_json(finalized.model_dump_json()) == finalized
+    with pytest.raises(ValueError, match="report artifact"):
+        RuntimeFinalizationCursor(
+            finalization_id="final-2",
+            stage=RuntimeFinalizationStage.REPORT_PERSISTED,
+            outcome="success",
+            report_source_hash="sha256:" + "c" * 64,
+        )
+    with pytest.raises(ValueError, match="run finalized event"):
+        RuntimeFinalizationCursor(
+            finalization_id="final-3",
+            stage=RuntimeFinalizationStage.RUN_FINALIZED,
+            outcome="failed",
+            report_source_hash="sha256:" + "d" * 64,
+            report_artifact=report_ref,
+        )
+
+
+def test_runtime_prompt_context_snapshot_requires_typed_prompt_artifact() -> None:
+    selection = ContextSelectionMetadata(
+        max_prompt_chars=1000,
+        original_prompt_chars=120,
+        final_prompt_chars=120,
+    )
+    snapshot = RuntimePromptContextSnapshot(
+        context_id="context-1",
+        request_hash="sha256:" + "a" * 64,
+        prompt_hash="sha256:" + "b" * 64,
+        selection=selection,
+        context_artifact=DurableArtifactReference(
+            artifact_id="artifact-1",
+            kind="prompt_context",
+            integrity_checksum="sha256:" + "c" * 64,
+            bytes=120,
+        ),
+    )
+
+    assert RuntimePromptContextSnapshot.model_validate_json(snapshot.model_dump_json()) == snapshot
+    with pytest.raises(ValueError, match="prompt_context"):
+        RuntimePromptContextSnapshot.model_validate(
+            {
+                **snapshot.model_dump(mode="python"),
+                "context_artifact": {
+                    **snapshot.context_artifact.model_dump(mode="python"),
+                    "kind": "runtime_report",
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        "deterministic_dialog_extract_v1",
+        "deterministic_observation_mask_v1",
+    ],
+)
+def test_context_compaction_contract_binds_only_compaction_artifact(
+    algorithm: str,
+) -> None:
+    record = ContextCompactionRecord(
+        compaction_id="compaction-1",
+        source_fingerprint="sha256:" + "d" * 64,
+        source_candidate_ids=["observation-1", "observation-2"],
+        algorithm=algorithm,
+        summary="Earlier dialog summary.",
+        original_chars=200,
+        compacted_chars=23,
+    )
+    binding = ContextCompactionBinding(
+        record=record,
+        artifact=DurableArtifactReference(
+            artifact_id="compaction-artifact-1",
+            kind="context_compaction",
+            integrity_checksum="sha256:" + "e" * 64,
+            bytes=200,
+        ),
+    )
+
+    restored = ContextCompactionBinding.model_validate_json(binding.model_dump_json())
+    assert restored == binding
+    assert restored.record.algorithm == algorithm
+    assert restored.record.source_candidate_ids == ["observation-1", "observation-2"]
+    assert restored.record.source_fingerprint == "sha256:" + "d" * 64
+    assert restored.artifact.integrity_checksum == "sha256:" + "e" * 64
+    with pytest.raises(ValueError, match="context_compaction"):
+        ContextCompactionBinding.model_validate(
+            {
+                **binding.model_dump(mode="python"),
+                "artifact": {
+                    **binding.artifact.model_dump(mode="python"),
+                    "kind": "prompt_context",
+                },
+            }
+        )
+
+
+def test_context_quality_values_round_trip_without_runtime_metadata_owner() -> None:
+    expectation = ContextQualityExpectation(
+        expected_selected_candidate_ids=["required"],
+        expected_omitted_candidate_ids=["optional"],
+    )
+    evaluation = ContextQualityEvaluation(
+        passed=False,
+        issue_codes=[ContextQualityIssueCode.EXPECTED_CANDIDATE_MISSING],
+        issue_candidate_ids={"expected_candidate_missing": ["required"]},
+        selected_candidate_ids=[],
+        omitted_candidate_ids=["optional"],
+        character_budget_utilization=0.25,
+    )
+
+    assert ContextQualityExpectation.model_validate_json(
+        expectation.model_dump_json()
+    ) == expectation
+    assert ContextQualityEvaluation.model_validate_json(
+        evaluation.model_dump_json()
+    ) == evaluation
+
+
+def test_runtime_budget_derives_static_and_dynamic_tool_event_completion_limits() -> None:
+    budget = RuntimeBudgetMetadata(
+        max_tool_event_completion_tokens=12000,
+        tool_event_completion_ceiling=2000,
+        tool_event_completion_floor=800,
+        tool_event_completion_recovery_step=400,
+    )
+
+    assert budget.tool_event_completion_limit(round_index=1, calls_remaining=5) == 2000
+    assert budget.tool_event_completion_limit(round_index=2, calls_remaining=4) == 1600
+    assert budget.tool_event_completion_limit(round_index=3, calls_remaining=3) == 1200
+    budget.grant_tool_event_completion_recovery(400)
+    assert budget.tool_event_completion_limit(round_index=1, calls_remaining=5) == 2400
+    budget.consume_tool_event_completion(2400)
+    assert budget.tool_event_completion_recovery_bonus == 0
+    budget.reconcile_tool_event_completion(reserved=2400, actual=0)
+    budget.consume_tool_event_completion(11600)
+    assert budget.tool_event_completion_tokens_remaining == 400
+    assert budget.tool_event_completion_limit(round_index=1, calls_remaining=2) == 200
+
+    with pytest.raises(ValueError, match="completion floor"):
+        RuntimeBudgetMetadata(
+            tool_event_completion_ceiling=700,
+            tool_event_completion_floor=800,
+        )
+
+
+def test_context_selection_token_budget_requires_provider_tokenizer_evidence() -> None:
+    selection = ContextSelectionMetadata(
+        budget_unit="tokens",
+        max_prompt_chars=16000,
+        max_prompt_tokens=100,
+        original_prompt_chars=500,
+        final_prompt_chars=200,
+        original_prompt_tokens=180,
+        final_prompt_tokens=90,
+        token_count_method="provider_tokenizer",
+        tokenizer_id="deepseek-official-api-tokenizer",
+        model="deepseek-v4-flash",
+    )
+
+    assert ContextSelectionMetadata.model_validate_json(selection.model_dump_json()) == selection
+    with pytest.raises(ValueError, match="complete provider tokenizer evidence"):
+        ContextSelectionMetadata(
+            budget_unit="tokens",
+            max_prompt_chars=16000,
+            max_prompt_tokens=100,
+            original_prompt_tokens=180,
+            final_prompt_tokens=90,
+        )
+
+
+def test_typed_context_assembly_values_round_trip_and_reject_contradictory_status() -> None:
+    candidate = ContextCandidate(
+        candidate_id="constraint:goal",
+        kind=ContextCandidateKind.CONSTRAINT,
+        source_id="goal-1",
+        content="Preserve the requested output format.",
+        retention=ContextCandidateRetention.REQUIRED,
+        priority=90,
+        source_order=0,
+        truncation=ContextCandidateTruncation.FORBIDDEN,
+    )
+    decision = ContextCandidateDecision(
+        candidate_id=candidate.candidate_id,
+        kind=candidate.kind,
+        source_id=candidate.source_id,
+        retention=candidate.retention,
+        action="kept",
+        reason="within_budget",
+        original_chars=len(candidate.content),
+        selected_chars=len(candidate.content),
+    )
+    selection = ContextSelectionMetadata(
+        max_prompt_chars=1000,
+        original_prompt_chars=len(candidate.content),
+        final_prompt_chars=len(candidate.content),
+        candidate_decisions=[decision],
+    )
+    result = ContextAssemblyResult(
+        prompt_text=candidate.content,
+        selected_candidates=[candidate],
+        selection=selection,
+    )
+    policy = ContextAssemblyPolicy(max_prompt_chars=1000)
+
+    assert ContextAssemblyResult.model_validate_json(result.model_dump_json()) == result
+    assert ContextAssemblyPolicy.model_validate_json(policy.model_dump_json()) == policy
+    with pytest.raises(ValueError, match="ready assembly cannot omit required candidates"):
+        ContextSelectionMetadata(
+            max_prompt_chars=100,
+            assembly_status=ContextAssemblyStatus.READY,
+            omitted_required_candidate_ids=[candidate.candidate_id],
+        )
+    with pytest.raises(ValueError, match="non-empty content"):
+        ContextCandidate(
+            candidate_id="empty",
+            kind=ContextCandidateKind.TASK,
+            content="   ",
+        )
+
+
+def test_context_governance_fields_have_backward_compatible_defaults() -> None:
+    candidate = ContextCandidate.model_validate(
+        {
+            "candidate_id": "legacy-candidate",
+            "kind": "memory",
+            "content": "legacy content",
+        }
+    )
+    decision = ContextCandidateDecision.model_validate(
+        {
+            "candidate_id": "legacy-candidate",
+            "kind": "memory",
+            "retention": "preferred",
+            "action": "kept",
+            "reason": "within_budget",
+            "original_chars": 14,
+            "selected_chars": 14,
+        }
+    )
+
+    assert candidate.trust == ContextCandidateTrust.UNVERIFIED
+    assert candidate.freshness == ContextCandidateFreshness.UNKNOWN
+    assert decision.trust == ContextCandidateTrust.UNVERIFIED
+    assert decision.freshness == ContextCandidateFreshness.UNKNOWN
+    with pytest.raises(ValueError, match="requires blocked candidates"):
+        ContextSelectionMetadata(
+            max_prompt_chars=100,
+            assembly_status=ContextAssemblyStatus.GOVERNANCE_BLOCKED,
+        )
+
+
+def test_context_prompt_reserve_arithmetic_is_explicit_and_consistent() -> None:
+    policy = ContextAssemblyPolicy(
+        max_prompt_chars=1000,
+        max_prompt_tokens=120,
+        reserved_prompt_tokens=20,
+    )
+    selection = ContextSelectionMetadata(
+        budget_unit="tokens",
+        max_prompt_chars=1000,
+        requested_prompt_tokens=120,
+        reserved_prompt_tokens=20,
+        max_prompt_tokens=100,
+        original_prompt_tokens=140,
+        final_prompt_tokens=90,
+        remaining_prompt_tokens=10,
+        token_count_method="provider_tokenizer",
+        tokenizer_id="exact-test-tokenizer",
+        model="test-model",
+    )
+
+    assert ContextAssemblyPolicy.model_validate_json(policy.model_dump_json()) == policy
+    assert ContextSelectionMetadata.model_validate_json(selection.model_dump_json()) == selection
+    with pytest.raises(ValueError, match="smaller than max_prompt_tokens"):
+        ContextAssemblyPolicy(
+            max_prompt_chars=1000,
+            max_prompt_tokens=20,
+            reserved_prompt_tokens=20,
+        )
+    with pytest.raises(ValueError, match="prompt token budget arithmetic"):
+        ContextSelectionMetadata.model_validate(
+            {
+                **selection.model_dump(mode="python"),
+                "remaining_prompt_tokens": 11,
+            }
+        )
+
+
+def test_context_request_purpose_is_typed_and_round_trips_with_selection() -> None:
+    policy = ContextAssemblyPolicy(
+        purpose=ContextRequestPurpose.SEMANTIC_GOAL,
+        max_prompt_chars=1000,
+    )
+    selection = ContextSelectionMetadata(
+        request_purpose=ContextRequestPurpose.SEMANTIC_GOAL,
+        max_prompt_chars=1000,
+    )
+
+    assert ContextAssemblyPolicy.model_validate_json(policy.model_dump_json()) == policy
+    assert ContextSelectionMetadata.model_validate_json(selection.model_dump_json()) == selection
+
+
+def test_verification_plan_tracks_a_strict_completed_command_prefix() -> None:
+    plan = VerificationPlanMetadata(
+        reason="Ordered recovery validation",
+        commands=["pytest -q", "python -m compileall -q src"],
+        command_specs=[
+            VerificationCommandSpec(command="pytest -q", cwd="/tmp/project", timeout=30),
+            VerificationCommandSpec(command="python -m compileall -q src", cwd="/tmp/project", timeout=30),
+        ],
+        next_command_index=1,
+        completed_commands=["pytest -q"],
+    )
+
+    restored = VerificationPlanMetadata.model_validate_json(plan.model_dump_json())
+
+    assert restored.next_command_index == 1
+    assert restored.completed_commands == ["pytest -q"]
+    assert [spec.command for spec in restored.command_specs] == plan.commands
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"next_command_index": 2, "completed_commands": ["pytest -q"]},
+        {"next_command_index": 1, "completed_commands": ["python -m compileall -q src"]},
+        {"next_command_index": 3, "completed_commands": ["pytest -q", "python -m compileall -q src"]},
+    ],
+)
+def test_verification_plan_rejects_non_contiguous_or_out_of_range_progress(updates) -> None:
+    with pytest.raises(ValueError):
+        VerificationPlanMetadata(
+            reason="Invalid recovery progress",
+            commands=["pytest -q", "python -m compileall -q src"],
+            **updates,
+        )
+
+
+def _exported_metadata_models() -> list[type[MetadataBase]]:
+    return [
+        value
+        for name in metadata_module.__all__
+        if inspect.isclass(value := getattr(metadata_module, name))
+        and issubclass(value, MetadataBase)
+        and value is not MetadataBase
+    ]
+
+
+def test_exported_metadata_models_preserve_protocol_envelope() -> None:
+    models = _exported_metadata_models()
+    kinds: dict[MetadataKind, str] = {}
+
+    for model in models:
+        source_field = model.model_fields["source"]
+        assert source_field.annotation is MetadataSource, model.__name__
+
+        kind_field = model.model_fields["kind"]
+        assert get_origin(kind_field.annotation) is Literal, model.__name__
+        literal_kinds = get_args(kind_field.annotation)
+        assert len(literal_kinds) == 1, model.__name__
+        assert literal_kinds[0] == kind_field.default, model.__name__
+        assert kind_field.default not in kinds, (
+            f"{model.__name__} and {kinds[kind_field.default]} share {kind_field.default}"
+        )
+        kinds[kind_field.default] = model.__name__
+
+    assert set(kinds) == set(MetadataKind)
+
+
+def test_metadata_catalog_lists_every_exported_contract() -> None:
+    catalog_path = Path(__file__).parents[2] / "docs" / "metadata" / "CONTRACT_CATALOG.md"
+    catalog = catalog_path.read_text(encoding="utf-8")
+
+    missing = [model.__name__ for model in _exported_metadata_models() if f"`{model.__name__}`" not in catalog]
+
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    ("metadata_type", "semantic_field"),
+    [
+        (PathIntentMetadata, "path_source"),
+        (PathResolutionMetadata, "path_source"),
+        (ProblemSignalMetadata, "signal_source"),
+    ],
+)
+def test_legacy_semantic_source_is_migrated_without_breaking_envelope(
+    metadata_type: type[MetadataBase],
+    semantic_field: str,
+) -> None:
+    value = metadata_type.model_validate({"source": "legacy_source"})
+
+    assert value.source == MetadataSource()
+    assert getattr(value, semantic_field) == "legacy_source"
+    assert value.to_json_dict()["source"] == {
+        "source_type": "system",
+        "source_name": "openpilot",
+    }
 
 
 def test_metadata_base_fields_and_json_serialization() -> None:
@@ -86,7 +594,7 @@ def test_project_stack_preset_metadata_serializes_frontend_backend_decision() ->
 
 def test_problem_resolution_and_task_graph_metadata_serialize() -> None:
     signal = ProblemSignalMetadata(
-        source="tool_planning",
+        signal_source="tool_planning",
         category="planning_gap",
         message="empty plan",
         evidence=["decision_needs_count:0"],
@@ -217,6 +725,145 @@ def test_runtime_state_json_export_handles_method_values() -> None:
     assert "_command_approval_callback" not in payload["tool_history"][0]["input"]
     assert "runtime_handles" not in input_metadata.to_json_dict()
     assert callable(input_metadata.runtime_handles["_command_approval_callback"])
+
+
+def test_runtime_recovery_state_and_decision_round_trip_typed_control_fields() -> None:
+    state = RuntimeStateMetadata(
+        goal="Resume safely",
+        recovery_status=RecoveryStatus.RESUME_READY,
+        recovery_reason_code=RecoveryReasonCode.CHECKPOINT_VALID,
+        active_resume_attempt_id="resume-1",
+    )
+    decision = RuntimeResumeDecisionMetadata(
+        checkpoint_id="checkpoint-1",
+        run_id="run-1",
+        root_task_id="task-1",
+        session_id="session-1",
+        resume_attempt_id="resume-1",
+        decision="exact_resume",
+        recoverability=Recoverability.RECOVERABLE_NOW,
+        recovery_mode=RecoveryMode.EXACT_RESUME,
+        automation_policy=RecoveryAutomationPolicy.AUTOMATIC_ALLOWED,
+        reason_code=RecoveryReasonCode.CHECKPOINT_VALID,
+        safe_boundary="task_normalized",
+        reason="human explanation may change",
+        next_action="continue runtime session",
+        fallback=RecoveryFallback(
+            action=RecoveryFallbackAction.NONE,
+            reason_code=RecoveryReasonCode.CHECKPOINT_VALID,
+        ),
+    )
+
+    restored_state = RuntimeStateMetadata.model_validate(state.to_json_dict())
+    restored_decision = RuntimeResumeDecisionMetadata.model_validate(decision.to_json_dict())
+
+    assert restored_state.recovery_status == RecoveryStatus.RESUME_READY
+    assert restored_decision.recoverability == Recoverability.RECOVERABLE_NOW
+    assert restored_decision.recovery_mode == RecoveryMode.EXACT_RESUME
+    assert restored_decision.reason_code == RecoveryReasonCode.CHECKPOINT_VALID
+
+
+def test_runtime_resume_decision_rejects_contradictory_control_fields() -> None:
+    with pytest.raises(ValueError, match="not_recoverable"):
+        RuntimeResumeDecisionMetadata(
+            checkpoint_id="checkpoint-1",
+            run_id="run-1",
+            root_task_id="task-1",
+            session_id="session-1",
+            resume_attempt_id="resume-1",
+            decision="exact_resume",
+            recoverability=Recoverability.NOT_RECOVERABLE,
+            recovery_mode=RecoveryMode.EXACT_RESUME,
+            automation_policy=RecoveryAutomationPolicy.AUTOMATIC_ALLOWED,
+            reason_code=RecoveryReasonCode.CHECKPOINT_CORRUPT,
+            safe_boundary="controlled_stop",
+            reason="corrupt",
+            next_action="stop",
+            fallback=RecoveryFallback(
+                action=RecoveryFallbackAction.TERMINATE_PRESERVING_EVIDENCE,
+                reason_code=RecoveryReasonCode.CHECKPOINT_CORRUPT,
+                preserve_original_run=True,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="legacy decision"):
+        RuntimeResumeDecisionMetadata(
+            checkpoint_id="checkpoint-1",
+            run_id="run-1",
+            root_task_id="task-1",
+            session_id="session-1",
+            resume_attempt_id="resume-1",
+            decision="exact_resume",
+            recoverability=Recoverability.NOT_RECOVERABLE,
+            recovery_mode=RecoveryMode.NONE,
+            automation_policy=RecoveryAutomationPolicy.FORBIDDEN,
+            reason_code=RecoveryReasonCode.CHECKPOINT_CORRUPT,
+            safe_boundary="controlled_stop",
+            reason="corrupt",
+            next_action="stop",
+            fallback=RecoveryFallback(
+                action=RecoveryFallbackAction.TERMINATE_PRESERVING_EVIDENCE,
+                reason_code=RecoveryReasonCode.CHECKPOINT_CORRUPT,
+                preserve_original_run=True,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="automatic_allowed"):
+        RuntimeResumeDecisionMetadata(
+            checkpoint_id="checkpoint-1",
+            run_id="run-1",
+            root_task_id="task-1",
+            session_id="session-1",
+            resume_attempt_id="resume-1",
+            decision="blocked",
+            recoverability=Recoverability.RECOVERABLE_AFTER_ACTION,
+            recovery_mode=RecoveryMode.USER_ASSISTED_RESUME,
+            automation_policy=RecoveryAutomationPolicy.AUTOMATIC_ALLOWED,
+            reason_code=RecoveryReasonCode.PERMISSION_REQUIRED,
+            safe_boundary="controlled_stop",
+            reason="approval needed",
+            next_action="ask user",
+            blockers=[
+                RecoveryBlocker(
+                    reason_code=RecoveryReasonCode.PERMISSION_REQUIRED,
+                    resolvable=True,
+                    requires_user_action=True,
+                )
+            ],
+            fallback=RecoveryFallback(
+                action=RecoveryFallbackAction.REQUEST_USER_INPUT,
+                reason_code=RecoveryReasonCode.PERMISSION_REQUIRED,
+                requires_user_authorization=True,
+            ),
+        )
+
+
+def test_legacy_runtime_resume_decision_is_conservatively_migrated_without_text_matching() -> None:
+    restored = RuntimeResumeDecisionMetadata.model_validate(
+        {
+            "checkpoint_id": "checkpoint-1",
+            "run_id": "run-1",
+            "root_task_id": "task-1",
+            "session_id": "session-1",
+            "resume_attempt_id": "resume-1",
+            "decision": "blocked",
+            "safe_boundary": "controlled_stop",
+            "reason": "arbitrary historical wording",
+            "next_action": "arbitrary historical instruction",
+        }
+    )
+
+    assert restored.recoverability == Recoverability.RECOVERABLE_AFTER_ACTION
+    assert restored.recovery_mode == RecoveryMode.USER_ASSISTED_RESUME
+    assert restored.automation_policy == RecoveryAutomationPolicy.MANUAL_ONLY
+    assert restored.reason_code == RecoveryReasonCode.LEGACY_BLOCKED
+    assert restored.fallback is not None
+    assert restored.fallback.action == RecoveryFallbackAction.REQUEST_MANUAL_RECONCILIATION
+
+
+def test_runtime_state_rejects_unknown_verification_control_status() -> None:
+    with pytest.raises(ValueError, match="verification_status"):
+        RuntimeStateMetadata(goal="Verify", verification_status="looks_good")
 
 
 def test_tool_input_from_mapping_normalizes_llm_aliases_and_preserves_extras() -> None:

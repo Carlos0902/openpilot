@@ -85,9 +85,60 @@ class LLMProviderError(OpenPilotError):
 class InvalidLLMResponseError(OpenPilotError):
     """Raised when an LLM response cannot be parsed or validated."""
 
-    def __init__(self, message: str, response_text: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        response_text: Optional[str] = None,
+        *,
+        usage: Optional[Dict[str, Any]] = None,
+        finish_reason: Optional[str] = None,
+    ):
+        self.response_text = response_text or ""
+        self.usage = dict(usage or {})
+        self.finish_reason = finish_reason
         context = {"response_text": response_text[:500] if response_text else None}
         super().__init__(message, category=ErrorCategory.VALIDATION, context=context)
+
+
+class ContextAssemblyBudgetError(OpenPilotError):
+    """Raised before transport when required model context cannot fit."""
+
+    def __init__(self, omitted_required_candidate_ids: list[str]):
+        super().__init__(
+            "Required context cannot fit within the configured prompt budget",
+            category=ErrorCategory.VALIDATION,
+            context={"omitted_required_candidate_ids": list(omitted_required_candidate_ids)},
+        )
+
+
+class ContextAssemblyGovernanceError(OpenPilotError):
+    """Raised before transport when required context has unresolved governance."""
+
+    def __init__(self, governance_blocked_candidate_ids: list[str]):
+        super().__init__(
+            "Required context is blocked by source governance",
+            category=ErrorCategory.VALIDATION,
+            context={
+                "governance_blocked_candidate_ids": list(
+                    governance_blocked_candidate_ids
+                )
+            },
+        )
+
+
+class ContextSourceError(OpenPilotError):
+    """Raised when a context source cannot be read or its checkpoint cannot be persisted."""
+
+    def __init__(self, source: str, cause: Exception):
+        super().__init__(
+            f"Context source unavailable: {source}",
+            category=ErrorCategory.VALIDATION,
+            context={
+                "source": str(source),
+                "cause_type": type(cause).__name__,
+                "cause_message": str(cause),
+            },
+        )
 
 
 class NetworkError(OpenPilotError):

@@ -400,7 +400,7 @@ class ProjectPathResolver:
             candidate_paths=candidate_paths or [],
             intent_kind=intent.intent_kind,
             operation=intent.operation,
-            source=intent.source,
+            path_source=intent.path_source,
             inside_project=inside_project,
             exists_verified=exists_verified,
             parent_exists=parent_exists,
@@ -426,7 +426,7 @@ def resolve_path_within_project(
         raw_path=str(raw_path),
         intent_kind=intent_kind,
         operation=operation,
-        source=source,
+        path_source=source,
         evidence=evidence or [],
         candidate_paths=list(candidate_paths or []),
     )
@@ -486,7 +486,7 @@ def ground_command_paths_within_project(
             raw_path=reference.raw_path,
             intent_kind=reference.intent_kind,
             operation=reference.operation,
-            source=source,
+            path_source=source,
             evidence=list(evidence or []),
             attributes={"command_token": reference.token, "token_index": reference.token_index},
         )

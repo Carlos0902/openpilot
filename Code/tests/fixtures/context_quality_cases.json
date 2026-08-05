@@ -1,0 +1,43 @@
+[
+  {
+    "name": "budget_retention",
+    "max_prompt_chars": 48,
+    "candidates": [
+      {"candidate_id": "required", "kind": "instruction", "content": "Keep this.", "retention": "required", "truncation": "forbidden", "source_order": 0},
+      {"candidate_id": "optional", "kind": "memory", "content": "optional optional optional optional optional optional", "retention": "optional", "truncation": "forbidden", "source_order": 1}
+    ],
+    "expected_selected": ["required"],
+    "expected_omitted": ["optional"]
+  },
+  {
+    "name": "explicit_conflict",
+    "max_prompt_chars": 500,
+    "candidates": [
+      {"candidate_id": "old-runtime", "kind": "memory", "content": "Runtime is Python 3.9.", "trust": "retrieved", "freshness": "historical", "conflict_key": "runtime.python", "source_order": 0},
+      {"candidate_id": "current-runtime", "kind": "environment", "content": "Runtime is Python 3.13.", "trust": "observed", "freshness": "current", "conflict_key": "runtime.python", "source_order": 1}
+    ],
+    "expected_selected": ["current-runtime"],
+    "expected_omitted": ["old-runtime"]
+  },
+  {
+    "name": "exact_duplicate",
+    "max_prompt_chars": 500,
+    "candidates": [
+      {"candidate_id": "duplicate-low", "kind": "memory", "content": "Preserve   dashboard route.", "priority": 40, "source_order": 0},
+      {"candidate_id": "duplicate-high", "kind": "memory", "content": "Preserve dashboard route.", "priority": 80, "source_order": 1}
+    ],
+    "expected_selected": ["duplicate-high"],
+    "expected_omitted": ["duplicate-low"]
+  },
+  {
+    "name": "artifact_compaction",
+    "max_prompt_chars": 500,
+    "candidates": [
+      {"candidate_id": "dialog-old-1", "kind": "dialog", "content": "USER: first old message", "source_order": 1},
+      {"candidate_id": "dialog-old-2", "kind": "dialog", "content": "ASSISTANT: second old message", "source_order": 2},
+      {"candidate_id": "dialog-summary", "kind": "artifact", "content": "Earlier dialog summary", "priority": 99, "source_order": 0, "truncation": "forbidden", "compacted_candidate_ids": ["dialog-old-1", "dialog-old-2"]}
+    ],
+    "expected_selected": ["dialog-summary"],
+    "expected_omitted": ["dialog-old-1", "dialog-old-2"]
+  }
+]
