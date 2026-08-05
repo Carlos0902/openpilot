@@ -1,0 +1,52 @@
+{
+  "experiment_id": "stage9-evidence-contract-sentinel-v1",
+  "final_contract_result": {
+    "source_run": "runs/stage9_evidence_contract_sentinel_20260804_01",
+    "production_policy": "compact",
+    "shadow_policy": "current",
+    "arm_stop_reasons": [],
+    "quality_gate": {
+      "passed": true,
+      "checks_passed": 9,
+      "checks_total": 9
+    },
+    "lifecycle_usage": {
+      "input_tokens": 13148,
+      "output_tokens": 2272,
+      "total_tokens": 15420,
+      "hard_limit_tokens": 20000
+    },
+    "production_task_designer": {
+      "provider_input_tokens": 1731,
+      "provider_output_tokens": 216,
+      "provider_total_tokens": 1947,
+      "raw_evidence_ids": 4,
+      "accepted_evidence_ids": 4,
+      "rejected_evidence_ids": 0
+    },
+    "shadow_task_designer": {
+      "provider_input_tokens": 2910,
+      "provider_output_tokens": 166,
+      "provider_total_tokens": 3076,
+      "raw_evidence_ids": 5,
+      "accepted_evidence_ids": 5,
+      "rejected_evidence_ids": 0
+    }
+  },
+  "deduplication_counterexample": {
+    "intervention": "full identity-domain rule retained in schema but shortened in instruction",
+    "provider_calls": 1,
+    "provider_total_tokens": 890,
+    "hard_limit_tokens": 4000,
+    "raw_evidence_ids": [
+      "stage9-divide-docstring-strong"
+    ],
+    "accepted_evidence_ids": [],
+    "rejected_evidence_ids": [
+      "stage9-divide-docstring-strong"
+    ],
+    "conclusion": "current provider requires the identity-domain rule to remain explicit in both instruction and schema"
+  },
+  "decision": "keep_strong_contract",
+  "production_default_changed": false
+}

@@ -36,6 +36,20 @@ This is the active index for:
 
 Testing guidance aligned with the trajectory-evidence workflow.
 
+### Metadata architecture
+
+- `./metadata/README.md`
+
+This is the single index for the mandatory development convention, authoritative
+contract catalog, and non-normative value-nesting research.
+
+### Runtime checkpoint and recovery
+
+- `./runtime_recovery/README.md`
+
+This is the single index for the active comprehensive recovery-boundary roadmap,
+checkpoint/storage design, and typed status/fallback design.
+
 ## Documentation maintenance rule
 
 If a completed implementation changes task trajectory, real-task diagnostics,

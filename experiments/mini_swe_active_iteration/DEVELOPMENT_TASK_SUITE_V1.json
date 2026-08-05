@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "suite_id": "mini-swe-active-development-v1",
+  "lifecycle": "development",
+  "hypothesis_evidence_eligible": false,
+  "tasks": [
+    {
+      "task_id": "resolve-record-exposed",
+      "stratum": "api-signature",
+      "instruction": "Repair resolve_record against the installed contract module while preserving its one-argument API. Use the public files and tests in the current directory. When finished, submit a concise summary.",
+      "public_files": {
+        "solution.py": "from contract import fetch\n\n\ndef resolve_record(value):\n    return fetch(value)\n",
+        "contract.py": "def fetch(*, key, namespace):\n    return f'{namespace}/{key.strip().casefold()}'\n",
+        "test_public.py": "from solution import resolve_record\n\n\ndef test_primary_record():\n    assert resolve_record(' Alpha ') == 'primary/alpha'\n"
+      },
+      "hidden_evaluator": {
+        "test_files": {
+          "test_hidden.py": "from solution import resolve_record\n\n\ndef test_other_records():\n    assert resolve_record('BETA') == 'primary/beta'\n    assert resolve_record(' x-7 ') == 'primary/x-7'\n"
+        },
+        "command": "python -m pytest -q test_hidden.py"
+      }
+    }
+  ]
+}

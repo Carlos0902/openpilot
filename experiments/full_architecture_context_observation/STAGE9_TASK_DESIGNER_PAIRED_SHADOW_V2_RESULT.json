@@ -1,0 +1,82 @@
+{
+  "campaign_id": "stage9-task-designer-paired-shadow-v2",
+  "source_campaign_state": "runs/stage9_v2_resume_arms2_6_20260804_03/campaign_state.json",
+  "source_campaign_state_sha256": "sha256:9a4b3943ccc75d10d8dcdfbf8749b765de31eca0abc27caf8d1c9d53b5aec33a",
+  "status": "completed",
+  "eligible": true,
+  "recommendation": "requires_separate_review",
+  "independent_safety_audit": "conditional_go",
+  "claim_boundary": "same_source_paired_task_designer_input_only",
+  "production_policy_counts": {
+    "current": 3,
+    "compact": 3
+  },
+  "observation_counts": {
+    "current": 6,
+    "compact": 6
+  },
+  "quality": {
+    "task_designer_requests_passed": 12,
+    "task_designer_requests_total": 12,
+    "full_architecture_gates_passed": 6,
+    "full_architecture_gates_total": 6,
+    "arm_stop_reasons": [],
+    "usage_coverage": 1.0,
+    "lifecycle_execution_ids_unique": 60,
+    "shadow_downstream_consumed": false,
+    "shadow_side_effects_observed": false
+  },
+  "paired_metrics": {
+    "provider_input_tokens": {
+      "current": 17262,
+      "compact": 9702,
+      "absolute_reduction": 7560,
+      "reduction_fraction": 0.43795620437956206
+    },
+    "provider_output_tokens": {
+      "current": 1086,
+      "compact": 1054,
+      "absolute_reduction": 32,
+      "reduction_fraction": 0.029465930018416207
+    },
+    "provider_total_tokens": {
+      "current": 18348,
+      "compact": 10756,
+      "absolute_reduction": 7592,
+      "reduction_fraction": 0.4137788865271419
+    },
+    "all_six_pairs_compact_lower": true
+  },
+  "stage9_lifetime_budget": {
+    "opening_historical_tokens": 79131,
+    "new_observed_lifecycle_tokens": 74929,
+    "effective_tokens": 154060,
+    "hard_limit_tokens": 180000,
+    "remaining_tokens": 25940,
+    "held_unknown_usage_tokens": 0,
+    "hard_failures": []
+  },
+  "decision_boundary": {
+    "allowed": [
+      "separately_reviewed_feature_flagged_iteration_task_design_canary"
+    ],
+    "required_controls": [
+      "current_fallback",
+      "kill_switch",
+      "typed_candidate_gates",
+      "usage_and_quality_telemetry",
+      "mutation_and_verification_controls"
+    ],
+    "not_authorized": [
+      "global_context_default_switch",
+      "current_fallback_removal",
+      "cross_provider_or_cross_task_generalization",
+      "simultaneous_reasoning_or_completion_policy_change"
+    ]
+  },
+  "remaining_limitations": [
+    "all_production_raw_evidence_ids_were_rejected_by_fail_closed_provenance_filter",
+    "single_provider_model",
+    "single_calculator_docstring_task_family"
+  ]
+}

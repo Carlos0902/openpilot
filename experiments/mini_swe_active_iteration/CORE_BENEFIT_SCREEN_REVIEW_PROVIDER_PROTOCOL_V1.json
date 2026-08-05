@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "protocol_id": "mini-swe-core-benefit-screen-review-provider-v1",
+  "lifecycle": "pre-execution-review",
+  "reviewer_role": "independent_outcome_blind_stratum_reviewer",
+  "provider": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.deepseek.com",
+    "model_name": "deepseek-v4-flash",
+    "temperature": 0.0,
+    "max_output_tokens": 512,
+    "request_attempts_per_candidate": 1,
+    "stream": false,
+    "separate_request_per_candidate": true,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "api_key_environment_variable": "DEEPSEEK_API_KEY",
+  "prompt_file": "CORE_BENEFIT_SCREEN_REVIEW_PROVIDER_PROMPT_V1.txt",
+  "prompt_sha256": "f776659d2f3059cc72b965c74fe98dcca78227002fc398ac987b28de8e4d005a",
+  "rules_file": "EXPLORATORY_TASK_ACQUISITION_RULES_V4.json",
+  "rules_file_sha256": "834e6f776798870d65de462ef89a2c5d804f002d456ffd6034723a484d5ecdcc",
+  "source_parquet_sha256": "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+  "source_parquet_url": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified/resolve/refs%2Fconvert%2Fparquet/default/test/0000.parquet",
+  "reviewer_identity_sha256": "1bc64db7ce0592a1aa79828d82690f5b42d318fa7dfe09e3810448a20e34cb03",
+  "candidate_input_fields": [
+    "instance_id",
+    "problem_statement",
+    "patch",
+    "test_patch"
+  ],
+  "forbidden_reviewer_inputs": [
+    "first_review_decision",
+    "first_review_rationale",
+    "ordinary_trajectory",
+    "active_iteration_trajectory",
+    "task_arm_outcome",
+    "hidden_evaluator_result",
+    "FAIL_TO_PASS",
+    "PASS_TO_PASS"
+  ],
+  "private_output_root": "../../../openpilot-private/mini_swe_acquisition/v4/reviews/deepseek-v4-flash-reviewer-v1",
+  "public_output_root": "exploratory_candidate_review_v1",
+  "public_receipt_root": "core_benefit_screen_v1/provider_review_receipts",
+  "public_output_rule": "Only redacted CandidateStratumReviewDecision JSON and SHA-256 bindings may enter the public repository. Raw request content, raw response content, and rationale text remain private.",
+  "public_receipt_fields": [
+    "schema_version",
+    "receipt_id",
+    "protocol_sha256",
+    "prompt_sha256",
+    "instance_id",
+    "reviewer_identity_sha256",
+    "provider",
+    "model_name",
+    "temperature",
+    "request_sha256",
+    "response_sha256",
+    "private_review_sha256",
+    "decision_sha256",
+    "task_arm_outcomes_generated"
+  ],
+  "review_provider_execution_authorized": true,
+  "task_arm_provider_execution_authorized": false,
+  "task_outcomes_generated": false,
+  "production_execution_authorized": false,
+  "hypothesis_evidence_eligible": false
+}

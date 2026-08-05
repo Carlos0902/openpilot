@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "protocol_id": "mini-swe-core-benefit-screen-mechanism-review-provider-v1",
+  "lifecycle": "pre-execution-review",
+  "reviewer_role": "outcome_blind_mechanism_reviewer",
+  "provider": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.deepseek.com",
+    "model_name": "deepseek-v4-flash",
+    "temperature": 0.0,
+    "max_output_tokens": 512,
+    "request_attempts_per_candidate": 1,
+    "stream": false,
+    "separate_request_per_candidate": true,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "api_key_environment_variable": "DEEPSEEK_API_KEY",
+  "reviewer_identity_sha256": "1bc64db7ce0592a1aa79828d82690f5b42d318fa7dfe09e3810448a20e34cb03",
+  "prompt_file": "CORE_BENEFIT_SCREEN_MECHANISM_REVIEW_PROVIDER_PROMPT_V1.txt",
+  "prompt_sha256": "3e51af0b44bcd4f2baabc7dcfd6be8c7c2a76907f9721d190550ac65f08fc265",
+  "rules_file": "EXPLORATORY_TASK_ACQUISITION_RULES_V4.json",
+  "rules_file_sha256": "834e6f776798870d65de462ef89a2c5d804f002d456ffd6034723a484d5ecdcc",
+  "candidate_input_fields": [
+    "instance_id",
+    "problem_statement",
+    "patch",
+    "test_patch"
+  ],
+  "forbidden_reviewer_inputs": [
+    "first_review_decision",
+    "ordinary_trajectory",
+    "active_iteration_trajectory",
+    "task_arm_outcome",
+    "hidden_evaluator_result",
+    "FAIL_TO_PASS",
+    "PASS_TO_PASS"
+  ],
+  "private_output_root": "../../../openpilot-private/mini_swe_acquisition/v4/reviews/deepseek-v4-flash-mechanism-v1",
+  "public_output_root": "core_benefit_screen_v1/mechanism_reviews",
+  "review_provider_execution_authorized": true,
+  "task_arm_provider_execution_authorized": false,
+  "task_outcomes_generated": false,
+  "production_execution_authorized": false,
+  "hypothesis_evidence_eligible": false
+}

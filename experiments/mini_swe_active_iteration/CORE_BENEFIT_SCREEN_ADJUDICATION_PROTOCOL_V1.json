@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "protocol_id": "mini-swe-core-benefit-screen-adjudication-v1",
+  "lifecycle": "pre-execution-review",
+  "purpose": "Resolve only disagreeing outcome-blind primary-stratum reviews without changing either source review.",
+  "rules_file": "EXPLORATORY_TASK_ACQUISITION_RULES_V4.json",
+  "rules_file_sha256": "834e6f776798870d65de462ef89a2c5d804f002d456ffd6034723a484d5ecdcc",
+  "allowed_inputs": [
+    "candidate task material",
+    "two redacted primary-stratum decisions",
+    "frozen stratum definitions"
+  ],
+  "forbidden_inputs": [
+    "ordinary_trajectory",
+    "active_iteration_trajectory",
+    "task_arm_outcome",
+    "hidden_evaluator_result",
+    "FAIL_TO_PASS",
+    "PASS_TO_PASS"
+  ],
+  "public_output_root": "core_benefit_screen_v1/adjudications",
+  "private_output_root": "../../../openpilot-private/mini_swe_acquisition/v4/reviews/core-benefit-screen-adjudication-v1",
+  "public_receipt_fields": [
+    "schema_version",
+    "adjudication_id",
+    "instance_id",
+    "selection_rank",
+    "first_review_sha256",
+    "second_review_sha256",
+    "adjudicator_identity_sha256",
+    "resolved_primary_stratum",
+    "private_rationale_sha256",
+    "blind_to_future_arm_outcomes",
+    "agent_arm_outcomes_available",
+    "provider_execution_authorized",
+    "production_execution_authorized"
+  ],
+  "task_arm_provider_execution_authorized": false,
+  "task_outcomes_generated": false,
+  "production_execution_authorized": false,
+  "hypothesis_evidence_eligible": false
+}

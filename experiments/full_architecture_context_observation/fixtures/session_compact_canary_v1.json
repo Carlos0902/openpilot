@@ -1,0 +1,15 @@
+{
+  "fixture_id": "session-compact-canary-v1",
+  "projection_scope": "full_session_prompt",
+  "primary_projection": "compact",
+  "fallback_projection": "current",
+  "required_context_sections": [
+    "system_prompt",
+    "session_constraints",
+    "dialog_context"
+  ],
+  "forbidden_policy_changes": [
+    "reasoning_policy",
+    "completion_policy"
+  ]
+}

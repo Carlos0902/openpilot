@@ -1,5 +1,10 @@
 # 当前值嵌套 Metadata 骨架梳理
 
+> **状态：研究记录 / 非规范。** 本文记录当前值嵌套形态和未来可能出现的压力，不能作为
+> 三层架构、图化或跨树引用改造的实施授权，也不是新增 metadata 的规范。项目级规则见
+> `docs/metadata/DEVELOPMENT_CONVENTIONS.md`，全量目录见
+> `docs/metadata/CONTRACT_CATALOG.md`。
+
 ## 1. 目的
 
 本文只回答两个问题：
@@ -12,12 +17,12 @@
 
 本文基于当前代码直接整理，主要来源：
 
-- `/Users/abab/Documents/openpilot/Code/src/metadata/agent_runtime.py`
-- `/Users/abab/Documents/openpilot/Code/src/metadata/project.py`
-- `/Users/abab/Documents/openpilot/Code/src/metadata/results.py`
-- `/Users/abab/Documents/openpilot/Code/src/metadata/runtime.py`
-- `/Users/abab/Documents/openpilot/Code/src/metadata/tooling.py`
-- `/Users/abab/Documents/openpilot/Code/src/metadata/artifacts.py`
+- `Code/src/metadata/agent_runtime.py`
+- `Code/src/metadata/project.py`
+- `Code/src/metadata/results.py`
+- `Code/src/metadata/runtime.py`
+- `Code/src/metadata/tooling.py`
+- `Code/src/metadata/artifacts.py`
 
 ---
 
@@ -529,4 +534,3 @@ BugFixResultMetadata
 1. 先把值嵌套骨架明确下来；
 2. 先把共享语义收敛清楚；
 3. 再挑最痛的跨域场景，局部引入图关系或引用关系。
-

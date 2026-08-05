@@ -1,0 +1,153 @@
+{
+  "schema_version": "1.0",
+  "rules_id": "mini-swe-exploratory-acquisition-v1",
+  "lifecycle": "exploratory",
+  "source": {
+    "dataset_name": "princeton-nlp/SWE-bench_Verified",
+    "split": "test",
+    "revision": "7f1793642f5ab809c0bce2e343b902247954170e",
+    "expected_row_count": 500,
+    "dataset_url": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified/tree/7f1793642f5ab809c0bce2e343b902247954170e",
+    "dataset_documentation_url": "https://www.swebench.com/SWE-bench/guides/datasets/",
+    "harness_repository_url": "https://github.com/SWE-bench/SWE-bench"
+  },
+  "source_rationale": "SWE-bench Verified supplies 500 engineer-verified real repository issues with base commits, problem statements, gold patches, test patches, and official container evaluation metadata. It is large enough to construct an eligibility pool before fixed-seed stratified sampling.",
+  "known_source_limitations": [
+    "The public benchmark may have appeared in model training or evaluation data, so exploratory results cannot establish contamination-free generalization.",
+    "The official harness is resource intensive and recommends x86_64; arm64 support is experimental.",
+    "Dataset and harness revisions can change independently, so the final exploratory protocol must pin both and bind the acquired manifest.",
+    "Engineer verification does not guarantee that a pinned local environment remains reproducible; every candidate must pass the frozen base/gold preflight."
+  ],
+  "inclusion_requirements": [
+    "The instance exists exactly once in the pinned dataset revision and has a full base_commit, problem_statement, patch, test_patch, FAIL_TO_PASS, and PASS_TO_PASS record.",
+    "The repository license and task artifacts permit local research evaluation and archival of hashes and metadata.",
+    "A clean pinned snapshot builds under a pinned SWE-bench harness and Docker runtime without credentials, GPU, Git LFS, submodules, or live external services.",
+    "Two clean base runs reproduce at least one designated FAIL_TO_PASS failure and agree on the evaluator outcome.",
+    "Two clean gold-patch runs pass the official evaluator and agree on the evaluator outcome.",
+    "Agent and evaluator execution succeed with network disabled after immutable image acquisition.",
+    "Setup, checkout size, and evaluator duration remain within the frozen resource limits.",
+    "The task has not appeared in this project's exposure registry and has not been inspected through an earlier mini-SWE task outcome."
+  ],
+  "exclusion_reasons": [
+    "duplicate_or_missing_dataset_identity",
+    "missing_or_incompatible_license",
+    "previous_project_exposure",
+    "gold_or_test_patch_leakage",
+    "base_failure_not_reproduced_twice",
+    "gold_patch_not_verified_twice",
+    "repeat_outcome_disagreement",
+    "build_or_install_failure",
+    "live_network_or_external_service_required",
+    "credentials_or_private_dependency_required",
+    "gpu_gui_large_data_lfs_or_submodule_required",
+    "resource_limit_exceeded",
+    "hidden_evaluator_cannot_be_isolated",
+    "stratum_review_unresolved",
+    "repository_cap_or_stratum_quota_conflict"
+  ],
+  "exposure_registry_paths": [
+    "DEVELOPMENT_TASK_SUITE_V1.json",
+    "SMOKE_DEVELOPMENT_PROTOCOL_V1.json",
+    "SMOKE_DEVELOPMENT_PROTOCOL_V2.json",
+    "SMOKE_DEVELOPMENT_PROTOCOL_V3.json",
+    "SMOKE_DEVELOPMENT_PROTOCOL_V4.json",
+    "development_smoke_v1",
+    "development_smoke_v2",
+    "development_smoke_v3",
+    "development_smoke_v4"
+  ],
+  "required_candidate_manifest_fields": [
+    "instance_id",
+    "repo",
+    "base_commit",
+    "problem_statement_sha256",
+    "dataset_row_sha256",
+    "repository_license_spdx",
+    "harness_commit",
+    "docker_runtime_fingerprint",
+    "instance_image_fingerprint",
+    "base_preflight_receipt_sha256",
+    "gold_preflight_receipt_sha256",
+    "network_disabled",
+    "checkout_bytes",
+    "setup_seconds",
+    "evaluator_seconds",
+    "production_files_changed",
+    "test_files_changed",
+    "primary_stratum",
+    "review_record_sha256",
+    "eligibility",
+    "exclusion_reason"
+  ],
+  "stratum_definitions": {
+    "localization": "The issue does not identify the production file or symbol ultimately changed; the gold fix changes one production file, so locating the target is the primary difficulty.",
+    "single_file": "The gold fix changes exactly one production file and the task does not meet a higher-precedence stratum definition.",
+    "multi_file_interface": "The gold fix changes at least two production files across an interface, call boundary, serialization contract, or distinct package modules.",
+    "config_cli": "The externally visible behavior is governed by configuration parsing, command-line handling, environment options, or packaging metadata.",
+    "test_regression": "The fix must preserve at least one PASS_TO_PASS group while resolving two or more distinct FAIL_TO_PASS tests or failure signatures.",
+    "measurement_disambiguation": "The issue and initial failing test do not uniquely identify the root cause; at least one additional public measurement can distinguish two plausible causes before mutation."
+  },
+  "sampling": {
+    "algorithm": "sha256-ranked-stratified-v1",
+    "selection_seed": 20260731,
+    "target_task_count": 20,
+    "minimum_eligible_pool_size": 60,
+    "maximum_tasks_per_repository": 3,
+    "canonical_sort_key": "instance_id",
+    "without_replacement": true,
+    "stratum_precedence": [
+      "measurement_disambiguation",
+      "config_cli",
+      "multi_file_interface",
+      "test_regression",
+      "localization",
+      "single_file"
+    ],
+    "stratum_quotas": {
+      "measurement_disambiguation": 3,
+      "config_cli": 3,
+      "multi_file_interface": 4,
+      "test_regression": 3,
+      "localization": 3,
+      "single_file": 4
+    }
+  },
+  "preflight": {
+    "clean_snapshot_required": true,
+    "pinned_base_commit_required": true,
+    "pinned_harness_commit_required": true,
+    "docker_required": true,
+    "gold_pass_repetitions": 2,
+    "base_failure_repetitions": 2,
+    "identical_repeat_outcomes_required": true,
+    "maximum_setup_seconds": 1800,
+    "maximum_evaluator_seconds": 900,
+    "maximum_checkout_bytes": 1073741824,
+    "agent_network_allowed": false,
+    "evaluator_network_allowed": false,
+    "credentials_allowed": false,
+    "gpu_allowed": false
+  },
+  "hidden_data_policy": {
+    "gold_patch_visible_to_agent": false,
+    "test_patch_visible_to_agent": false,
+    "fail_to_pass_visible_to_agent": false,
+    "pass_to_pass_visible_to_agent": false,
+    "stratum_visible_to_agent": false,
+    "arm_label_visible_to_evaluator": false,
+    "acquisition_review_may_use_gold_and_test_patch": true,
+    "hidden_materialization_boundary": "evaluator_container_only"
+  },
+  "review_policy": {
+    "independent_reviewer_count": 2,
+    "reviewers_blind_to_future_arm_outcomes": true,
+    "disagreements_require_adjudication": true,
+    "review_records_required": true,
+    "exposure_registry_required": true,
+    "post_outcome_relabeling_allowed": false
+  },
+  "task_outcomes_generated": false,
+  "provider_execution_authorized": false,
+  "production_execution_authorized": false,
+  "hypothesis_evidence_eligible": false
+}

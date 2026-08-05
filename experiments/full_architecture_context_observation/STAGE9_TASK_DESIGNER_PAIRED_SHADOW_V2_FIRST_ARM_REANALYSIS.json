@@ -1,0 +1,67 @@
+{
+  "campaign_id": "stage9-task-designer-paired-shadow-v2",
+  "status": "sentinel_passed_after_observer_reanalysis",
+  "provider_calls_during_reanalysis": 0,
+  "scenario_id": "strongly_related_diagnosis",
+  "production_policy": "current",
+  "shadow_policy": "compact",
+  "original_run": "runs/stage9_v2_first_arm_retry_20260804_02/01_p1_strongly_related_diagnosis_current_production",
+  "immutable_source_hashes": {
+    "campaign_state_sha256": "sha256:27ccb05f1ba72e7dd445e1cbb70782bc9f47a340422e6cb0a270134bb8246df1",
+    "campaign_record_sha256": "sha256:d92ebbd849434d456b5b7dcd81c615757b8e9d19b660e6a8402fab9ed526d339",
+    "manifest_sha256": "sha256:c013ae8188a9d828760045aaba3065f51832994cf2438b7be4ce61d93acd7821"
+  },
+  "observer_correction": {
+    "observed_failure": "paired_max_completion_mismatch",
+    "cause": "shadow request max completion was read from the production-only completion budget reservation",
+    "authoritative_field": "llm_requested.payload.trace_info.diagnostics.max_tokens",
+    "production_max_completion_tokens": 1000,
+    "shadow_max_completion_tokens": 1000,
+    "product_reservation_tokens": {
+      "production": 1000,
+      "shadow": 0
+    }
+  },
+  "recomputed_arm_stop_reasons": [],
+  "resume_accounting": {
+    "v1_historical_tokens": 51391,
+    "failed_first_arm_tokens": 12790,
+    "successful_seed_tokens": 14950,
+    "lifetime_opening_tokens": 79131,
+    "lifetime_remaining_tokens": 100869,
+    "strongly_related_scenario_prior_tokens": 27740,
+    "seed_is_in_historical_and_must_not_be_recounted_as_new_observed": true
+  },
+  "quality_gate_passed": true,
+  "quality_checks_passed": 9,
+  "usage": {
+    "lifecycle_total_tokens": 14950,
+    "paired_task_designer_total_tokens": 4776,
+    "usage_coverage": 1.0,
+    "failed_attempts": 0,
+    "transport_retries": 0
+  },
+  "task_designer_comparison": {
+    "current": {
+      "assembled_prompt_tokens": 2813,
+      "provider_input_tokens": 2838,
+      "provider_output_tokens": 138,
+      "provider_total_tokens": 2976
+    },
+    "compact": {
+      "assembled_prompt_tokens": 1634,
+      "provider_input_tokens": 1659,
+      "provider_output_tokens": 141,
+      "provider_total_tokens": 1800
+    },
+    "assembled_prompt_token_reduction": 1179,
+    "assembled_prompt_reduction_fraction": 0.419125,
+    "provider_input_token_reduction": 1179,
+    "provider_input_reduction_fraction": 0.415433,
+    "provider_total_token_reduction": 1176,
+    "provider_total_reduction_fraction": 0.395161,
+    "output_semantically_equivalent": true
+  },
+  "provenance_limitation": "Both outputs cited the goal-domain id rather than the retained context candidate id; production filtering rejected that citation without changing task authority or quality.",
+  "claim_boundary": "one same-source paired sentinel; compact output was shadow-only and did not receive downstream execution"
+}

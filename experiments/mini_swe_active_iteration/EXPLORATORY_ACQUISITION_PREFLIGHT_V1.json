@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "receipt_id": "mini-swe-exploratory-host-preflight-v1",
+  "rules_canonical_sha256": "59622106f4d926173ed0e3abddab26a587b1caea8b394fef008255e2c6c50686",
+  "source_revision": "7f1793642f5ab809c0bce2e343b902247954170e",
+  "source_parquet_sha256": "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+  "source_parquet_bytes": 2096679,
+  "source_row_count": 500,
+  "unique_instance_id_count": 500,
+  "repository_count": 12,
+  "source_columns": [
+    "repo",
+    "instance_id",
+    "base_commit",
+    "patch",
+    "test_patch",
+    "problem_statement",
+    "hints_text",
+    "created_at",
+    "version",
+    "FAIL_TO_PASS",
+    "PASS_TO_PASS",
+    "environment_setup_commit",
+    "difficulty"
+  ],
+  "source_gate_passed": true,
+  "host_architecture": "arm64",
+  "available_storage_bytes": 4187947008,
+  "required_storage_bytes": 128849018880,
+  "docker_client_version": "29.4.2",
+  "docker_daemon_available": false,
+  "blockers": [
+    "docker_daemon_unavailable",
+    "available_storage_below_120_gib",
+    "arm64_harness_support_experimental"
+  ],
+  "host_resource_gate_passed": false,
+  "eligible_pool_generated": false,
+  "exploratory_protocol_frozen": false,
+  "task_outcomes_generated": false,
+  "provider_execution_authorized": false,
+  "production_execution_authorized": false
+}

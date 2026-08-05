@@ -1,0 +1,17 @@
+{
+  "candidate_count": 500,
+  "eligible_pool_generated": false,
+  "hidden_fields_persisted": false,
+  "inventory_file_sha256": "a889dd5105852b2353a056cc44c67b2a0fa952260030df534952e92c350c78e3",
+  "preflight_file_sha256": "ca62d7283b6af7b92e5596b6926236e1b16811bbafc3329c2e087fab62507dfb",
+  "previously_exposed_count": 0,
+  "production_execution_authorized": false,
+  "provider_execution_authorized": false,
+  "receipt_id": "mini-swe-exploratory-candidate-inventory-receipt-v3",
+  "repository_count": 12,
+  "rules_canonical_sha256": "5918ad92e1f92b2fed6ba397a013509c64aebed2173fb533d622df3c50b31a88",
+  "rules_file_sha256": "28eac1f4b934a7c3aa3899817cc62939664c8a4eda2bbf4872d5286f7c13c7f9",
+  "schema_version": "1.0",
+  "source_parquet_sha256": "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+  "task_outcomes_generated": false
+}

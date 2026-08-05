@@ -121,6 +121,19 @@ Properties:
 - used for exact event/artifact correlation;
 - must not be treated as task identity.
 
+## 6. `resume_attempt_id`
+
+Meaning:
+
+- one explicit attempt to continue a durable checkpoint after a process/session boundary.
+
+Properties:
+
+- `run_id`, root task ID, and session ID remain unchanged;
+- each resume request receives a new value;
+- it must not replace tool/LLM execution IDs;
+- checkpoints and resume preflight evidence use it to distinguish repeated recovery attempts.
+
 Examples:
 
 - `05bd9d97-...:r2:c1`

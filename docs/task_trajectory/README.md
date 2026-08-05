@@ -56,6 +56,42 @@ it whenever a diagnosed problem is completed.
 Use this for the current observed failure phenomena and suspected root problems
 from the latest real-task run.
 
+### 8. Runtime checkpoint and recovery plan
+
+- `../runtime_recovery/README.md`
+- `../runtime_recovery/COMPREHENSIVE_RECOVERY_BOUNDARY_PLAN.md`
+- `../runtime_recovery/RUNTIME_CHECKPOINT_RECOVERY_PLAN.md`
+
+Use this for durable runtime checkpoints, restart recovery, side-effect
+reconciliation, budget continuity, and recovery acceptance criteria. The
+trajectory layer remains recovery evidence rather than the mutable recovery
+source of truth.
+
+### 9. Root/subtask state isolation plan
+
+- `./ROOT_SUBTASK_STATE_ISOLATION_PLAN.md`
+
+Use this for root execution-mode ownership, subtask-local planning constraints,
+Guard rejection propagation, and evidence-backed completion/changed-file
+semantics.
+
+### 10. Recovery status and fallback plan
+
+- `../runtime_recovery/RECOVERY_STATUS_AND_FALLBACK_PLAN.md`
+
+Use this for typed recoverability status, additional checkpoint boundaries,
+bounded supervisor behavior, unrecoverable-run fallback, recovery bundles, and
+explicit linked-new-run handoff.
+
+### 11. Reasoning policy and experiment plan
+
+- `../active_iteration/REASONING_POLICY_PLAN.md`
+- `../../experiments/full_architecture_context_observation/REASONING_POLICY_AB_RESULT_V1.md`
+
+Use these for provider-neutral reasoning intent/resolution, provider-bound
+replay identity, fixed-trajectory quality gates, and the current
+full-architecture mechanism evidence and limitations.
+
 ---
 
 ## Legacy compatibility pointers

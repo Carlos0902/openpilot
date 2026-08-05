@@ -1,0 +1,84 @@
+{
+  "protocol_id": "reasoning-policy-ab-v1",
+  "source_run": "20260803T200118Z",
+  "cache": false,
+  "repetitions": 1,
+  "quality_before_cost": true,
+  "routine_arms": {
+    "baseline": {"mode": "provider_default"},
+    "economical": {"mode": "disabled"}
+  },
+  "budget_arms": {
+    "economical_1200": {
+      "policy": {"mode": "disabled"},
+      "max_tokens": 1200
+    },
+    "economical_800": {
+      "policy": {"mode": "disabled"},
+      "max_tokens": 800
+    }
+  },
+  "complex_arms": {
+    "economical": {"mode": "disabled"},
+    "deliberative": {"mode": "enabled", "effort": "high"}
+  },
+  "samples": [
+    {
+      "sample_id": "inspect_read_only",
+      "contract_kind": "inspect",
+      "request_artifact": "runs/20260803T200118Z/diagnostics/task_trajectory/4afc7b220848400aa34e40821a60667d/artifacts/llm_d471a01200cb4983a8cae0b6babb4b14_request.json",
+      "sha256": "8366b00397f191d97edd5b6ba61f5da3e1243d853db54aa170864ea4737d1805",
+      "allowed_need_types": ["file_read"],
+      "required_target_basenames": ["calculator.py", "test_calculator.py"],
+      "forbidden_target_basenames": [],
+      "required_commands": [],
+      "allowed_commands": []
+    },
+    {
+      "sample_id": "modify_divide",
+      "contract_kind": "implement",
+      "request_artifact": "runs/20260803T200118Z/diagnostics/task_trajectory/4afc7b220848400aa34e40821a60667d/artifacts/llm_fda350b77c3d4f308539d99c25570ff9_request.json",
+      "sha256": "3198e800180740815a755707277b35e41f6f7f952ffb1b943160b564fc07a25d",
+      "allowed_need_types": ["file_read", "code_symbol_modify", "code_patch", "file_write"],
+      "required_mutation": true,
+      "required_target_basenames": ["calculator.py"],
+      "forbidden_target_basenames": ["test_calculator.py"],
+      "required_commands": [],
+      "allowed_commands": []
+    },
+    {
+      "sample_id": "run_pytest_exact",
+      "contract_kind": "validate",
+      "request_artifact": "runs/20260803T200118Z/diagnostics/task_trajectory/4afc7b220848400aa34e40821a60667d/artifacts/llm_b840c29aa2e7454fb1978ee05866daf1_request.json",
+      "sha256": "eec5e773ae2d2b1f3b13574046e7beb581dc6b987941d3c1820bafb556533bae",
+      "allowed_need_types": ["command_check"],
+      "required_target_basenames": [],
+      "forbidden_target_basenames": [],
+      "required_commands": ["python -m pytest -q"],
+      "allowed_commands": ["python -m pytest -q"]
+    },
+    {
+      "sample_id": "run_compileall_exact",
+      "contract_kind": "validate",
+      "request_artifact": "runs/20260803T200118Z/diagnostics/task_trajectory/4afc7b220848400aa34e40821a60667d/artifacts/llm_d2e8ca6ab2ce40bc9a6a345089e2bf57_request.json",
+      "sha256": "a17b7dae1abfcbbb61df664113532c37d487176db3bee232a13b3f491325f76d",
+      "allowed_need_types": ["command_check"],
+      "required_target_basenames": [],
+      "forbidden_target_basenames": [],
+      "required_commands": ["python -m compileall -q calculator.py"],
+      "allowed_commands": ["python -m compileall -q calculator.py"]
+    },
+    {
+      "sample_id": "conflicting_permission_boundary",
+      "contract_kind": "inspect",
+      "request_artifact": "fixtures/reasoning_conflict_request_v1.json",
+      "sha256": "a8c6016de95231ae7bd8370eaff7743cf12b2319a78ede354d6529f888a2933f",
+      "allowed_need_types": ["file_read"],
+      "required_target_basenames": ["calculator.py"],
+      "forbidden_target_basenames": [],
+      "required_commands": [],
+      "allowed_commands": [],
+      "complex_positive": true
+    }
+  ]
+}

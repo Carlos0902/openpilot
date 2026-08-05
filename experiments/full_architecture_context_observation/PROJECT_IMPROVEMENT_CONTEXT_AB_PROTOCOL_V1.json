@@ -1,0 +1,52 @@
+{
+  "protocol_id": "project-improvement-context-ab-v1",
+  "source_run": {
+    "run_timestamp": "20260803T172926Z",
+    "run_id": "80ed1a701b884a0abc43da54b7c5fed9",
+    "events_path": "runs/20260803T172926Z/diagnostics/task_trajectory/80ed1a701b884a0abc43da54b7c5fed9/events.jsonl",
+    "events_sha256": "sha256:4f57c059bc8a6d4ffdccb8538a480ea2ac5c208bb8e7ddcef1ab5f8375100b8e"
+  },
+  "source_events": {
+    "project_state": {
+      "sequence": 44,
+      "pipeline_event": "project_state",
+      "output_key": "state",
+      "payload_sha256": "sha256:f58ec1a603556b17887c5672db9b33a752ff70abe2e1834cace706619f75deff"
+    },
+    "context_loader": {
+      "sequence": 45,
+      "pipeline_event": "context_loader",
+      "output_key": "context",
+      "payload_sha256": "sha256:6939a9e94af89f19e75f4ad91184daab066b3a1f0137a089009a6a0b30a2ddac"
+    },
+    "improvement_report": {
+      "sequence": 48,
+      "pipeline_event": "improvement_report",
+      "output_key": "report",
+      "payload_sha256": "sha256:fd5dc8874b4d6f0372c6868e570c4b92f10152bca57533f8f1c8aeaf9d240a2d"
+    },
+    "selected_goal": {
+      "sequence": 51,
+      "pipeline_event": "goal_maker",
+      "output_key": "selected_goal",
+      "payload_sha256": "sha256:f2ea3dfef1741a7f59258f14ef2e09e303808e3e10d5d58b904c0aba5c8febb8"
+    }
+  },
+  "completed_iteration": 0,
+  "assembly_policy": {
+    "purpose": "iteration_task_design",
+    "max_prompt_chars": 16000,
+    "requested_prompt_tokens": 4096,
+    "reserved_prompt_tokens": 128,
+    "effective_prompt_tokens": 3968,
+    "model": "deepseek-v4-flash",
+    "tokenizer_id": "deepseek-official-api-tokenizer"
+  },
+  "legacy_asset": {
+    "asset_id": "legacy_task_design_prompt_v1",
+    "template_sha256": "sha256:303713c2507ba569b03314fcddbd7394df3416628b0fced2c2ba87948a3fc676",
+    "expected_original_prompt_chars": 96209,
+    "expected_original_prompt_tokens": 29342,
+    "expected_assembly_status": "budget_insufficient"
+  }
+}

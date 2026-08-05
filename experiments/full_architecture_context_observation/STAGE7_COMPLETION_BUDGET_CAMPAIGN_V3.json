@@ -1,0 +1,117 @@
+{
+  "campaign_id": "stage7-enhancement-completion-budget-ab-v3",
+  "status": "frozen_before_execution",
+  "question": "Does the dynamic enhancement completion budget reduce observable provider tokens across the actually selected mutation route without weakening quality?",
+  "execute_requires_explicit_flag": true,
+  "pairs": 3,
+  "pair_arm_order": [
+    ["static", "dynamic"],
+    ["dynamic", "static"],
+    ["static", "dynamic"]
+  ],
+  "arms": {
+    "static": {
+      "budget_mode": "static_purpose_ceiling",
+      "purpose_max_tokens": {
+        "project_improvement": 1500,
+        "iteration_goal": 1200,
+        "iteration_task_design": 2200,
+        "code_generation": 3500,
+        "code_edit": 1600
+      },
+      "recovery_step": 0
+    },
+    "dynamic": {
+      "budget_mode": "production_dynamic_policy",
+      "recovery_step": 300,
+      "length_recovery": "one_shot_per_original_reservation"
+    }
+  },
+  "provider_identity": {
+    "provider": "openai-compatible",
+    "model": "deepseek-v4-flash",
+    "endpoint": "https://api.deepseek.com",
+    "tool_event_reasoning_mode": "disabled",
+    "reasoning_profile": "deepseek-chat-known:v1"
+  },
+  "cache_enabled": false,
+  "run_protocol": "PROJECT_IMPROVEMENT_PROVIDER_ARM_PROTOCOL_V1.json",
+  "fixed_decomposition": {
+    "fixture_id": "calculator-four-stage-decomposition-v1",
+    "fixture_sha256": "sha256:62bc25e5240a11c8cc1171a7d578b7fc7595642ecf9136d3d31a092d79443de3"
+  },
+  "common_interventions": {
+    "fixed_iteration_goal": {
+      "strategy": "fixed_divide_docstring",
+      "injection_point": "AutonomousIterationAgent._goal_from_candidate",
+      "behavior": "return_fixed_observable_divide_docstring_goal",
+      "applies_to_both_arms": true
+    },
+    "arm_budget_resolver": {
+      "injection_point": "IntelligentAutopilot._enhancement_runtime_budget",
+      "behavior": "return_selected_experiment_arm_budget",
+      "applies_to_both_arms": true
+    }
+  },
+  "code_snapshot_roots": [
+    "Code/src",
+    "experiments/full_architecture_context_observation"
+  ],
+  "code_snapshot_excludes": [
+    "runs",
+    "data",
+    ".pytest_cache",
+    "__pycache__",
+    "*.pyc"
+  ],
+  "execution": {
+    "per_arm_wall_clock_seconds": 900,
+    "transport_retries": 0,
+    "stop_on_code_snapshot_drift": true,
+    "stop_on_provider_identity_mismatch": true,
+    "stop_on_quality_failure": true,
+    "stop_on_incomplete_usage": true,
+    "stop_on_unknown_failed_usage": true
+  },
+  "token_limits": {
+    "per_arm_hard": 45000,
+    "per_pair_warning": 75000,
+    "per_pair_hard": 90000,
+    "campaign_warning": 225000,
+    "campaign_hard": 270000
+  },
+  "quality_gates": {
+    "require_core_success": true,
+    "require_verification_passed": true,
+    "require_improvement_succeeded": true,
+    "allowed_modified_basenames": ["calculator.py"],
+    "required_modified_basenames": ["calculator.py"],
+    "required_commands": [
+      "python -m pytest -q",
+      "python -m compileall -q calculator.py"
+    ],
+    "unchanged_file": "test_calculator.py",
+    "unchanged_file_sha256": "c91400d8fcd3fc2557b4d4db8f4b559b08973ea7630b88946c2cc0156084abbe"
+  },
+  "analysis": {
+    "windows": ["core", "enhancement"],
+    "enhancement_purposes": [
+      "project_improvement",
+      "iteration_goal",
+      "iteration_task_design",
+      "code_generation",
+      "code_edit"
+    ],
+    "required_provider_purposes": [
+      "project_improvement",
+      "iteration_task_design"
+    ],
+    "mutation_purpose_any_of": ["code_generation", "code_edit"],
+    "allowed_iteration_goal_modes": ["deterministic"],
+    "include_failed_attempt_usage": true,
+    "require_usage_coverage": 1.0,
+    "reservation_facts_only": true,
+    "minimum_quality_matched_pairs": 3,
+    "causal_claim_allowed": false
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "contract_version": "1",
+  "canary_id": "stage12-session-compact-canary-v1",
+  "projection_feature_flag": "canary_enabled",
+  "runtime_kill_switch": "armed",
+  "primary_projection": "compact",
+  "fallback_projection": "current",
+  "usage_accounting": {
+    "primary_account_id": "session_compact_primary",
+    "fallback_account_id": "session_current_fallback",
+    "unknown_usage_action": "stop",
+    "cross_account_reconciliation_allowed": false
+  },
+  "hard_caps": {
+    "per_arm_tokens": 30000,
+    "campaign_tokens": 60000,
+    "per_arm_calls": 6,
+    "campaign_calls": 12,
+    "per_arm_wall_clock_seconds": 900,
+    "campaign_wall_clock_seconds": 1800
+  },
+  "environment_receipt": {
+    "readiness": "ready",
+    "executable_path": "../../.venv/bin/python",
+    "environment_id": "stage12:workspace-venv",
+    "read_only_preflight_authorized": true,
+    "provider_transport_authorized": false,
+    "environment_setup_authorized": false,
+    "network_authorized": false
+  },
+  "hash_locks": {
+    "fixture_path": "fixtures/session_compact_canary_v1.json",
+    "fixture_sha256": "sha256:6796381251ad38b68fa73beffe21413325a900c7999cf04821ef4407bb7d87a4",
+    "stage9_result_path": "STAGE9_TASK_DESIGNER_PAIRED_SHADOW_V2_RESULT.json",
+    "stage9_result_sha256": "sha256:0b4f9ce6148d34d478dd36e6b740aefdd7575036f0e27e6c503f70ad22e83054"
+  },
+  "preflight": {
+    "provider_transport_allowed": false,
+    "network_allowed": false,
+    "project_mutation_allowed": false
+  }
+}

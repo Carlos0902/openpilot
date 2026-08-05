@@ -1,0 +1,29 @@
+{
+  "artifact_id": "reasoning-policy-ab-reanalysis-v1",
+  "source_result": "runs/reasoning_policy_ab/20260804T050000Z/result.json",
+  "source_sha256": "3066f0bc163b42937a769cf05088340e3512110128e7211dc7161e0526f5bcef",
+  "evaluator": "task_contract_filter_v1",
+  "note": "Derived offline because the immutable source result predates persisted system_quality.",
+  "baseline": {
+    "sample_count": 4,
+    "system_quality_pass_count": 1,
+    "critical_violation_count": 0,
+    "completion_tokens_median": 1954.0,
+    "reasoning_tokens_median": 1860.0,
+    "total_tokens_median": 3490.5
+  },
+  "economical": {
+    "sample_count": 4,
+    "system_quality_pass_count": 4,
+    "critical_violation_count": 0,
+    "completion_tokens_median": 145.0,
+    "reasoning_tokens_median": null,
+    "total_tokens_median": 1657.0
+  },
+  "comparison": {
+    "quality_gate_passed": true,
+    "reduction_basis": "completion_tokens",
+    "reduction_fraction": 0.9257932446264073,
+    "eligible_for_budget_floor_test": true
+  }
+}

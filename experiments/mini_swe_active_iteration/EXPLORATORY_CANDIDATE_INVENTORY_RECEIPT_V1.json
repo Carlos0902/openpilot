@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "receipt_id": "mini-swe-exploratory-candidate-inventory-receipt-v1",
+  "rules_file_sha256": "428db85f5bdc49aa38163e605f2ed8075e692b545c5ad4bced309480ae432647",
+  "rules_canonical_sha256": "59622106f4d926173ed0e3abddab26a587b1caea8b394fef008255e2c6c50686",
+  "preflight_file_sha256": "37e030ea332012aa903f7f2fcdc45d91c4002c02d5905dbd73656139ea3057ec",
+  "inventory_file_sha256": "6a49facda070e01eaa2cebe4e938f0dfb0d50ecd8d602bae61396594ed333662",
+  "source_parquet_sha256": "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+  "candidate_count": 500,
+  "repository_count": 12,
+  "previously_exposed_count": 0,
+  "hidden_fields_persisted": false,
+  "eligible_pool_generated": false,
+  "task_outcomes_generated": false,
+  "provider_execution_authorized": false,
+  "production_execution_authorized": false
+}

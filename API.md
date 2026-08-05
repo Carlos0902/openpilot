@@ -61,6 +61,11 @@ OpenAI-compatible providers are configured with environment variables:
 | `OPENPILOT_LLM_MODEL` | No | `gpt-4o-mini` | Chat completion model name. |
 | `OPENPILOT_LLM_TIMEOUT_SECONDS` | No | `60` | Provider timeout. |
 | `OPENPILOT_LLM_TEMPERATURE` | No | `0.2` | Default sampling temperature. |
+| `OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE` | No | endpoint-selected | Optional typed override: `generic-openai-compatible`, `openai-chat-known`, or `deepseek-chat-known`. |
+| `OPENPILOT_TOOL_EVENT_REASONING_MODE` | No | `disabled` | Economical policy for typed routine tool decisions; accepts only `provider_default` or `disabled`. |
+| `OPENPILOT_LLM_TOKENIZER_PATH` | No | Local DeepSeek cache | Optional explicit provider tokenizer JSON path. |
+| `OPENPILOT_CONTEXT_MAX_PROMPT_TOKENS` | No | `4096` | Exact token budget for the memory-context slice when a provider tokenizer is available. |
+| `OPENPILOT_CONTEXT_RESERVED_PROMPT_TOKENS` | No | `128` | Explicit framing/safety reserve deducted from assembled request content budget. |
 | `OPENPILOT_EMBEDDING_PROVIDER` | No | `openai-compatible` | Embedding provider label. |
 | `OPENPILOT_EMBEDDING_BASE_URL` | No | Inherits `OPENPILOT_LLM_BASE_URL` | OpenAI-compatible embedding endpoint. |
 | `OPENPILOT_EMBEDDING_API_KEY` | No | Inherits `OPENPILOT_LLM_API_KEY` | Embedding API key. |
@@ -70,6 +75,9 @@ OpenAI-compatible providers are configured with environment variables:
 CLI readiness checks treat blank `OPENPILOT_LLM_BASE_URL` and blank
 `OPENPILOT_LLM_API_KEY` as missing. Diagnostics may show whether a value is set, but
 must never print the actual API key.
+Settings search the repository-root `.env`, `Code/.env`, and the current
+working-directory `.env`, so model and tokenizer binding do not change merely
+because the CLI was launched from `Code/` instead of the repository root.
 
 ### Standard LLM Request / Response
 
@@ -79,7 +87,66 @@ must never print the actual API key.
 - `response_format`: `text` or `json_object`.
 - `temperature`: optional per-request override.
 - `max_tokens`: optional token limit.
+- `reasoning`: typed provider-neutral `ReasoningPolicy` caller intent.
 - `trace_info`: local tracing annotations that are not part of the strict metadata protocol.
+
+`ReasoningPolicy` separates `mode`, optional `effort`, optional reasoning-token
+budget, and unsupported-capability behavior from provider transport fields.
+`core/reasoning.py` resolves it through a versioned typed capability profile and
+produces `ResolvedReasoningPolicy`; only the LLM transport renders OpenAI- or
+DeepSeek-compatible request fields. Official provider endpoints may select a
+known profile automatically. Unknown/custom endpoints use the conservative
+generic profile unless explicitly configured, and unsupported requests either
+reject or resolve to provider default according to the typed policy. Model-name
+substring matching is not a capability source.
+
+Decision routing may supply a typed `ReasoningDecisionComplexity` value
+(`routine`, `standard`, or `complex`) to a request owner. It is intentionally
+separate from enhancement completion complexity: the former selects
+provider-neutral reasoning intent, while the latter reserves completion
+tokens. Capability resolution and provider-specific rendering remain confined
+to `core/reasoning.py` and the LLM transport.
+
+The tool planner selects the economical setting only for typed routine work:
+bounded inspection with explicit reads, exact validation with its declared
+command, or an implementation with one write target and at most two reads.
+General, ambiguous, and multi-write decisions remain `provider_default`.
+Filtering a plan that violates the task contract fails with purpose-specific
+evidence; it may not fall through to a broader deterministic action.
+
+For `tool_event_decision`, `RuntimeBudgetMetadata` derives `max_tokens` from a
+runtime total, a static per-call ceiling/floor, recovery-round decay, and the
+current loop's remaining calls. The allowance is reserved before transport and
+reconciled to provider completion usage after success. A failed provider attempt
+also reconciles when usage is available; an empty invalid response without usage
+refunds the reservation, while an unknown transport failure conservatively keeps
+it. A `length` / `max_tokens` finish grants one bounded, one-shot recovery bonus
+to the next controller call instead of permanently raising the ceiling. JSON
+repair is limited to one provider attempt for this purpose.
+
+Post-core enhancement calls use a second, independent completion pool owned by
+the same `RuntimeBudgetMetadata`; it is not shared with the controller decision
+pool above. `EnhancementCompletionBudgetPolicy` defaults to 12,000 tokens and
+governs exactly five purposes: `project_improvement` (500–1,500),
+`iteration_goal` (400–1,200), `iteration_task_design` (700–2,200),
+improvement-owned `code_generation` (1,000–3,500), and localized `code_edit`
+(400–1,600). Allocation combines the
+purpose range with typed complexity, remaining decision value, selected prompt
+size, remaining calls, and remaining total. Core-task code generation uses a
+local allowance and cannot consume this post-core pool. Core-task symbol edits
+also remain outside this pool; `code_edit` consumes it only when the
+project-improvement runtime explicitly attaches the authoritative budget.
+
+Each enhancement call reserves before transport using a stable semantic
+`logical_key`. Checkpointed reservation and reconciliation ledgers make reserve
+and settlement apply-once across resume. Known success or failure usage replaces
+the reservation with actual completion usage; unknown usage conservatively
+keeps it. Only a typed `length`/`max_tokens` failure may request one bounded
+expansion of an already narrow JSON contract. Truncated code generation is
+rejected instead of written. Audit-only trace/context-selection metadata is
+excluded from provider replay identity. `EnhancementCompletionRequirement`
+controls one call's fail/fallback behavior; it does not replace the stage-level
+`ProjectImprovementPolicy`.
 
 `LLMResponse`:
 
@@ -90,6 +157,13 @@ must never print the actual API key.
 - `usage`: normalized usage object when available.
 - `finish_reason`: provider finish reason.
 - `provider_details`: safe provider details such as response id and timestamp.
+
+Runtime diagnostics also attach a credential-free provider-bound request hash and
+request ordinal to LLM attempt evidence. Successful response details and failed
+`provider_attempt` evidence carry the attempt ID, normalized endpoint, provider/model
+identity, and transport-attempted flag. These are audit links only; token accounting
+still comes from complete provider usage, and unknown/partial usage is never serialized
+as zero.
 
 ### OpenPilot Metadata Protocol
 
@@ -103,6 +177,20 @@ Every metadata payload carries:
 - `schema_version`
 - `source`
 - `correlation`
+
+Each concrete model locks `kind` to one `Literal[MetadataKind.*]`. The common
+`source` field is always a `MetadataSource` producer/owner envelope; domain
+provenance uses qualified fields such as `path_source` and `signal_source`.
+Historical path/problem payloads whose `source` was a string are accepted on
+read and migrated to the qualified field, while new serialization always emits
+the common structured envelope. The complete ownership and lifecycle inventory
+is maintained in `docs/metadata/CONTRACT_CATALOG.md`. Metadata changes must
+follow `docs/metadata/DEVELOPMENT_CONVENTIONS.md`: review existing contracts and
+real producers/consumers first, prefer reuse or extension, and preserve the
+current value-nested architecture unless a separately reviewed change is
+justified by concrete evidence. Values that control routing, permission, budget,
+retry, recovery, completion, persistence, or audit behavior cannot live only in
+free-form strings or diagnostic containers.
 
 Tool execution uses typed metadata:
 
@@ -119,6 +207,372 @@ Path-sensitive runtime actions additionally emit:
 
 - `PathIntentMetadata`: what raw path the planner/runtime wanted to use, for what operation, and under which project root.
 - `PathResolutionMetadata`: how that path was grounded (resolved, corrected, planned, ambiguous, or blocked), including whether `sketch.json` or file indexes were used.
+
+Prompt-context assembly emits `ContextSelectionMetadata`. Source-specific builders
+collect and render candidates, then delegate request fingerprinting, budgeting,
+deterministic selection, truncation, and selection evidence to
+`memory.context_assembly.ContextAssembler`. The assembler owns only the derived
+model-facing view; memory, project, and runtime stores retain their source facts.
+Prompt-specific adapters may submit strict `ContextCandidate` values with typed
+kind, source identity, retention (`required`, `preferred`, or `optional`),
+priority, source order, and truncation policy. Typed assembly returns
+`ContextAssemblyResult`; a required candidate that cannot fit without violating
+its policy produces `assembly_status=budget_insufficient` and names the omitted
+required IDs. It must not be submitted to the provider as a ready request.
+Candidates may additionally carry typed trust, freshness, and an explicit
+`conflict_key`. Before budgeting, the assembler removes normalized exact
+duplicates within one kind, omits explicitly stale non-required evidence, and
+resolves explicit conflict groups by retention, trust, freshness, priority, and
+source order. It does not infer semantic conflicts from prose, tags, embeddings,
+or confidence gaps. Required stale evidence or materially different required
+candidates in one conflict group produce `assembly_status=governance_blocked`
+and an independent `ContextAssemblyGovernanceError` before provider transport.
+`ContextRequestBuilder` converts a ready result into role-preserving
+`LLMMessage` values and attaches the same selection object to `LLMRequest`.
+Owners that already projected typed candidates use
+`build_context_candidate_request`; message-shaped legacy owners use
+`build_context_llm_request`. Both share the same provider-aware policy and
+pre-transport failure boundary.
+The ContextLoader compatibility payload also exposes the selected-only typed
+candidate list used to build a `DerivedContextProjection`. This is a derived
+view, not a second source of truth: raw session turns remain authoritative, and
+downstream analyzer/Goal/Task adapters must preserve its request/turn/constraint
+hash lineage and fail closed on stale or incomplete projections.
+Contextual `code_generator` requests use a purpose-specific projection instead
+of serializing the complete `prompt_context` as one message. Tool instruction,
+task, target/write boundary, product safety constraints, current target source,
+and output contract are required and non-truncatable. Validation and quality
+evidence are independently selectable; diagnosis, environment, and product
+judgment are bounded summaries. Existing-file replacement without current
+source, or with required source that cannot fit, fails before provider transport.
+Non-contextual code generation retains the legacy message adapter.
+When exact token counting is active, `requested_prompt_tokens` is reduced by the
+explicit `reserved_prompt_tokens`; `max_prompt_tokens` is the effective content
+allowance and `remaining_prompt_tokens` is recorded after selection. The client
+rejects `budget_insufficient` before cache or network transport. The reserve
+covers chat framing/safety uncertainty and is not reported as provider usage.
+Every migrated request carries a typed `ContextRequestPurpose`; phase-3A
+semantic routing, decomposition, tool planning, iteration goal/task design,
+project improvement, and runtime-output evaluation paths now use the shared
+request adapter. The migration registry accounts for all production purposes
+and prevents free-form purpose text from controlling assembly policy.
+All phase-0 production request purposes are now migrated, including code/edit/
+bugfix, memory/summarization, web research, and agent slot generation. Direct
+executable `LLMRequest` construction is centralized in
+`memory.context_assembly.request_builder`; transport and diagnostic wrappers
+observe or forward the assembled request but do not rebuild it.
+Project improvement analysis, iteration goal selection, and iteration task
+design use purpose-specific candidates rather than one aggregate message. Their
+instruction/schema, selected goal, safety constraints, and compact validation
+summary are independently required and non-truncatable. README, per-file code,
+diagnosis, and historical memory are source-linked optional candidates. Optional
+evidence may be omitted with selection evidence; a required candidate that does
+not fit still raises typed `ContextAssemblyBudgetError` before provider
+transport. The safety projection reads authoritative product intent from the
+validated project state and merges any report-carried constraints with stable
+deduplication; a report that omits `prompt_context` therefore cannot silently
+erase non-regression constraints, delivery surface, or runtime mode. The memory
+records used by these adapters are current-project scoped before prompt assembly.
+Project/task/session records without current-project identity fail closed; global
+feedback and long-term guidance may remain eligible. The model-facing projection
+keeps bounded content and a small allowlist of useful environment/iteration
+attributes, never raw PATH, provider payloads, Git snapshots, or full dependency
+dumps. Task Designer applies the same defensive projection and a three-record cap
+even when invoked with an externally constructed project snapshot. An assembled
+`memory_context.prompt_text` is artifact evidence only and is never reinserted
+as a downstream improvement candidate. Project identity uses canonical resolved
+paths; basename and query similarity cannot establish ownership. The required
+validation projection includes a name-only project manifest of at most 40 files,
+with excluded trees pruned before traversal; manifest files are not added to
+`safe_target_files` and their contents are not loaded. Code-generation prompts
+may retain compact current-code evidence, but edit routing and `code_editor`
+always read the authoritative target file rather than deriving symbol offsets
+from a truncated projection.
+
+Task Designer `evidence_ids` may contain only exact values copied from the
+assembled request's `[evidence_id="..."]` candidate headers. Goal IDs,
+diagnosis candidate IDs, task IDs, source IDs, and identifiers embedded inside
+candidate content are different domains and are discarded by the runtime's
+retained-candidate filter. This field links the bounded task delta to request
+evidence; it does not grant task, target, or mutation authority.
+
+Project environment import discovery scans the bounded project Python surface,
+including test modules outside `written_files`, while excluding `.venv`, Git,
+cache, and `node_modules` trees. Before a project-scoped Python validation, the
+runtime performs a filesystem-only preflight. `EnvironmentSyncMetadata.operation`
+distinguishes legacy sync, preflight, setup, and resync; `readiness` is one of
+unknown, setup-required, ready, stale, or blocked. Only a ready observation with
+an `environment_id`, interpreter, and command cwd may enter the runtime's
+attachment cache. Setup/resync may create `.venv`, install packages, update the
+stack preset, and create Git safety state, so it requires the root task's
+mutation/command/network authority or explicit approval. A denied or failed
+setup blocks the Python task; the runtime does not fall back to host Python.
+After project writes, validation preflights again so new manifest/import
+dependencies become a controlled resync rather than an implicit host dependency.
+
+Command evidence preserves `ToolInputMetadata.requested_command` separately
+from the effective command. `effective_interpreter` and `environment_id` prove
+which attached environment executed the request. Completion compares the exact
+requested validation intent while execution and audit evidence retain the
+rewritten `.venv` command.
+
+The general memory adapter emits one typed candidate
+per fixed instruction, dialog message, related file, retrieved memory, and
+environment observation. Its fixed instruction is required and
+non-truncatable; all source items receive candidate-level keep/partial/omit
+evidence with stable source identity.
+Local tokenizer evidence covers the canonical selected message-content
+projection plus an explicit reserve. Provider-private chat framing is not
+claimed as locally exact: `LLMResponse.usage` remains authoritative for the
+serialized request and billing. Recovery hashes include the attached selection
+record, and durable replay returns the observed response without another
+provider call.
+With a locally available provider tokenizer, the production memory context builder applies
+`OPENPILOT_CONTEXT_MAX_PROMPT_TOKENS` (4,096 by default; tool callers reuse
+`max_tokens`) together with the 16,000-character safety ceiling. Without a
+tokenizer it explicitly falls back to the existing character boundary; it never
+labels `chars/4` as an exact token count. Candidate selection uses typed
+retention, priority, and source-order policy; rendering remains system prompt,
+recent dialog as a contiguous suffix, related files, related memories, then
+environment evidence. Candidate decisions are authoritative. Section-level
+keep/partial/omit reasons and the selected dialog start/timestamp boundary remain
+as compatibility projections for existing consumers. The record also carries
+original/final character counts and exact context-slice token and tokenizer/model
+evidence. General memory consumers receive only the rendered bounded context
+plus this selection record, rather than a second copy of all selected entries;
+project-improvement consumers receive governed granular facts and never reload
+that rendered aggregate.
+
+Project-improvement model output is also incremental. The provider may return
+only bounded changed signals, proposed actions, one next decision/goal,
+must-satisfy constraints, blocking risks, retained evidence IDs, and a typed
+stack-preset patch. Runtime maps this once into the existing
+`ImprovementAnalysisMetadata` vocabulary and supplies project/goal/iteration
+identity from tool input; malformed, oversized, mixed-state, or unknown-field
+payloads use the same bounded deterministic fallback. Full prompt context,
+diagnosis, project state, and product judgment are not copied into model output.
+Task design accepts one identity-free bounded delta. Runtime owns stable goal
+and task IDs, canonicalizes targets against `safe_target_files`, retains only
+evidence IDs actually selected into that request, and merges authoritative goal
+criteria and validated product constraints. Legacy plural task envelopes may
+migrate only their first valid item and cannot control identity.
+When runtime checkpointing is enabled, the complete selected payload is stored
+once as a checksum-addressed `prompt_context` artifact. The checkpoint-owned
+`RuntimePromptContextSnapshot` binds the full request hash, rendered Prompt hash,
+selection record, and artifact reference at `context_assembled`. The request
+fingerprint includes the memory adapter version, so typed/governed-adapter snapshots
+cannot collide with legacy section-adapter snapshots. Exact resume replays the
+payload only for an identical request; corrupt or mismatched context
+evidence blocks recovery instead of rebuilding from changed memory sources.
+
+When checkpointing is enabled and the initial budget omits at least two older
+assistant dialog candidates, the memory builder may trial deterministic segmented
+compaction. It keeps at least two recent messages verbatim, extracts bounded
+decision/error/validation signal lines from the older prefix, replaces verbose
+observations with a length and fingerprint marker, replaces only the older
+non-required prefix, and adopts the summary only if it fits completely and
+is persisted as a checksum `context_compaction` artifact. Each compacted source
+decision links to the artifact candidate; `ContextCompactionRecord` binds the
+source fingerprint/IDs, algorithm, summary, and before/after size, while
+`ContextCompactionBinding` binds that record to `DurableArtifactReference`.
+`RuntimePromptContextSnapshot` carries the bindings and recovery validates every
+referenced artifact. Source changes produce a new fingerprint; missing/corrupt
+compaction artifacts fail closed. The exact `prompt_context` artifact remains the
+replay authority, so the compact artifact is evidence rather than a second prompt.
+User dialog, required candidates, and system instructions are never
+observation-compacted. Historical `deterministic_dialog_extract_v1` records remain
+readable; new memory projections use `deterministic_observation_mask_v1`. If a compactor cannot be
+selected completely, assembly atomically falls back to the source candidates.
+Recoverable tool-planning prompts apply the same boundary ephemerally to explicit
+large observation fields while retaining paths, commands, operation kind, symbol,
+mode, errors, and the original typed metadata unchanged.
+Recovery uses an explicit safe projection: environment secrets, runtime handles,
+arbitrary attributes, unknown fields, and duplicate free-form task/context values
+are omitted rather than hashed. A resumed prompt snapshot with a different adapter
+request hash fails closed; successful exact replay is consumed once.
+
+Offline context quality uses `ContextQualityExpectation` and
+`ContextQualityEvaluation`. The evaluator checks explicit expected-present and
+expected-absent candidate IDs plus structural invariants: ready status, character
+budget, complete decisions, required representation, duplicate leakage,
+governance links, recent-dialog suffix, and compaction links. It emits typed issue
+codes and never controls runtime routing or claims semantic relevance. A fixture
+corpus covers budget, conflict, duplicate, and compaction behavior.
+
+The section-shaped `ContextAssembler.assemble(payload)` and standalone
+`ContextCompressor` have zero production callers and emit deprecation warnings.
+They remain only for historical compatibility. Production inventory tests prevent
+new callers; `ContextSectionDecision` and `priority_then_recency_v1` remain valid
+historical readers, while current assembly and request fingerprints use
+`retention_priority_order_v1`. The memory adapter fingerprint is versioned as
+`typed_memory_candidates_quality_v4`.
+
+`RuntimeStateMetadata.execution_mode` is the root-task permission authority.
+It is either `read_only` or `mutation_allowed`, with an explicit
+`execution_mode_source` and human-readable `execution_mode_reason`. Internal
+subtasks use the typed `Task.kind` vocabulary. `inspect` / `analysis` subtasks
+may execute only read or research needs; `validate` subtasks may execute only
+their exact non-empty `validation_command`; and `implement` / `repair` subtasks
+must list every permitted `write_files` target before mutation. These contracts
+may narrow the shared root mode but must not rewrite it. Unknown explicit task
+kinds are rejected instead of silently becoming mutation-capable. Historical checkpoints containing the
+legacy `runtime_mode:read_only_analysis` assumption are migrated to typed
+read-only state when loaded. Tool-routing denials are retained as typed
+`GuardDecisionMetadata` entries in `guard_history` and are execution failures
+for required decision needs; an empty selection is not success.
+
+Planned and observed file state are separate contracts. `Task.write_files`
+describes intent. `TaskExecutionResult.attributes.observed_modified_files` and
+`ExecutionStateMetadata.changed_files` describe successful file-tool side
+effects only. A write/implement task without observed mutation evidence, or a
+validation task without a successful argv-equivalent execution of its declared
+`validation_command`, cannot be marked completed. A successful substitute such
+as `compileall` therefore cannot satisfy a requested `pytest` task.
+
+`RuntimeStateMetadata.session_constraints` is the bounded, conversation-scoped
+ledger for explicit user constraints that must survive dialog compaction. It
+contains typed, source-linked entries for write scope, exact validation
+commands, API compatibility, goal/acceptance corrections, or a narrowing
+execution mode. A proposal is not authority, even after it is marked
+confirmed; an explicit reducer transition must create the active entry.
+Revoked entries remain as tombstones so an old dialog summary cannot revive a
+constraint. The ledger is checkpointed with `runtime_state`, has no long-term
+memory side effect, and is not copied into every task. It is projected into
+required, non-truncatable `ContextCandidate` values for model visibility, but
+the existing typed task/path/guard/verification contracts remain the only
+execution authorities. Free-form `statement` text and compact artifacts cannot
+grant or expand permissions.
+
+The production ingress contract is separate from the runtime ledger:
+`ConversationIdentity` binds a stable conversation to a per-run checkpoint and
+project root; `SessionTurn` carries one source turn; and `SessionIngressState`
+holds pending proposals until explicit confirmation. Interactive CLI ingress
+now owns this state, standard/enhanced planner and decomposer prompts receive
+the active projection, and `RuntimeCheckpointMetadata.session_ingress_state`
+round-trips the bounded turn/proposal snapshot. Resume rejects a supplied
+ingress state whose identity or constraint snapshot differs from the
+checkpoint. The main tool-event loop fails closed before Provider transport if
+the complete active constraint projection was removed by prompt budgeting.
+This establishes offline production wiring; it does not authorize a
+full-conversation Provider canary or claim a Token/quality gain.
+
+When a ContextLoader or project-improvement request consumes a derived dialog
+projection, `ToolInputMetadata.session_turn_source_hash` records the SHA-256
+digest of the authoritative ingress turn ledger. It is replay/evidence metadata
+only; raw `SessionIngressState` and typed constraints remain the authority.
+
+Post-core project improvement has a separate typed completion policy:
+`ProjectImprovementPolicy(requirement, source, target_successes, max_attempts)`.
+`requirement` is `disabled`, `optional`, or `required`. Automatic default
+improvement is optional; an explicit CLI/interactive iteration selection is
+required; zero disables the stage. `required_successful_improvements` remains a
+compatibility view of `target_successes`, not the top-level completion authority.
+Runtime state and reports preserve `core_success`, the policy, and the observed
+improvement status. Optional failure/interruption keeps overall success when the
+core task succeeded and is surfaced as a warning; required failure makes overall
+success false without rewriting completed core task/tool evidence.
+Each enhancement attempt takes a pre-iteration Git safety snapshot. If execution
+or evaluation fails after mutation, only its explicit changed-file set is
+restored from that snapshot and `IterationResult` records whether rollback was
+applied, restored paths, snapshot reference, and any rollback error. Failed
+state is not fed into another automatic repair iteration.
+
+Fast and module-owned project-improvement tool paths serialize the same existing
+`ToolCallMetadata`, `ToolContextMetadata`, `ToolErrorMetadata`, and
+`ToolExecutionEnvelopeMetadata` used by runtime diagnostics. Each logical
+invocation has a unique call ID and one durable start/terminal pair; internal
+retries do not inflate logical call counts. Diagnostic-hook failure is isolated
+from execution. Registry-backed file, README, and bounded bug-fix mutations also
+derive targets from one shared mutation descriptor, require explicit
+`Task.write_files` authority, pass the standard edit guard, retain the task's
+exact validation command, and participate in `prepared -> observed -> applied`
+checkpoint reconciliation. A success result with no observed target diff is
+persisted and reported as failure. External command and environment setup side
+effects retain their separately documented recovery limits; this contract does
+not claim that arbitrary external effects are exactly-once.
+
+Task Executor does not implicitly synchronize `README.md` after a code
+improvement. README post-processing is a separate mutation and is executed—and
+made part of iteration success—only when the current designed task explicitly
+lists the resolved README path among its targets. An unrequested README cannot
+be added to `Task.write_files`, consume an edit budget, or turn an otherwise
+successful scoped code change into failure.
+
+Localized project-improvement edits resolve symbol evidence in authority order:
+an explicit symbol, typed iteration goal, acceptance criteria, then descriptive
+task/report text. A layer that names multiple project symbols is ambiguous and
+cannot authorize choosing the first symbol in source order; the executor uses a
+safer non-localized route instead.
+
+Durable runtime recovery uses `RuntimeCheckpointMetadata` as a separate
+contract from mutable `RuntimeStateMetadata`. A checkpoint preserves the stable
+run/task/session identity, the complete runtime state and consumed budget, a
+named safe boundary, the last durable trajectory event, pending tool-action
+state, and a strict non-secret project fingerprint. `RuntimeCheckpointStore`
+writes immutable generations under the run trajectory directory, verifies a
+SHA-256 content checksum, and atomically advances `latest_checkpoint.json`.
+Stale generations are rejected and a corrupt latest generation may fall back
+to the preceding valid generation with a warning. The current runtime supports
+an explicit `IntelligentAutopilot.resume(run_id, checkpoint_id, context)` path.
+Completed sessions finalize through typed `runtime_state_completed`,
+`runtime_report_persisted`, and `runtime_finalized` boundaries. The checkpoint-owned
+`RuntimeFinalizationCursor` records monotonic stage, outcome, report source hash,
+report artifact reference, and the unique completion event ID. An interrupted
+finalization resumes without invoking the session executor; an already-finalized
+checkpoint returns the persisted report. Legacy `controlled_stop` checkpoints
+remain readable but do not claim the new exactly-once evidence. Resume preserves the original run/root-task/
+session identity and consumed budgets, creates a separate resume-attempt ID,
+and records a typed `RuntimeResumeDecisionMetadata` preflight. The current
+operational state is `RuntimeStateMetadata.recovery_status`; preflight separately
+records recoverability, recovery mode (including `finalize_from_checkpoint`), automation policy, stable reason code,
+typed blockers, fallback, evidence, and remaining budget. Human `reason` and
+`next_action` text are display-only; legacy `decision`/`resume_status` remain
+compatibility projections. A checkpoint also binds the ready project's
+interpreter and content-sensitive environment identity in `ProjectFingerprint`.
+Resume rebuilds the in-memory attachment through read-only preflight and blocks
+on missing, stale, or mismatched environment evidence. Legacy checkpoints remain
+readable, but a legacy pending Python verification also requires a fresh ready
+attachment. Resume never creates or installs an environment implicitly; an
+authorized setup/resync is a separate action. The checkpoint may own a strict session bootstrap or execution cursor. Both
+standard and enhanced-UI sessions persist decomposition, plan hash, completed
+result prefix, and next subtask index; exact resume executes only the remaining
+suffix. LLM responses and local read results use checksum-addressed recovery
+artifacts plus request/call ledgers so an observed result is applied once rather
+than fetched again. New `provider_bound_v2` LLM request hashes bind provider,
+model, credential-free normalized endpoint (including non-default port),
+capability-profile version, and effective reasoning semantics. Legacy unbound
+LLM artifacts remain readable evidence but are not replayable. Missing or
+corrupt recovery artifacts fail closed. File create/replace/delete calls use a
+`prepared -> observed -> applied -> verification_applied` protocol with target
+hashes and typed tool input. Resume can detect a write that completed before
+the process stopped, avoid replaying it, apply its state/budget exactly once,
+and continue verification. When the active tool plan already contains a later
+required validation command, the mutation checkpoint stores it as typed
+`pending_verification`; an ordered plan records per-command cwd/mode/timeout and
+a contiguous progress cursor, so resume executes only the remaining commands
+instead of synthesizing a weaker replacement. The recorder explicitly attaches
+the replacement process to the checkpoint's existing run/task/session identity
+before emitting resume events. External target drift blocks recovery without
+overwriting the file. Mutating commands receive prepared/result checkpoints but
+are not automatically replayed without a tool-specific reconciliation probe.
+A corrupt requested generation can offer a previous valid checkpoint only with
+explicit confirmation. A missing checkpoint with no valid generation returns
+typed `not_recoverable` plus `terminate_preserving_evidence`, rather than an
+unclassified exception or silent new run. Each checkpointed runtime holds a
+non-blocking per-run writer lease for its execution lifetime. A concurrent
+resume returns typed `run_lease_active + retry_later` without executing or
+writing the active trajectory. Trajectory event append also uses a per-run file
+lock and recomputes the durable maximum sequence under that lock. A retry may
+select an older immutable checkpoint; its state source is recorded in
+`resume_source_checkpoint_id`, while new generations continue after the run's
+current latest generation.
+
+CLI entry points are explicit:
+
+```bash
+openpilot run --once "Inspect project" --checkpointing --project-path /path/to/project
+openpilot run --resume-run-id RUN_ID --resume-checkpoint-id CHECKPOINT_ID --project-path /path/to/project
+```
 
 When `project_path` is available, path governance now covers both explicit tool
 path fields and absolute path fragments embedded inside command strings. For
@@ -392,6 +846,17 @@ Reusable workflows, scripts, prompt templates, tool chains, GUI operation templa
 | Forbidden | Block by default or sandbox only | Payments, system setting changes, unknown code execution, production data mutation |
 
 The MVP planner applies deterministic keyword safeguards after LLM validation so obvious medium, high, or forbidden operations cannot be silently downgraded.
+
+### Experimental SWE-bench execution boundary
+
+The isolated `experiments/mini_swe_active_iteration` package is not an OpenPilot
+production tool. Its 12-task core-benefit screen keeps review-plane calls and
+task-arm execution separate. A task arm is forbidden unless a hash-bound
+`ScreenExecutionProtocol` authorizes it and validates against the frozen Stage A
+manifest. When authorized, each arm must use a fresh pinned SWE-bench image with
+`network_mode=none`, no host mount, a bounded command path, and an arm-blind,
+network-isolated evaluator. Public receipts may contain a model-patch hash, but
+not the patch body, hidden evaluator inputs, or review rationale.
 
 ## 6. MVP Interface Contract
 

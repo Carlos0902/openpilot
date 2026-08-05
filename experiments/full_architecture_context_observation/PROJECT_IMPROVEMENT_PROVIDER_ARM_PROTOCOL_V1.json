@@ -1,0 +1,76 @@
+{
+  "protocol_id": "project-improvement-provider-arm-v1",
+  "status": "frozen_before_execution",
+  "question": "Does purpose-specific context assembly reach project improvement under a fixed, previously validated decomposition boundary?",
+  "architecture_under_test": "IntelligentAutopilot production execution after a fixture-controlled decomposition boundary",
+  "intervention": "fixed_decomposition",
+  "related_protocols": {
+    "context_ab": {
+      "protocol_id": "project-improvement-context-ab-v1",
+      "path": "PROJECT_IMPROVEMENT_CONTEXT_AB_PROTOCOL_V1.json"
+    },
+    "observation_baseline": {
+      "protocol_id": "full-architecture-context-observation-v1",
+      "path": "OBSERVATION_PROTOCOL_V1.json"
+    }
+  },
+  "provider": {
+    "configured_model_is_recorded_at_runtime": true,
+    "cache_enabled": false
+  },
+  "sample": {
+    "task_count": 1,
+    "task_id": "calculator-multistage-fix-observe-v1",
+    "task_class": "existing-project multi-stage code repair",
+    "replication_role": "provider arm with a fixed decomposition intervention, not an unmodified observation"
+  },
+  "fixed_decomposition": {
+    "fixture_path": "fixtures/fixed_decomposition_v1.json",
+    "fixture_sha256": "sha256:62bc25e5240a11c8cc1171a7d578b7fc7595642ecf9136d3d31a092d79443de3",
+    "fixture_id": "calculator-four-stage-decomposition-v1",
+    "source_run": "20260803T172926Z",
+    "injection_point": "IntelligentAutopilot.task_decomposer.decompose",
+    "replaced_method": "decompose",
+    "validation_command_sha256": {
+      "validate-pytest": "sha256:03b2d5596d232a4210386ff5610b26c7bb59cd1aa14f9531d5121955881b3d13",
+      "validate-compileall": "sha256:3f8cff87438a1b32bdd0af6a04064448666768ac8824aa35c3e93aa904583d8d"
+    },
+    "delegated_methods": [
+      "build_task_graph",
+      "get_execution_order",
+      "assemble_results"
+    ]
+  },
+  "task_goal": "在现有 calculator.py 项目中完成真实修复。必须分成检查、实现、验证多个子任务：先读取 calculator.py 和 test_calculator.py 定位失败原因；再把 divide 修改为当分母为零时抛出消息包含 denominator 的 ValueError；最后必须依次运行 python -m pytest -q 和 python -m compileall -q calculator.py 两条验证命令。不要创建新项目，不要修改测试。",
+  "isolation": {
+    "project": "fresh disposable temporary copy of fixtures/calculator_project",
+    "diagnostics": "experiment run directory, separate from Code/data/runtime_diagnostics",
+    "repository_mutation_by_agent": false
+  },
+  "safety_limits": {
+    "max_provider_calls": 20,
+    "max_cumulative_provider_tokens": 100000,
+    "wall_clock_seconds": 900,
+    "default_max_completion_tokens": 4096,
+    "enforcement": "before every provider request, reserve exact counted input plus frozen framing reserve plus an explicit completion maximum; block before transport when the request cannot fit",
+    "token_accounting": "input and output must both be observed; total may be derived, while incomplete successful or failed usage censors the run and retains its reservation"
+  },
+  "primary_observations": [
+    "provider input_tokens, output_tokens, total_tokens per aligned call",
+    "request purpose, phase, message_count, prompt_chars, and response content length",
+    "context selection original/final prompt tokens, selected and omitted candidates when present",
+    "cumulative provider tokens and call duration"
+  ],
+  "inflation_signals": {
+    "repeated_purpose_growth": "for any purpose with at least 3 calls, last input_tokens is at least 1.5 times first input_tokens",
+    "consecutive_growth": "at least 3 consecutive aligned calls have strictly increasing input_tokens and the last is at least 1.5 times the first",
+    "late_run_amplification": "median input_tokens in the final third is at least 1.5 times median input_tokens in the first third",
+    "prompt_budget_pressure": "at least 3 context selections have final_prompt_tokens / max_prompt_tokens >= 0.85",
+    "controller_output_bloat": "a repeated controller-like purpose averages more than 512 output tokens"
+  },
+  "interpretation": {
+    "positive": "The fixed arm reaches the target purpose with complete intervention evidence. This does not describe an unmodified production observation.",
+    "negative": "The fixed arm does not reach the target purpose; preserve the failure and do not relax production gates.",
+    "causal_claim_allowed": false
+  }
+}

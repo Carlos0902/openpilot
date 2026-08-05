@@ -1,0 +1,175 @@
+{
+  "campaign_id": "stage9-task-designer-provider-sentinel-v1",
+  "status": "adapter_verified_not_executed",
+  "execute_requires_explicit_flag": true,
+  "offline_gate": {
+    "protocol_path": "STAGE9_TASK_DESIGNER_SCENARIO_CANARY_V2.json",
+    "report_path": "STAGE9_TASK_DESIGNER_SCENARIO_CANARY_V2_OFFLINE_RESULT.json",
+    "must_pass": true
+  },
+  "core_pre_enhancement_baseline": {
+    "source_campaign": "stage8-task-designer-context-projection-ab-v1",
+    "source_fingerprint": "sha256:f15833e3b2ab5eff0d352b82986792032e79c886cf24650cf7f6ef8dbaa559e3",
+    "project_state_sequence": 47,
+    "exact_sentence": "Raises ValueError when denominator is zero.",
+    "exact_sentence_present": false
+  },
+  "schedule": [
+    {"pair": 1, "scenario_id": "strongly_related_diagnosis", "arm_order": ["current", "compact"]},
+    {"pair": 2, "scenario_id": "partial_shared_criterion", "arm_order": ["compact", "current"]},
+    {"pair": 3, "scenario_id": "relevant_iteration_memory", "arm_order": ["current", "compact"]}
+  ],
+  "scenarios": {
+    "strongly_related_diagnosis": {
+      "frozen_source_fingerprint": "sha256:746a14fa6e250b3ab83bea082c3abedcdc9a5e1c775fe3102a3438bca4fbcc21",
+      "frozen_goal_hash": "sha256:a1254c446a3c88998d488597858b06a6511d8ec166e6a282f8100bdb60a48a36"
+    },
+    "partial_shared_criterion": {
+      "frozen_source_fingerprint": "sha256:261c8a22a356cbcd3d2b5b4bf20f22d6217085d6aedb0331eef7e6ad9ba20b95",
+      "frozen_goal_hash": "sha256:3ca60919dbe1717a1c9349cf090dbd21bb3695faf5567a67dca2910fc04b88fa"
+    },
+    "relevant_iteration_memory": {
+      "frozen_source_fingerprint": "sha256:83ab143d1408ed406fb15d686174d1dd34669022e846b41112a698cf8947f41c",
+      "frozen_goal_hash": "sha256:400b9ad6e4e0f036b3f93843c6d89c6a0b2c1c0e9e218cf95ed0f6639ccf78e8"
+    }
+  },
+  "scenario_candidate_contracts": {
+    "strongly_related_diagnosis": {
+      "current": {
+        "required_present": ["S9_STRONG_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": []
+      },
+      "compact": {
+        "required_present": ["S9_STRONG_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": ["S9_ENVIRONMENT_NOISE", "S9_UNRELATED_DIMENSION", "S9_UNRELATED_METRIC"]
+      }
+    },
+    "partial_shared_criterion": {
+      "current": {
+        "required_present": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": []
+      },
+      "compact": {
+        "required_present": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": ["S9_ENVIRONMENT_NOISE", "S9_UNRELATED_DIMENSION", "S9_UNRELATED_METRIC"]
+      }
+    },
+    "relevant_iteration_memory": {
+      "current": {
+        "required_present": ["S9_MEMORY_UNRELATED_DIAGNOSIS", "S9_OLD_RELEVANT_ITERATION_RESULT", "S9_NEW_UNRELATED_ITERATION_RESULT"],
+        "required_absent": ["S9_LATEST_RELEVANT_ITERATION_RESULT"]
+      },
+      "compact": {
+        "required_present": ["S9_LATEST_RELEVANT_ITERATION_RESULT"],
+        "required_absent": ["S9_MEMORY_UNRELATED_DIAGNOSIS", "S9_ENVIRONMENT_NOISE", "S9_OLD_RELEVANT_ITERATION_RESULT", "S9_NEW_UNRELATED_ITERATION_RESULT"]
+      }
+    }
+  },
+  "provider_identity": {
+    "provider": "openai-compatible",
+    "model": "deepseek-v4-flash",
+    "endpoint": "https://api.deepseek.com",
+    "tool_event_reasoning_mode": "disabled",
+    "reasoning_profile": "deepseek-chat-known:v1"
+  },
+  "cache_enabled": false,
+  "common_interventions": {
+    "default_max_completion_tokens": 4096,
+    "semantics": "provider-neutral experiment fallback applied only when a typed request omits max_tokens"
+  },
+  "execution": {
+    "runner_integration_ready": true,
+    "transport_retries": 0,
+    "json_repair_attempts": 0,
+    "length_recoveries": 0,
+    "stop_on_first_failure": true,
+    "per_arm_wall_clock_seconds": 900
+  },
+  "evidence_persistence": {
+    "arm_record_path": "<run_dir>/campaign_record.json",
+    "campaign_state_path": "<campaign_root>/campaign_state.json",
+    "arm_record_before_gate": true,
+    "campaign_state_after_each_arm": true,
+    "failure_state_before_raise": true
+  },
+  "task_designer_call_contract": {
+    "request_count": 1,
+    "usage_coverage": 1.0,
+    "reasoning_mode": "disabled",
+    "transport_retries": 0,
+    "failed_attempt_count": 0,
+    "recovery_count": 0,
+    "required_omitted_count": 0,
+    "required_partial_count": 0
+  },
+  "token_limits": {
+    "per_arm_hard": 30000,
+    "per_pair_hard": 60000,
+    "provider_sentinel_hard": 180000
+  },
+  "prior_paid_diagnostics": [
+    {
+      "diagnostic_id": "stage9-provider-sentinel-v1-retry1-arm1-phase-misaligned",
+      "scenario_id": "strongly_related_diagnosis",
+      "pair": 1,
+      "observed_complete_tokens": 13167,
+      "formal_sample": false,
+      "exclusion_reason": "whole-run mutation snapshot was phase-misaligned and included core-stage README, .openpilot, sketch.json, and .gitignore artifacts",
+      "campaign_state": {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry1/campaign_state.json",
+        "sha256": "sha256:beccabfbfd5c215483d43d1bee867d3899007b22c85d8771d3f83d1be3bc8593"
+      },
+      "campaign_record": {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry1/01_p1_strongly_related_diagnosis_current/campaign_record.json",
+        "sha256": "sha256:170e7c7a1894880f44380233bf49ea0123b808ffcb8fc3da7e5a865229b72f95"
+      }
+    },
+    {
+      "diagnostic_id": "stage9-provider-sentinel-v1-retry2-runtime-owned-mutations-unclassified",
+      "scenario_id": "strongly_related_diagnosis",
+      "pair": 1,
+      "observed_complete_tokens": 13373,
+      "formal_sample": false,
+      "exclusion_reason": "phase-aligned diff still treated schema-valid OpenPilot index and directory-sketch refreshes as user-owned mutations",
+      "campaign_state": {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry2/campaign_state.json",
+        "sha256": "sha256:ac06ca22e28ec9752ca4994bd902f3660184c80bc634dd725d00875da6cc9513"
+      },
+      "campaign_record": {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry2/01_p1_strongly_related_diagnosis_current/campaign_record.json",
+        "sha256": "sha256:f6007af2a67576c07a9d5cfe159c2ef58b331aaeb9c5b073a3ed2f8f00212389"
+      }
+    }
+  ],
+  "excluded_zero_token_diagnostics": [
+    {
+      "diagnostic_id": "stage9-provider-sentinel-v1-first-attempt-zero-token",
+      "formal_sample": false,
+      "observed_complete_tokens": 0,
+      "campaign_state_path": "runs/stage9_provider_sentinel_v1_20260804/campaign_state.json",
+      "campaign_state_sha256": "sha256:e9bca85b687e3acbbd6dd544804cadd3b7d37188d2b5c4dfacee122722d0f9a4"
+    }
+  ],
+  "quality_gates": {
+    "require_core_success": true,
+    "require_verification_passed": true,
+    "require_improvement_succeeded": true,
+    "required_commands": ["python -m pytest -q", "python -m compileall -q calculator.py"],
+    "allowed_modified_basenames": ["calculator.py"],
+    "required_modified_basenames": ["calculator.py"],
+    "divide_docstring_exact_sentence": "Raises ValueError when denominator is zero."
+  },
+  "mutation_evidence_contract": {
+    "raw_diff_canonical_disjoint_complete": true,
+    "runtime_artifacts_must_exist_at_enhancement_start": true,
+    "runtime_artifact_add_delete_allowed": false,
+    "runtime_artifact_unknown_fields_allowed": false,
+    "runtime_artifact_validation": "strict typed metadata plus production-derived final project facts",
+    "user_owned_all_changed_basenames": ["calculator.py"]
+  },
+  "runner_integration": {
+    "interface": "run_arm(schedule_item, run_dir, protocol) -> campaign record",
+    "owner": "run_observation.py Stage9 CLI adapter",
+    "status": "verified_offline_no_provider_execution"
+  }
+}

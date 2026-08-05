@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "fixture_id": "calculator-four-stage-decomposition-v1",
+  "source_run": "20260803T172926Z",
+  "injection_point": "IntelligentAutopilot.task_decomposer.decompose",
+  "original_task_id": "calculator-root",
+  "rationale": "Freeze the validated inspect, implement, pytest, and compileall task contracts while preserving production execution and evidence checks.",
+  "tasks": [
+    {
+      "id": "inspect-calculator",
+      "description": "Read calculator.py and test_calculator.py to inspect the current divide implementation and identify why the denominator-zero test fails.",
+      "kind": "inspect",
+      "read_files": [
+        "calculator.py",
+        "test_calculator.py"
+      ],
+      "write_files": [],
+      "dependencies": [],
+      "validation_command": "",
+      "estimated_effort": 1.0
+    },
+    {
+      "id": "implement-divide-fix",
+      "description": "Modify only calculator.py so divide raises ValueError with a message containing denominator when the denominator is zero.",
+      "kind": "implement",
+      "read_files": [
+        "calculator.py"
+      ],
+      "write_files": [
+        "calculator.py"
+      ],
+      "dependencies": [
+        "inspect-calculator"
+      ],
+      "validation_command": "",
+      "estimated_effort": 1.0
+    },
+    {
+      "id": "validate-pytest",
+      "description": "Run pytest to verify all calculator tests pass after the divide fix.",
+      "kind": "validate",
+      "read_files": [],
+      "write_files": [],
+      "dependencies": [
+        "implement-divide-fix"
+      ],
+      "validation_command": "python -m pytest -q",
+      "estimated_effort": 1.0
+    },
+    {
+      "id": "validate-compileall",
+      "description": "Run compileall for calculator.py after pytest succeeds.",
+      "kind": "validate",
+      "read_files": [],
+      "write_files": [],
+      "dependencies": [
+        "validate-pytest"
+      ],
+      "validation_command": "python -m compileall -q calculator.py",
+      "estimated_effort": 1.0
+    }
+  ]
+}

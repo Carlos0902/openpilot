@@ -1,0 +1,90 @@
+{
+  "campaign_id": "stage9-task-designer-scenario-canary-v2",
+  "status": "offline_sentinel_only",
+  "question": "Does compact Task Designer projection preserve independently relevant diagnosis and iteration-memory evidence across four relevance strata?",
+  "phases": {
+    "offline_sentinel": {
+      "provider_calls": 0,
+      "required_scenarios": [
+        "unrelated_diagnosis",
+        "strongly_related_diagnosis",
+        "partial_shared_criterion",
+        "relevant_iteration_memory"
+      ]
+    },
+    "provider_sentinel": {
+      "scenarios": [
+        "strongly_related_diagnosis",
+        "partial_shared_criterion",
+        "relevant_iteration_memory"
+      ],
+      "arms": ["current", "compact"],
+      "runs": 6,
+      "requires_offline_pass": true,
+      "execute_requires_explicit_flag": true
+    },
+    "confirmatory": {
+      "scenarios": [
+        "strongly_related_diagnosis",
+        "partial_shared_criterion",
+        "relevant_iteration_memory"
+      ],
+      "arms": ["current", "compact"],
+      "runs": 6,
+      "requires_provider_sentinel_pass": true,
+      "execute_requires_explicit_flag": true
+    }
+  },
+  "scenarios": {
+    "unrelated_diagnosis": {
+      "frozen_source_fingerprint": "sha256:c22f64c5b35d93cf00f646a708dd76760fc852d4553f190ad2cfb1b083846d80",
+      "frozen_goal_hash": "sha256:9d837a0911ba0b9cec0edf0a2ff7ed951165650872c604ca9ccff2662c0fb0aa",
+      "frozen_contract_hash": "sha256:e20d454e16595b3de63c590589a3b193093ff7e46c9cc5b617b51775e314a621",
+      "expected_compact_sentinels": [],
+      "forbidden_compact_sentinels": ["S9_UNRELATED_DIAGNOSIS", "S9_ENVIRONMENT_NOISE"]
+    },
+    "strongly_related_diagnosis": {
+      "frozen_source_fingerprint": "sha256:57f10f61d6e029be1518e197c25f4db9137fdae32d904f9796c43d8e8f2ccc65",
+      "frozen_goal_hash": "sha256:a1254c446a3c88998d488597858b06a6511d8ec166e6a282f8100bdb60a48a36",
+      "frozen_contract_hash": "sha256:7564112ac4dbbe4c57df76e2feb305f7f37117e74d5cfc83150b34aafa018b08",
+      "expected_compact_sentinels": ["S9_STRONG_DIAGNOSIS"],
+      "forbidden_compact_sentinels": ["S9_ENVIRONMENT_NOISE", "S9_UNRELATED_DIMENSION", "S9_UNRELATED_METRIC"]
+    },
+    "partial_shared_criterion": {
+      "frozen_source_fingerprint": "sha256:7f4ce4684116c0e5f3b1b5359abca09b094a6384f0a3d01ff8de44a714696cbb",
+      "frozen_goal_hash": "sha256:3ca60919dbe1717a1c9349cf090dbd21bb3695faf5567a67dca2910fc04b88fa",
+      "frozen_contract_hash": "sha256:a33945c30f4c9d19ef7e8e719066ba518b2fbe5595a929f2f2c779f5700be630",
+      "expected_compact_sentinels": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"],
+      "forbidden_compact_sentinels": ["S9_ENVIRONMENT_NOISE", "S9_UNRELATED_DIMENSION", "S9_UNRELATED_METRIC"]
+    },
+    "relevant_iteration_memory": {
+      "frozen_source_fingerprint": "sha256:d29b082ac58e68ed62cc4a69a03dd029a22a15cbe5d4d150e52acbfbb43b62a4",
+      "frozen_goal_hash": "sha256:400b9ad6e4e0f036b3f93843c6d89c6a0b2c1c0e9e218cf95ed0f6639ccf78e8",
+      "frozen_contract_hash": "sha256:bdfea5bc7de93f43af225eb6dfd41eecb02c899cc6f3ae84c122396dea1d9a74",
+      "expected_compact_sentinels": ["S9_LATEST_RELEVANT_ITERATION_RESULT"],
+      "forbidden_compact_sentinels": ["S9_MEMORY_UNRELATED_DIAGNOSIS", "S9_ENVIRONMENT_NOISE", "S9_OLD_RELEVANT_ITERATION_RESULT", "S9_NEW_UNRELATED_ITERATION_RESULT"]
+    }
+  },
+  "contract_fields": [
+    "runtime_goal_hash",
+    "frozen_goal_hash",
+    "safe_target_files",
+    "validation_commands",
+    "validation_passed",
+    "product_intent"
+  ],
+  "offline_assembly": {
+    "assembler": "ContextAssembler",
+    "token_counter": "stage9-stable-lexical-v1",
+    "max_prompt_tokens": 50000,
+    "protected_candidates_must_be_kept": true,
+    "initial_minimum_reduction_fraction": 0.10
+  },
+  "token_limits": {
+    "per_arm_hard": 30000,
+    "per_pair_hard": 60000,
+    "provider_sentinel_hard": 180000,
+    "confirmatory_hard": 180000,
+    "campaign_hard": 360000
+  }
+}

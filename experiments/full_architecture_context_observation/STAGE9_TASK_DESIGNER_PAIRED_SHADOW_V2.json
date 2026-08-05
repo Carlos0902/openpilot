@@ -1,0 +1,262 @@
+{
+  "campaign_id": "stage9-task-designer-paired-shadow-v2",
+  "status": "protocol_frozen_not_executed",
+  "execute_requires_explicit_flag": true,
+  "provider_neutral_design": true,
+  "source_gates": {
+    "offline_protocol": {
+      "path": "STAGE9_TASK_DESIGNER_SCENARIO_CANARY_V2.json",
+      "sha256": "sha256:d480c05295e3aa6a6f7c70602840db135b764cbb120b7a6fbb7e828b158e8a54",
+      "must_pass": true
+    },
+    "offline_result": {
+      "path": "STAGE9_TASK_DESIGNER_SCENARIO_CANARY_V2_OFFLINE_RESULT.json",
+      "sha256": "sha256:4ba48e511c81c643d9fac066d0df0207857e4b19d4ebccf782d497edb0209be1",
+      "must_pass": true
+    },
+    "v1_protocol": {
+      "path": "STAGE9_TASK_DESIGNER_PROVIDER_SENTINEL_V1.json",
+      "sha256": "sha256:0da31020ac30637a35adcf46ee6d772b1962c75538cfe5583a93ea1115d4e6a5",
+      "must_remain_immutable": true
+    }
+  },
+  "schedule": [
+    {
+      "ordinal": 1,
+      "scenario_pair": 1,
+      "scenario_id": "strongly_related_diagnosis",
+      "production_policy": "current",
+      "shadow_policy": "compact",
+      "request_order": ["production", "shadow"]
+    },
+    {
+      "ordinal": 2,
+      "scenario_pair": 1,
+      "scenario_id": "strongly_related_diagnosis",
+      "production_policy": "compact",
+      "shadow_policy": "current",
+      "request_order": ["production", "shadow"]
+    },
+    {
+      "ordinal": 3,
+      "scenario_pair": 2,
+      "scenario_id": "partial_shared_criterion",
+      "production_policy": "compact",
+      "shadow_policy": "current",
+      "request_order": ["production", "shadow"]
+    },
+    {
+      "ordinal": 4,
+      "scenario_pair": 2,
+      "scenario_id": "partial_shared_criterion",
+      "production_policy": "current",
+      "shadow_policy": "compact",
+      "request_order": ["production", "shadow"]
+    },
+    {
+      "ordinal": 5,
+      "scenario_pair": 3,
+      "scenario_id": "relevant_iteration_memory",
+      "production_policy": "current",
+      "shadow_policy": "compact",
+      "request_order": ["production", "shadow"]
+    },
+    {
+      "ordinal": 6,
+      "scenario_pair": 3,
+      "scenario_id": "relevant_iteration_memory",
+      "production_policy": "compact",
+      "shadow_policy": "current",
+      "request_order": ["production", "shadow"]
+    }
+  ],
+  "scenarios": {
+    "strongly_related_diagnosis": {
+      "frozen_source_fingerprint": "sha256:746a14fa6e250b3ab83bea082c3abedcdc9a5e1c775fe3102a3438bca4fbcc21",
+      "frozen_goal_hash": "sha256:a1254c446a3c88998d488597858b06a6511d8ec166e6a282f8100bdb60a48a36"
+    },
+    "partial_shared_criterion": {
+      "frozen_source_fingerprint": "sha256:261c8a22a356cbcd3d2b5b4bf20f22d6217085d6aedb0331eef7e6ad9ba20b95",
+      "frozen_goal_hash": "sha256:3ca60919dbe1717a1c9349cf090dbd21bb3695faf5567a67dca2910fc04b88fa"
+    },
+    "relevant_iteration_memory": {
+      "frozen_source_fingerprint": "sha256:83ab143d1408ed406fb15d686174d1dd34669022e846b41112a698cf8947f41c",
+      "frozen_goal_hash": "sha256:400b9ad6e4e0f036b3f93843c6d89c6a0b2c1c0e9e218cf95ed0f6639ccf78e8"
+    }
+  },
+  "scenario_candidate_contracts": {
+    "strongly_related_diagnosis": {
+      "current": {
+        "required_present": ["S9_STRONG_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": []
+      },
+      "compact": {
+        "required_present": ["S9_STRONG_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": ["S9_ENVIRONMENT_NOISE", "S9_UNRELATED_DIMENSION", "S9_UNRELATED_METRIC"]
+      }
+    },
+    "partial_shared_criterion": {
+      "current": {
+        "required_present": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": []
+      },
+      "compact": {
+        "required_present": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"],
+        "required_absent": ["S9_ENVIRONMENT_NOISE", "S9_UNRELATED_DIMENSION", "S9_UNRELATED_METRIC"]
+      }
+    },
+    "relevant_iteration_memory": {
+      "current": {
+        "required_present": ["S9_MEMORY_UNRELATED_DIAGNOSIS", "S9_OLD_RELEVANT_ITERATION_RESULT", "S9_NEW_UNRELATED_ITERATION_RESULT"],
+        "required_absent": ["S9_LATEST_RELEVANT_ITERATION_RESULT"]
+      },
+      "compact": {
+        "required_present": ["S9_LATEST_RELEVANT_ITERATION_RESULT"],
+        "required_absent": ["S9_MEMORY_UNRELATED_DIAGNOSIS", "S9_ENVIRONMENT_NOISE", "S9_OLD_RELEVANT_ITERATION_RESULT", "S9_NEW_UNRELATED_ITERATION_RESULT"]
+      }
+    }
+  },
+  "paired_source_contract": {
+    "boundary": "first and only production Task Designer candidate-builder entry after core success and before enhancement execution",
+    "builder_entry_count": 1,
+    "freeze_semantics": "deep immutable value snapshot of the same live ProjectStateSnapshot, ImprovementGoal, improvement report, and completed iteration",
+    "scenario_overlay_semantics": "apply the frozen diagnosis and memory overlay once to the shared snapshot before building either projection",
+    "projection_policies": ["current", "compact"],
+    "runtime_contract_hash_count": 1,
+    "shared_snapshot_required_for_both_requests": true,
+    "candidate_builder": "production build_iteration_task_design_candidates",
+    "cross_run_runtime_hash_equality_required": false,
+    "within_run_runtime_hash_equality_required": true
+  },
+  "request_roles": {
+    "production": {
+      "order": 1,
+      "output_consumed_by_downstream": true,
+      "uses_production_enhancement_completion_budget": true
+    },
+    "shadow": {
+      "order": 2,
+      "output_consumed_by_downstream": false,
+      "uses_production_enhancement_completion_budget": false,
+      "max_completion_semantics": "mirror the admitted production Task Designer request max_tokens",
+      "reasoning_semantics": "mirror the typed provider-neutral production reasoning policy",
+      "allowed_operations": ["provider transport", "deterministic JSON parsing", "deterministic task coercion", "experiment evidence recording"],
+      "forbidden_operations": ["task decomposition", "task execution", "tool execution", "project mutation", "memory mutation", "runtime budget mutation", "enhancement completion budget mutation"],
+      "side_effect_proof": ["project snapshot unchanged", "isolated memory tree hash unchanged", "runtime budget hash unchanged", "enhancement completion budget hash unchanged"],
+      "experiment_diagnostics_outside_project_allowed": true
+    }
+  },
+  "provider_identity": {
+    "provider": "openai-compatible",
+    "model": "deepseek-v4-flash",
+    "endpoint": "https://api.deepseek.com",
+    "tool_event_reasoning_mode": "disabled",
+    "reasoning_profile": "deepseek-chat-known:v1"
+  },
+  "provider_identity_semantics": "frozen execution identity for this campaign only; projection, reasoning intent, budget, and evidence contracts remain provider-neutral product concepts",
+  "cache_enabled": false,
+  "common_interventions": {
+    "default_max_completion_tokens": 4096,
+    "semantics": "provider-neutral experiment fallback applied only when a typed request omits max_tokens"
+  },
+  "execution": {
+    "full_architecture_runs": 6,
+    "task_designer_requests_per_run": 2,
+    "production_first": true,
+    "shadow_second": true,
+    "transport_retries": 0,
+    "json_repair_attempts": 0,
+    "length_recoveries": 0,
+    "stop_on_first_failure": true,
+    "per_run_wall_clock_seconds": 900
+  },
+  "task_designer_request_contract": {
+    "request_membership": ["current", "compact"],
+    "role_membership": ["production", "shadow"],
+    "response_format": "json_object",
+    "temperature": 0.2,
+    "usage_coverage": 1.0,
+    "reasoning_mode": "disabled",
+    "transport_retries": 0,
+    "failed_attempt_count": 0,
+    "recovery_count": 0,
+    "required_omitted_count": 0,
+    "required_partial_count": 0,
+    "same_provider_identity": true,
+    "same_max_completion_tokens": true,
+    "same_reasoning_policy": true,
+    "event_attribution": "typed request trace role and execution id, never positional inference"
+  },
+  "historical_stage9_spend": {
+    "observed_complete_tokens": 51391,
+    "v2_formal_sample": false,
+    "counted_against_stage9_total_hard": true,
+    "remaining_stage9_total_tokens": 128609,
+    "evidence": [
+      {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry3/campaign_state.json",
+        "sha256": "sha256:080dc4ac621269f2fb4bc006b5c7472da1c46d78bbe003bb93ad108ea46bf696"
+      },
+      {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry3/01_p1_strongly_related_diagnosis_current/campaign_record.json",
+        "sha256": "sha256:9a8af67009051e312b3dd6bffaa70884435c7670d3ba9ecb7f665479f5e29f5a"
+      },
+      {
+        "path": "runs/stage9_provider_sentinel_v1_20260804_retry3/02_p1_strongly_related_diagnosis_compact/campaign_record.json",
+        "sha256": "sha256:c8c4b5d8984b9fc8f2ad09b92053934f336bbffe192d3d331967ceb9b03ed56c"
+      }
+    ]
+  },
+  "token_limits": {
+    "per_run_hard": 30000,
+    "per_scenario_v2_hard": 60000,
+    "stage9_lifetime_hard": 180000,
+    "stage9_lifetime_opening_spend": 51391,
+    "stage9_lifetime_opening_remaining": 128609,
+    "accounting_semantics": "per-scenario limit covers its two V2 paired-shadow runs; Stage9 lifetime limit additionally includes all frozen V1 paid spend",
+    "admission_semantics": "settled or held usage plus exact current-request input, framing reserve, and max completion must fit the per-run and remaining Stage9 lifetime caps before transport"
+  },
+  "quality_gates": {
+    "both_task_designer_outputs": ["non-empty", "finish reason is not length or max_tokens", "valid JSON object", "schema-valid single task", "authorized target only", "goal acceptance criterion preserved", "evidence ids retained by that request only"],
+    "production_full_architecture": ["core success", "verification passed", "improvement succeeded", "python -m pytest -q passed", "python -m compileall -q calculator.py passed", "calculator.py is the only user-owned mutation", "divide docstring contains the exact sentence Raises ValueError when denominator is zero."],
+    "compact_as_production_runs_required": 3,
+    "current_as_production_runs_required": 3
+  },
+  "stop_conditions": [
+    "offline gate or frozen source hash mismatch",
+    "provider identity mismatch",
+    "goal, scenario overlay, or shared snapshot contract mismatch",
+    "Task Designer builder entry count is not exactly one",
+    "current and compact candidates are not built from the same frozen value snapshot",
+    "candidate sentinel contract failure",
+    "request order, role membership, or policy membership mismatch",
+    "production and shadow max completion or reasoning policy mismatch",
+    "provider failure, empty response, length truncation, invalid JSON, invalid schema, unauthorized task, retry, repair, or recovery",
+    "missing, partial, unknown, censored, unsettled, or reservation-overrun usage",
+    "shadow output is observed by Task Decomposer, Task Executor, or any tool",
+    "shadow changes project files, memory, runtime budget, or enhancement completion budget",
+    "production full-architecture quality, command, permission, or mutation gate failure",
+    "per-run, per-scenario V2, or Stage9 lifetime token hard limit reached or exceeded",
+    "evidence cannot be persisted before gate evaluation"
+  ],
+  "evidence_persistence": {
+    "run_record_path": "<run_dir>/campaign_record.json",
+    "campaign_state_path": "<campaign_root>/campaign_state.json",
+    "run_record_before_gate": true,
+    "campaign_state_after_each_run": true,
+    "failure_state_before_raise": true,
+    "required_paired_fields": ["shared_snapshot_hash", "runtime_contract_hash", "role", "projection_policy", "candidate_fingerprint", "request_execution_id", "final_prompt_tokens", "provider_input_tokens", "provider_output_tokens", "provider_total_tokens", "max_completion_tokens", "reasoning_policy", "finish_reason", "response_hash", "retained_candidate_ids", "omitted_candidate_ids", "json_valid", "schema_valid", "task_coercion_valid", "output_consumed_by_downstream"],
+    "required_shadow_side_effect_fields": ["project_snapshot_before", "project_snapshot_after", "memory_hash_before", "memory_hash_after", "runtime_budget_hash_before", "runtime_budget_hash_after", "enhancement_budget_hash_before", "enhancement_budget_hash_after"]
+  },
+  "promotion_gate": {
+    "production_default_before_pass": false,
+    "eligible_only_if": ["all six scheduled runs completed", "all twelve Task Designer requests passed", "all three compact-as-production runs passed full-architecture gates", "all three current-as-production runs passed full-architecture gates", "all shadow side-effect proofs passed", "all usage is complete and within hard limits", "no stop condition occurred"],
+    "failure_decision": "retain current production default and treat all completed V2 records as diagnostic only",
+    "pass_decision": "eligible for a separately reviewed production-default decision; passing does not itself mutate the default"
+  },
+  "metadata_impact": {
+    "new_product_metadata_contract": false,
+    "product_api_change": false,
+    "experiment_only_descriptor_fields": true
+  }
+}

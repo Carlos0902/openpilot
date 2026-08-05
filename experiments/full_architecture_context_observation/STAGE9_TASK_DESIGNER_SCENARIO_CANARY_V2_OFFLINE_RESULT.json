@@ -1,0 +1,93 @@
+{
+  "campaign_id": "stage9-task-designer-scenario-canary-v2",
+  "phase": "offline_sentinel",
+  "provider_calls": 0,
+  "passed": true,
+  "token_counter": {"tokenizer_id": "stage9-stable-lexical-v1", "model": "offline-gate"},
+  "scenarios": {
+    "unrelated_diagnosis": {
+      "passed": true, "reasons": [], "input_reduction_fraction": 0.7628647214854112,
+      "current": {
+        "source_fingerprint": "sha256:c22f64c5b35d93cf00f646a708dd76760fc852d4553f190ad2cfb1b083846d80",
+        "goal_hash": "sha256:9d837a0911ba0b9cec0edf0a2ff7ed951165650872c604ca9ccff2662c0fb0aa",
+        "contract_hash": "sha256:e20d454e16595b3de63c590589a3b193093ff7e46c9cc5b617b51775e314a621",
+        "content_fingerprint": "sha256:6aedc5522dfbb78c7c24be4a32e6e1d321c3233581de278ffff8db4821049808",
+        "candidate_decisions_fingerprint": "sha256:a6d7694bc3ffe249b6d3862bb51fc0bbf6632fe4aee55a2381c0affc38cef436",
+        "candidate_count": 8, "selected_candidate_count": 8, "final_prompt_tokens": 1885,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": []
+      },
+      "compact": {
+        "source_fingerprint": "sha256:c22f64c5b35d93cf00f646a708dd76760fc852d4553f190ad2cfb1b083846d80",
+        "goal_hash": "sha256:9d837a0911ba0b9cec0edf0a2ff7ed951165650872c604ca9ccff2662c0fb0aa",
+        "contract_hash": "sha256:e20d454e16595b3de63c590589a3b193093ff7e46c9cc5b617b51775e314a621",
+        "content_fingerprint": "sha256:556df0197e725fb12050cd4cdf59d7faf207cf269188a6aa43a498b20bae222f",
+        "candidate_decisions_fingerprint": "sha256:5a768efd2edd171f924c9724c21a8919fdcb1390bd504d782500fc9fa57b3082",
+        "candidate_count": 6, "selected_candidate_count": 6, "final_prompt_tokens": 447,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": []
+      }
+    },
+    "strongly_related_diagnosis": {
+      "passed": true, "reasons": [], "input_reduction_fraction": 0.6592449177153921,
+      "current": {
+        "source_fingerprint": "sha256:57f10f61d6e029be1518e197c25f4db9137fdae32d904f9796c43d8e8f2ccc65",
+        "goal_hash": "sha256:a1254c446a3c88998d488597858b06a6511d8ec166e6a282f8100bdb60a48a36",
+        "contract_hash": "sha256:7564112ac4dbbe4c57df76e2feb305f7f37117e74d5cfc83150b34aafa018b08",
+        "content_fingerprint": "sha256:0f31338476c0633948b518cea9569a6f0f2b498ecfe61742ff506c8a95fc0ebd",
+        "candidate_decisions_fingerprint": "sha256:1b9d8193ea1c7f4eaff0558f3f2f537e70235508d6cb40bd48cab57f15bce20e",
+        "candidate_count": 8, "selected_candidate_count": 8, "final_prompt_tokens": 2066,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": ["S9_STRONG_DIAGNOSIS"]
+      },
+      "compact": {
+        "source_fingerprint": "sha256:57f10f61d6e029be1518e197c25f4db9137fdae32d904f9796c43d8e8f2ccc65",
+        "goal_hash": "sha256:a1254c446a3c88998d488597858b06a6511d8ec166e6a282f8100bdb60a48a36",
+        "contract_hash": "sha256:7564112ac4dbbe4c57df76e2feb305f7f37117e74d5cfc83150b34aafa018b08",
+        "content_fingerprint": "sha256:10c2bf2aeeac80d7cb74c8afb8d915ad4143d64dbf2ecb8e2a55d410c7cdf2fc",
+        "candidate_decisions_fingerprint": "sha256:f15e948b7af3aec07faf38e4473e6863168ee0d7365ebdacf9fabe89e0b623e6",
+        "candidate_count": 7, "selected_candidate_count": 7, "final_prompt_tokens": 704,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": ["S9_STRONG_DIAGNOSIS"]
+      }
+    },
+    "partial_shared_criterion": {
+      "passed": true, "reasons": [], "input_reduction_fraction": 0.6643356643356644,
+      "current": {
+        "source_fingerprint": "sha256:7f4ce4684116c0e5f3b1b5359abca09b094a6384f0a3d01ff8de44a714696cbb",
+        "goal_hash": "sha256:3ca60919dbe1717a1c9349cf090dbd21bb3695faf5567a67dca2910fc04b88fa",
+        "contract_hash": "sha256:a33945c30f4c9d19ef7e8e719066ba518b2fbe5595a929f2f2c779f5700be630",
+        "content_fingerprint": "sha256:0d2edb2be779b4d5bae0a12980ce8edf40736074f93182434c7224b927bbe92c",
+        "candidate_decisions_fingerprint": "sha256:f251c34d271f17b00846c779395bbc5d2e7b44d316e9d004bec3daba975bb9f2",
+        "candidate_count": 8, "selected_candidate_count": 8, "final_prompt_tokens": 2002,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"]
+      },
+      "compact": {
+        "source_fingerprint": "sha256:7f4ce4684116c0e5f3b1b5359abca09b094a6384f0a3d01ff8de44a714696cbb",
+        "goal_hash": "sha256:3ca60919dbe1717a1c9349cf090dbd21bb3695faf5567a67dca2910fc04b88fa",
+        "contract_hash": "sha256:a33945c30f4c9d19ef7e8e719066ba518b2fbe5595a929f2f2c779f5700be630",
+        "content_fingerprint": "sha256:7dc3a592daca280508494fff6fbc67dbc27be1fc73da2f108b917dc1e9a20e75",
+        "candidate_decisions_fingerprint": "sha256:5ec5989d83633bace63a016d7d10ed7bde999329e4c6260952f96ef4bd136201",
+        "candidate_count": 7, "selected_candidate_count": 7, "final_prompt_tokens": 672,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": ["S9_PARTIAL_DIAGNOSIS", "S9_SELECTED_METRIC"]
+      }
+    },
+    "relevant_iteration_memory": {
+      "passed": true, "reasons": [], "input_reduction_fraction": 0.7025595763459841,
+      "current": {
+        "source_fingerprint": "sha256:d29b082ac58e68ed62cc4a69a03dd029a22a15cbe5d4d150e52acbfbb43b62a4",
+        "goal_hash": "sha256:400b9ad6e4e0f036b3f93843c6d89c6a0b2c1c0e9e218cf95ed0f6639ccf78e8",
+        "contract_hash": "sha256:bdfea5bc7de93f43af225eb6dfd41eecb02c899cc6f3ae84c122396dea1d9a74",
+        "content_fingerprint": "sha256:e84b098812180f6c954b1aaf90932afc2b28bab299ec1bdf22d5fab88e4ae18b",
+        "candidate_decisions_fingerprint": "sha256:346c13dfa923656bcbadc0029f3f6d303a9aed888b77f4a2f8c05b9e2b7ac10f",
+        "candidate_count": 10, "selected_candidate_count": 10, "final_prompt_tokens": 2266,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": []
+      },
+      "compact": {
+        "source_fingerprint": "sha256:d29b082ac58e68ed62cc4a69a03dd029a22a15cbe5d4d150e52acbfbb43b62a4",
+        "goal_hash": "sha256:400b9ad6e4e0f036b3f93843c6d89c6a0b2c1c0e9e218cf95ed0f6639ccf78e8",
+        "contract_hash": "sha256:bdfea5bc7de93f43af225eb6dfd41eecb02c899cc6f3ae84c122396dea1d9a74",
+        "content_fingerprint": "sha256:68d38f5cdde3dc059e752f2c3b15bb4880b2d5a7b2e0353d2f3fdb107949aa0e",
+        "candidate_decisions_fingerprint": "sha256:bd731f3e6093f515173292b8760438df92b4d812e39d40b384cf97ce4b07e47c",
+        "candidate_count": 7, "selected_candidate_count": 7, "final_prompt_tokens": 674,
+        "assembly_status": "ready", "protected_candidate_failures": [], "observed_optional_sentinels": ["S9_LATEST_RELEVANT_ITERATION_RESULT"]
+      }
+    }
+  }
+}
