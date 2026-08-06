@@ -2336,3 +2336,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - 决策：不改变全局 reasoning 或 Compact 默认，不进入 paired task canary；下一步是
   用显式 disabled profile 做独立 Compact 收益实验。完整结果见
   `docs/context_management/PHASE_12_REASONING_STRATEGY_RESULT.md`。
+
+### Context Phase 12：reasoning output inspection and adapter-boundary audit
+
+- 诊断证据：对同一 provider-default/128 请求直接检查 Provider 原始 choice。可见
+  `message.content` 长度为 0，`finish_reason=length`，completion=128、reasoning=128；
+  `message.reasoning_content` 长 678 字符，停在 `- goal_delta: change in` 中途。模型
+  还没有进入 JSON 输出通道，故不是“生成了错误 JSON”，而是隐藏 reasoning 先耗尽预算。
+- 架构审计：当前已有 provider-neutral `ReasoningPolicy`、resolved policy、显式
+  versioned profile 和禁止 model-name 推断；但 `render_reasoning_transport()` 仍在
+  `core/reasoning.py` 内用 provider-specific 分支，profile 还是数据记录而非独立
+  adapter protocol。通用基座 + 特定接口适配的方向已部分实现，尚未完全解耦。
+- 后续边界：应保留通用 policy base，增加 versioned adapter registry/protocol，负责
+  transport rendering 与 reasoning usage normalization；实验中的 explicit disabled
+  不支持时必须 fail closed，不能静默回退 provider default。此次只补充诊断文档，未
+  改变生产 reasoning/Compact 默认。

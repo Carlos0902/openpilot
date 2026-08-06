@@ -43,6 +43,36 @@ source-lineage validation, or the deterministic Compact boundary. The causal
 signal is the provider's reasoning allocation policy relative to the
 completion ceiling.
 
+## Concrete response inspection
+
+A direct diagnostic request confirmed what was actually emitted. The provider
+returned:
+
+- visible `message.content`: empty string (`length=0`);
+- `finish_reason`: `length`;
+- `completion_tokens`: 128;
+- `reasoning_tokens`: 128;
+- `message.reasoning_content`: 678 characters of planning text, ending midway
+  through `- goal_delta: change in`.
+
+The model was therefore spending the entire response budget in the hidden
+reasoning channel and never reached the JSON response channel. The regular
+`LLMClient` intentionally exposes only visible content, so the failed attempt
+had no summary payload and could not enter replay.
+
+## Generic base and provider adapters
+
+The current implementation has the intended provider-neutral pieces:
+typed `ReasoningPolicy`, `ResolvedReasoningPolicy`, explicit versioned profile
+selection, and no model-name capability inference. However, the adapter layer
+is only partially separated: `render_reasoning_transport()` still contains
+provider-specific `if` branches in `core/reasoning.py`, and the profile record
+does not dispatch through an independent adapter protocol. The next
+architecture refinement should keep the generic policy base, add a versioned
+adapter registry/protocol for transport rendering and response-usage
+normalization, and make unsupported explicit modes fail closed in experiments
+instead of silently falling back to provider default.
+
 ## Safety boundary
 
 - Four bounded Provider calls; no project/memory mutation.
