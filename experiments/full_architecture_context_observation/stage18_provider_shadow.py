@@ -231,10 +231,12 @@ def run_provider_shadow(
         response_format="json_object",
         temperature=0.0,
         max_tokens=summary_limit,
+        reasoning_policy=request.manifest.reasoning_policy,
         trace_info={
             "experiment_manifest_hash": request.manifest.manifest_hash,
             "shadow_only": True,
             "summary_schema_version": request.manifest.summary_schema_version,
+            "reasoning_policy_version": request.manifest.reasoning_policy_version,
         },
     )
     try:

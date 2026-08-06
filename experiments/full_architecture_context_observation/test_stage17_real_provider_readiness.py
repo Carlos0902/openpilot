@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from core.config import LLMSettings
 from core.token_counting import ProviderTokenCounter
+from metadata import ReasoningMode, ReasoningPolicy
 from stage17_real_provider_readiness import (
     ExperimentArm,
     ExperimentFlags,
@@ -175,3 +176,26 @@ def test_current_manifest_can_be_built_with_treatment_disabled_but_treatment_can
 def test_readiness_contract_forbids_untyped_extra_fields() -> None:
     with pytest.raises(ValidationError):
         ExperimentFlags(treatment_enabled=False, provider_name="surprise")
+
+
+def test_manifest_binds_typed_reasoning_policy_to_the_provider_profile() -> None:
+    readiness = assess_provider_readiness(
+        _settings(),
+        flags=ExperimentFlags(treatment_enabled=True),
+        budget_policy=_policy(),
+        token_counter=_counter(),
+    )
+    manifest = build_experiment_manifest(
+        readiness,
+        experiment_id="reasoning-strategy-v1",
+        arm=ExperimentArm.TREATMENT,
+        source_envelope_hash=_hash("a"),
+        session_turn_source_hash=_hash("b"),
+        constraint_hash=_hash("c"),
+        task_input_hash=_hash("d"),
+        completion_policy_hash=_hash("e"),
+        reasoning_policy=ReasoningPolicy(mode=ReasoningMode.DISABLED),
+    )
+
+    assert manifest.reasoning_policy.mode is ReasoningMode.DISABLED
+    assert verify_manifest_hash(manifest) is True

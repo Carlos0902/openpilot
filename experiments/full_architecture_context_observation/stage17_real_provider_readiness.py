@@ -20,6 +20,7 @@ from core.llm import normalized_provider_endpoint
 from core.reasoning import select_reasoning_capability_profile
 from core.token_counting import ProviderTokenCounter
 from memory.compaction_summary import calculate_summary_budget
+from metadata import ReasoningPolicy
 
 
 READINESS_SCHEMA_VERSION = "real_provider_readiness_v1"
@@ -157,6 +158,8 @@ class RollingSummaryExperimentManifest(BaseModel):
     summary_schema_version: str = SUMMARY_SCHEMA_VERSION
     summary_adapter_version: str = SUMMARY_ADAPTER_VERSION
     attempt_contract_version: str = ATTEMPT_CONTRACT_VERSION
+    reasoning_policy_version: str = "reasoning_policy_v1"
+    reasoning_policy: ReasoningPolicy = Field(default_factory=ReasoningPolicy)
     budget_policy: RollingSummaryBudgetPolicy
     flags: ExperimentFlags
     source_envelope_hash: str = Field(pattern=_HASH_PATTERN)
@@ -332,6 +335,7 @@ def build_experiment_manifest(
     constraint_hash: str,
     task_input_hash: str,
     completion_policy_hash: str,
+    reasoning_policy: ReasoningPolicy | None = None,
 ) -> RollingSummaryExperimentManifest:
     """Bind one arm to immutable source and provider identity."""
 
@@ -349,6 +353,7 @@ def build_experiment_manifest(
         provider_profile_id=profile_id,
         provider_profile_version=profile_version,
         tokenizer_id=readiness.tokenizer_id,
+        reasoning_policy=reasoning_policy or ReasoningPolicy(),
         budget_policy=readiness.budget_policy,
         flags=readiness.flags,
         source_envelope_hash=source_envelope_hash,

@@ -51,10 +51,13 @@ JSON summary contract never reached the rolling adapter. This is a reasoning/
 completion allocation signal, not evidence that segmented Compact semantics
 are bad or that LLM summaries should be enabled globally.
 
-The next experiment must isolate reasoning: use an explicit provider profile
+The Phase 12 experiment isolated reasoning: use an explicit provider profile
 that is known to support a non-thinking/disabled mode, or allocate a separate
 reasoning reserve and summary completion ceiling. It must not silently infer
 capabilities from the model name or change the Compact experiment's result.
+
+The follow-up evidence is recorded in
+`docs/context_management/PHASE_12_REASONING_STRATEGY_RESULT.md`.
 
 ## Rollout decision
 

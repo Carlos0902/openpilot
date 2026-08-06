@@ -2311,3 +2311,28 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - 文档：完整结果见 `docs/context_management/PHASE_11_STAGE_6E_RESULT.md`；剩余限制是
   尚无有效 summary response、replay artifact 或真实 token reduction/semantic quality
   结论。
+
+### Context Phase 12：reasoning strategy experiment
+
+- 阶段计划：先写 `docs/context_management/PHASE_12_REASONING_STRATEGY_EXPERIMENT.md`，
+  冻结同一 source/schema 的四臂矩阵：provider-default 128、explicit disabled 128、
+  provider-default 256、explicit enabled/high 128；reasoning、completion、Compact
+  和 task quality 分开归因。
+- 原因探查与实现：扩展 experiment-owned manifest，绑定 typed `ReasoningPolicy` 和
+  version；shadow request 使用 manifest policy；新增 `stage22_reasoning_strategy_experiment.py`
+  及分类器，严格区分 reasoning exhausted、普通 ceiling/schema truncation、unknown
+  usage/finish、provider error 和 valid summary。没有新增生产 MetadataKind，也没有
+  从 model name 推断 capability。
+- 离线证据：reasoning/readiness focused **11 passed**；既有 Code 全量与 Compact
+  focused 回归保持通过，compileall/diff-check 通过。
+- 真实证据：4 calls 均抵达真实 DeepSeek endpoint。`default_128`、`default_256`、
+  `enabled_high_128` 分别以 reasoning=output=128、256、128 和 finish `length` 失败；
+  `disabled_128` 以 input=416、output=68、finish `stop` 成功返回并通过 rolling summary
+  schema/lineage/budget 校验。结果是 1 个 valid shadow summary、3 个 reasoning-exhausted
+  attempts；全程无 project/memory/task mutation。
+- 根因判断：提高 completion ceiling 只让 provider 消耗更多 reasoning；显式 disabled
+  才释放 summary completion。这锁定了 reasoning allocation 为根因，不能把失败归因
+  给 Compact schema。
+- 决策：不改变全局 reasoning 或 Compact 默认，不进入 paired task canary；下一步是
+  用显式 disabled profile 做独立 Compact 收益实验。完整结果见
+  `docs/context_management/PHASE_12_REASONING_STRATEGY_RESULT.md`。
