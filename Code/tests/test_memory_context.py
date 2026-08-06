@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,6 +9,11 @@ import pytest
 from autonomous_iteration.agents.context_loader import ContextLoaderAgent
 from core.exceptions import ContextAssemblyBudgetError, ContextSourceError
 from memory.context_builder import MEMORY_CONTEXT_ADAPTER_VERSION, MemoryContextBuilder
+from memory.rolling_compaction import (
+    RollingSummaryAdapter,
+    RollingSummaryAttemptEvidence,
+    RollingSummaryRequest,
+)
 from memory.memory_models import MemoryRecord, MemoryType
 from memory.memory_store import MemoryStore
 from memory.project_manager import ProjectManager
@@ -869,3 +875,117 @@ def test_memory_context_segmented_compaction_preserves_signals_and_masks_long_ob
     assert "[observation masked:" in record.summary
     assert "sha256:" in record.summary
     assert record.compacted_chars < record.original_chars
+
+
+def _rolling_request_for_candidates(
+    candidates: tuple[ContextCandidate, ...],
+    limit: int,
+    *,
+    payload: dict[str, object] | None = None,
+) -> RollingSummaryRequest:
+    source_payload = [
+        {"candidate_id": candidate.candidate_id, "content": candidate.content}
+        for candidate in candidates
+    ]
+    fingerprint = "sha256:" + hashlib.sha256(
+        json.dumps(
+            source_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return RollingSummaryRequest(
+        source_candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
+        source_fingerprint=fingerprint,
+        provider_payload=payload
+        or {
+            "goal_delta": "older observations summarized",
+            "verified_facts": ["source segment retained"],
+            "decisions": ["keep the recent suffix"],
+            "open_issues": [],
+            "evidence_ids": [candidates[0].candidate_id],
+            "next_action": "continue with the current task",
+        },
+        attempt=RollingSummaryAttemptEvidence(
+            usage={"completion_tokens": 12},
+            usage_observed=True,
+            finish_reason="stop",
+        ),
+        max_summary_tokens=limit,
+        original_chars=sum(len(candidate.content) for candidate in candidates),
+        current_source_fingerprint=fingerprint,
+    )
+
+
+def _rolling_builder(tmp_path, *, factory, enabled: bool = True) -> MemoryContextBuilder:
+    short_memory = ShortMemory(repo_path=tmp_path)
+    for index in range(8):
+        short_memory.add_message("assistant", f"dialog-{index}-" + (str(index) * 120))
+    return MemoryContextBuilder(
+        short_memory=short_memory,
+        memory_store=MemoryStore(tmp_path / "memory"),
+        max_prompt_chars=620,
+        rolling_summary_enabled=enabled,
+        rolling_summary_adapter=RollingSummaryAdapter(count_tokens=lambda text: len(text.split())),
+        rolling_summary_request_factory=factory,
+    )
+
+
+def _persist_records(records: list[dict]):
+    def persist(record: dict) -> DurableArtifactReference:
+        records.append(record)
+        return DurableArtifactReference(
+            artifact_id=f"rolling-{len(records)}",
+            kind="context_compaction",
+            integrity_checksum="sha256:" + str(len(records)) * 64,
+            bytes=100,
+        )
+
+    return persist
+
+
+def test_rolling_summary_is_default_off_even_when_injected(tmp_path) -> None:
+    calls: list[tuple[tuple[ContextCandidate, ...], int]] = []
+
+    def factory(candidates, limit):
+        calls.append((candidates, limit))
+        raise AssertionError("feature-off builder must not call the summary factory")
+
+    builder = _rolling_builder(tmp_path, factory=factory, enabled=False)
+    persisted: list[dict] = []
+    builder.set_checkpoint_handlers(compaction_sink=_persist_records(persisted))
+    builder.build("feature off", include_environment=False, limit=8)
+
+    assert calls == []
+    assert persisted and persisted[0]["algorithm"] == "deterministic_observation_mask_v1"
+
+
+def test_rolling_summary_acceptance_reuses_atomic_artifact_sink(tmp_path) -> None:
+    def factory(candidates, limit):
+        return _rolling_request_for_candidates(candidates, limit)
+
+    builder = _rolling_builder(tmp_path, factory=factory)
+    persisted: list[dict] = []
+    builder.set_checkpoint_handlers(compaction_sink=_persist_records(persisted))
+    context = builder.build("rolling summary", include_environment=False, limit=8)
+
+    assert persisted and persisted[0]["algorithm"] == "llm_rolling_summary_v1"
+    assert context["context_compactions"][0]["record"]["algorithm"] == "llm_rolling_summary_v1"
+    assert "## Earlier Dialog Summary" in context["prompt_text"]
+
+
+def test_rolling_summary_fallback_restores_deterministic_record(tmp_path) -> None:
+    def factory(candidates, limit):
+        return _rolling_request_for_candidates(
+            candidates,
+            limit,
+            payload={"unknown": "field"},
+        )
+
+    builder = _rolling_builder(tmp_path, factory=factory)
+    persisted: list[dict] = []
+    builder.set_checkpoint_handlers(compaction_sink=_persist_records(persisted))
+    builder.build("rolling fallback", include_environment=False, limit=8)
+
+    assert persisted and persisted[0]["algorithm"] == "deterministic_observation_mask_v1"

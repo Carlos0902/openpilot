@@ -1,0 +1,131 @@
+"""Strict offline contract helpers for future LLM-assisted compaction.
+
+This module deliberately does not call a Provider or write an artifact. Stage 1
+only validates a bounded derived summary before a later stage wires it into the
+existing atomic compaction path.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
+
+from pydantic import ValidationError
+
+from metadata import ContextCompactionSummary
+
+
+class CompactionSummaryValidationError(ValueError):
+    """A generated summary cannot be used as a derived context projection."""
+
+
+_SUMMARY_FIELDS = frozenset(
+    {
+        "goal_delta",
+        "verified_facts",
+        "decisions",
+        "open_issues",
+        "evidence_ids",
+        "next_action",
+    }
+)
+
+
+def validate_summary_payload(
+    payload: Mapping[str, Any],
+    *,
+    source_candidate_ids: Sequence[str],
+    max_summary_tokens: int,
+    count_tokens: Callable[[str], int],
+    usage_observed: bool = True,
+) -> ContextCompactionSummary:
+    """Validate one untrusted structured summary without granting authority."""
+
+    if not isinstance(payload, Mapping):
+        raise CompactionSummaryValidationError("summary payload must be an object")
+    unknown = set(payload) - _SUMMARY_FIELDS
+    if unknown:
+        raise CompactionSummaryValidationError(
+            f"summary contains unknown fields: {sorted(unknown)}"
+        )
+    if max_summary_tokens < 1:
+        raise CompactionSummaryValidationError("summary budget must be positive")
+    if not usage_observed:
+        raise CompactionSummaryValidationError("summary usage is unknown")
+    source_ids = list(source_candidate_ids)
+    if len(source_ids) != len(set(source_ids)):
+        raise CompactionSummaryValidationError("summary source candidate IDs must be unique")
+    try:
+        summary = ContextCompactionSummary.model_validate(dict(payload))
+    except ValidationError as exc:
+        message = str(exc)
+        if "empty" in message:
+            raise CompactionSummaryValidationError("summary is empty") from exc
+        raise CompactionSummaryValidationError("summary schema is invalid") from exc
+    if len(summary.evidence_ids) != len(set(summary.evidence_ids)):
+        raise CompactionSummaryValidationError("summary evidence IDs must be unique")
+    unknown_evidence = set(summary.evidence_ids) - set(source_ids)
+    if unknown_evidence:
+        raise CompactionSummaryValidationError(
+            "summary evidence references unknown source candidates"
+        )
+    rendered = render_summary_payload(summary)
+    token_count = count_tokens(rendered)
+    if token_count < 1:
+        raise CompactionSummaryValidationError("summary is empty")
+    if token_count > max_summary_tokens:
+        raise CompactionSummaryValidationError("summary exceeds its token budget")
+    return summary
+
+
+def render_summary_payload(summary: ContextCompactionSummary) -> str:
+    """Render a stable, bounded representation for an artifact candidate."""
+
+    return json.dumps(
+        summary.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def calculate_summary_budget(
+    *,
+    static_cap_tokens: int,
+    requested_prompt_tokens: int,
+    used_prompt_tokens: int,
+    required_reserve_tokens: int,
+    recent_suffix_reserve_tokens: int,
+    response_schema_reserve_tokens: int,
+) -> int:
+    """Return the bounded summary slot left after non-negotiable reserves."""
+
+    values = {
+        "static_cap_tokens": static_cap_tokens,
+        "requested_prompt_tokens": requested_prompt_tokens,
+        "used_prompt_tokens": used_prompt_tokens,
+        "required_reserve_tokens": required_reserve_tokens,
+        "recent_suffix_reserve_tokens": recent_suffix_reserve_tokens,
+        "response_schema_reserve_tokens": response_schema_reserve_tokens,
+    }
+    if any(value < 0 for value in values.values()):
+        raise ValueError("summary budget inputs cannot be negative")
+    if static_cap_tokens == 0:
+        raise ValueError("static summary cap must be positive")
+    remaining = (
+        requested_prompt_tokens
+        - used_prompt_tokens
+        - required_reserve_tokens
+        - recent_suffix_reserve_tokens
+        - response_schema_reserve_tokens
+    )
+    return min(static_cap_tokens, max(0, remaining))
+
+
+__all__ = [
+    "CompactionSummaryValidationError",
+    "calculate_summary_budget",
+    "render_summary_payload",
+    "validate_summary_payload",
+]

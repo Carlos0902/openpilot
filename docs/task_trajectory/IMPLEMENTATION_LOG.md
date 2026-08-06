@@ -2075,3 +2075,124 @@ PYTHONPATH=Code/src pytest -q Code/tests
   计划中处理，不能覆盖历史冻结结果来伪造通过。
 - 当前 goal 的实质完成边界：上下文控制已从“架构/离线证明”进入一条可复核的真实收益路径，但收益仅为当前 fixture 的约 2.8% Task
   input reduction；下一步是多任务/更长历史的独立 canary 扩样，而不是现在扩大生产流量或自动切换 reasoning 默认。
+
+### Context Phase 10：Context governance enhancement Stage 0 audit
+
+- 目标：在进入 LLM-assisted compaction、持久约束边界和 reasoning profile
+  实现前，完成现状、契约所有权、主流实现和实验边界盘点。
+- 观察到的信号：deterministic segmented compaction 已具备 artifact/source
+  lineage 和原子回退，但 legacy `ContextCompressor` 仍是无生产 caller 的
+  自由文本 summary；session constraints 的基础状态已扎实，但 CLI 命令
+  路由、agent_generator ingress、API/acceptance runtime gate、stale proposal
+  和 quota/expiry 仍有缺口；reasoning 已有 typed policy/profile，但仍存在
+  model-prefix capability inference，且 native provider adapters/observed
+  reasoning normalization 不完整。
+- 处理决策：新增 Phase 10 分阶段计划；summary 复用
+  `ContextCompactionRecord`/`ContextCompactionBinding` 并保持 raw source
+  authority；constraint 继续归属 `SessionConstraintState`，不写入长期 memory；
+  reasoning 继续使用 provider-neutral intent + explicit versioned profile，
+  不把 Compact、constraint 和 reasoning 同时放入一项因果实验。
+- 验证证据：三条只读审计完成；未调用 Provider、未产生 network/project/memory
+  mutation。阶段计划和 metadata impact notes 已写入
+  `docs/context_management/PHASE_10_CONTEXT_GOVERNANCE_ENHANCEMENT_PLAN.md`。
+- 剩余限制：Stage 9 frozen snapshot/fixture mismatch 和 context README 阶段
+  表滞后尚未修复；Stage 1 必须先写独立 compaction quality plan 和 baseline
+  gate，再开始任何 summary runtime 代码。
+
+### Context Phase 10：Stage 1 LLM summary contract and offline quality gate
+
+- 阶段计划：先写 `docs/context_management/PHASE_10_STAGE_1_LLM_SUMMARY_PLAN.md`，
+  明确 legacy `ContextCompressor` 不得直接接生产、summary 只能覆盖旧的
+  non-required assistant/tool observation、required state 和 recent suffix 不受
+  summary authority 影响，并记录 metadata impact note。
+- 实现修复：新增严格嵌套 `ContextCompactionSummary`，只允许 goal delta、verified
+  facts、decisions、open issues、source evidence IDs 和 next action；扩展现有
+  `ContextCompactionRecord` 读取 `llm_rolling_summary_v1` 的可选 versioned
+  payload/token evidence，同时保持 deterministic v1-v5 历史记录可读。新增
+  `memory.compaction_summary` 纯校验 helper，拒绝 authority 字段、unknown
+  evidence、empty/over-budget/unknown-usage summary，并提供 required/recent/schema
+  reserve 后的 bounded summary budget 计算。
+- 验证证据：新增 3×3×4 history/relevance/purpose 离线矩阵和 failure fixtures；
+  summary contract 定向 `43 passed`，上下文/会话/恢复 focused `105 passed`，
+  Code 全量 `1013 passed`，`compileall` 与 `git diff --check` 通过。全程未调用
+  Provider、network、project、memory 或文件 mutation。
+- 出口判断：Stage 1 的 contract/fixture/quality gate 已通过；production summary
+  caller 仍为 0，Compact flag、Current fallback、reasoning 和 completion policy
+  均未改变。Stage 2 必须另写 rolling-summary runtime 计划后再实现。
+- 剩余限制：当前只验证结构化 contract 和 bounded fake payload，不证明 LLM
+  语义保真或真实 Token 收益；source artifact atomic integration、rolling
+  replacement 和 checkpoint/replay 接入仍属于 Stage 2。
+
+### Context Phase 10：Stage 2 feature-flagged rolling summary adapter
+
+- 阶段计划：先写 `docs/context_management/PHASE_10_STAGE_2_ROLLING_SUMMARY_PLAN.md`，
+  冻结 default-off、增量 source segment、provider-free validation、artifact
+  sink 复用和 deterministic Current fallback。
+- 实现修复：新增 `memory.rolling_compaction`。它冻结 source IDs/fingerprint，
+  校验结构化 payload、summary token ceiling、finish reason、usage evidence、
+  stale source 和压缩收益，并返回 typed fallback。`MemoryContextBuilder` 增加
+  default-off injectable request factory/adapter；生成 summary 只能作为 preferred
+  derived candidate，若它挤掉 recent suffix、无法原子选中或 artifact sink 失败，
+  自动恢复 deterministic observation mask（strict 模式沿用原有 fail-closed）。
+  legacy `ContextCompressor` 仍没有生产 caller。
+- 验证证据：rolling adapter `8 passed`；summary/context/rolling integration 与
+  existing memory context `31 passed`；全量回归需在 Stage 3 完成后重新执行。
+  离线运行未调用 Provider/network，也未修改 project、memory 或权限状态。
+- 出口判断：Stage 2 的 default-off、atomic artifact、strict/non-strict sink
+  boundary 和 deterministic fallback 已通过；真实 Provider canary 仍未开启。
+- 剩余限制：当前 factory 是注入边界，尚未连接真实 Provider，也尚未把 summary
+  attempt 的完整 usage/finish telemetry 纳入长期 trajectory；增量 previous
+  summary 的生产调用和 checkpoint/replay 端到端 fixture 仍需在后续阶段补齐。
+
+### Context Phase 10：Stage 3 session constraint boundary
+
+- 阶段计划：先写 `docs/context_management/PHASE_10_STAGE_3_SESSION_CONSTRAINT_PLAN.md`，
+  冻结统一 ingress、same-key stale proposal 处理、有界状态和 source-linked
+  required projection 边界。
+- 实现修复：Enhanced CLI 现在把 `/constraints`、`/confirm`、`/reject`、`/revoke`
+  统一路由到同一 typed handler；新用户提案会 supersede 更早的同 key pending
+  proposal，旧提案不能延迟激活；active entry 现在保留 `confirmed_at_turn`，而
+  revoked entry 保留 `revoked_at_turn`；`SessionConstraintLimits` 对 pending proposals、
+  active/revoked entries、序列化大小、scope paths、commands、criteria 和 item
+  长度实施 fail-closed 配额，旧 checkpoint 缺少 limits 时使用默认迁移值。
+- 验证证据：session constraint/reducer/ingress focused 集合 **27 passed**；覆盖
+  command lifecycle、supersession、quota、legacy checkpoint readability、assistant
+  non-authority 和 active projection。未调用 Provider/network，也未写长期 memory。
+- 出口判断：Stage 3A/3B 的入口、生命周期和 bounded-state 门通过；API/acceptance
+  仍只是 required projection，尚未接入独立 verification evidence gate；Agent
+  Generator 的完整 ingress 接入仍是下一阶段限制。
+
+### Context Phase 10：Stage 4 provider-neutral reasoning profiles
+
+- 阶段计划：先写 `docs/context_management/PHASE_10_STAGE_4_REASONING_PROFILE_PLAN.md`，
+  冻结 explicit typed profile、versioned registry、generic no-control fallback
+  和 reasoning/Compact/completion 独立归因。
+- 实现修复：`core.reasoning` 新增显式 profile registry（当前 generic、OpenAI
+  compatible、DeepSeek compatible 均为 versioned v1），移除 endpoint/model-name
+  capability inference。未配置 profile 时始终使用 generic provider-default；
+  explicit profile 才允许 transport controls，版本不匹配或 unknown profile
+  fail closed。业务模块仍只选择 provider-neutral `ReasoningPolicy`。
+- 验证证据：reasoning policy、runtime diagnostics、iteration/task-delta 和
+  code-generation context focused 集合 **97 passed**；包含 explicit profile
+  selection、generic fallback、transport mapping、unsupported behavior、cache/
+  replay hash 绑定。未实现或宣称 native Anthropic/Gemini transport。
+- 出口判断：Stage 4 的 capability selection 不再依赖模型名；仍需在 Stage 5
+  以独立 paired canary 验证真实 provider 的 observed reasoning usage 和质量，
+  不得把 generic profile 的 no-control 结果外推为原生 provider 支持。
+
+### Context Phase 10：Stage 5 independent offline acceptance
+
+- 阶段计划：先写 `docs/context_management/PHASE_10_STAGE_5_CANARY_ACCEPTANCE_PLAN.md`，
+  冻结 immutable source envelope、Current/Treatment 独立开关、逐 attempt evidence、
+  required-state/provenance/mutation gates 和 no-global-default policy。
+- 验证实现：新增 `test_context_governance_stage5_acceptance.py`，用同一源对照
+  Current deterministic compact 与 Treatment injected rolling boundary；Treatment
+  提供 unknown usage，必须回退 deterministic，同时两臂都保留 active required
+  write-scope constraint。测试还验证 reasoning explicit profile 选择不改变 Compact
+  authority或约束 projection。
+- 证据结果：Stage 5 定向 **1 passed**；本阶段最终 `PYTHONPATH=Code/src pytest -q
+  Code/tests` 为 **1040 passed**，compileall 和 `git diff --check` 通过。未调用
+  Provider/network，也未产生 project/memory mutation。
+- 决策：offline GO；仅允许后续小流量、独立 instrumented real-provider canary。
+  不切换全局 Compact/reasoning 默认，不声称真实 LLM semantic quality 或 native
+  Anthropic/Gemini 支持。

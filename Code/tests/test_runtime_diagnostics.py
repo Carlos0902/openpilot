@@ -783,13 +783,13 @@ def test_llm_replay_hash_binds_provider_model_and_resolved_reasoning() -> None:
         provider="openai",
         base_url="https://api.openai.com/v1?secret=omitted",
         model="gpt-5.6-terra",
-        reasoning_capability_profile=None,
+        reasoning_capability_profile="openai-chat-known",
     )
     other_model = SimpleNamespace(
         provider="openai",
         base_url="https://api.openai.com/v1",
         model="gpt-5.6-luna",
-        reasoning_capability_profile=None,
+        reasoning_capability_profile="openai-chat-known",
     )
     low = request.model_copy(
         update={
@@ -812,7 +812,7 @@ def test_llm_replay_hash_ignores_completion_budget_audit_trace_but_binds_executi
         provider="openai",
         base_url="https://api.openai.com/v1",
         model="gpt-5.6-terra",
-        reasoning_capability_profile=None,
+        reasoning_capability_profile="openai-chat-known",
     )
     baseline = LLMRequest(
         messages=[LLMMessage(role="user", content="same")],
@@ -894,7 +894,7 @@ def test_llm_proxy_records_requested_and_resolved_reasoning_policy(tmp_path) -> 
             model="gpt-5.6-terra",
             provider="openai",
             base_url="https://api.openai.com/v1",
-            reasoning_capability_profile=None,
+            reasoning_capability_profile="openai-chat-known",
             timeout_seconds=10,
         )
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
 from core.config import LLMSettings
 from metadata import (
@@ -40,6 +39,36 @@ GENERIC_PROFILE = ReasoningCapabilityProfile(
     profile_id=ReasoningCapabilityProfileId.GENERIC_OPENAI_COMPATIBLE,
     version="v1",
 )
+
+# Capability is an explicit, versioned configuration value.  In particular,
+# this registry must not be selected from a provider hostname or model name:
+# those values identify a request, but do not prove which controls a proxy or
+# deployed model accepts.
+REASONING_CAPABILITY_PROFILES: dict[str, ReasoningCapabilityProfile] = {
+    GENERIC_PROFILE.profile_id.value: GENERIC_PROFILE,
+    ReasoningCapabilityProfileId.OPENAI_CHAT_KNOWN.value: ReasoningCapabilityProfile(
+        profile_id=ReasoningCapabilityProfileId.OPENAI_CHAT_KNOWN,
+        version="v1",
+        supports_disabled=True,
+        supports_enabled=True,
+        supported_efforts=(
+            ReasoningEffort.LOW,
+            ReasoningEffort.MEDIUM,
+            ReasoningEffort.HIGH,
+            ReasoningEffort.XHIGH,
+            ReasoningEffort.MAX,
+        ),
+        default_effort=ReasoningEffort.MEDIUM,
+    ),
+    ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN.value: ReasoningCapabilityProfile(
+        profile_id=ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN,
+        version="v1",
+        supports_disabled=True,
+        supports_enabled=True,
+        supported_efforts=(ReasoningEffort.HIGH, ReasoningEffort.MAX),
+        default_effort=ReasoningEffort.HIGH,
+    ),
+}
 
 
 def routine_tool_reasoning_policy(
@@ -81,28 +110,23 @@ def reasoning_policy_for_decision(
 
 
 def select_reasoning_capability_profile(settings: LLMSettings) -> ReasoningCapabilityProfile:
+    """Select a configured capability profile, defaulting to no controls.
+
+    Provider and model settings are intentionally not capability evidence.  A
+    compatible endpoint can proxy a different model, and model names are not a
+    stable API contract.  Callers that want provider controls must opt in to a
+    known profile through the typed settings field.
+    """
+
     explicit_value = getattr(settings, "reasoning_capability_profile", None)
     explicit = (
         explicit_value.value
         if isinstance(explicit_value, ReasoningCapabilityProfileId)
         else str(explicit_value or "").strip()
     )
-    if explicit:
-        return _explicit_profile(explicit, settings.model)
-    host = (urlparse(str(getattr(settings, "base_url", "") or "")).hostname or "").lower()
-    model = str(getattr(settings, "model", "") or "").lower()
-    if host == "api.openai.com" and _is_known_openai_reasoning_model(model):
-        return _openai_profile(model)
-    if host == "api.deepseek.com" and model in {"deepseek-v4-flash", "deepseek-v4-pro"}:
-        return ReasoningCapabilityProfile(
-            profile_id=ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN,
-            version="v1",
-            supports_disabled=True,
-            supports_enabled=True,
-            supported_efforts=(ReasoningEffort.HIGH, ReasoningEffort.MAX),
-            default_effort=ReasoningEffort.HIGH,
-        )
-    return GENERIC_PROFILE
+    if not explicit:
+        return GENERIC_PROFILE
+    return _explicit_profile(explicit)
 
 
 def resolve_reasoning_policy(
@@ -259,61 +283,20 @@ def _mapped_effort(
     )
 
 
-def _explicit_profile(profile_id: str, model: str) -> ReasoningCapabilityProfile:
-    normalized = profile_id.lower().removesuffix(":v1")
-    if normalized == "generic-openai-compatible":
-        return GENERIC_PROFILE
-    if normalized == "openai-chat-known":
-        if not _is_known_openai_reasoning_model(str(model).lower()):
-            raise UnsupportedReasoningPolicyError("explicit OpenAI profile requires a known model")
-        return _openai_profile(str(model).lower())
-    if normalized == "deepseek-chat-known":
-        return ReasoningCapabilityProfile(
-            profile_id=ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN,
-            version="v1",
-            supports_disabled=True,
-            supports_enabled=True,
-            supported_efforts=(ReasoningEffort.HIGH, ReasoningEffort.MAX),
-            default_effort=ReasoningEffort.HIGH,
-        )
-    raise UnsupportedReasoningPolicyError(f"unknown reasoning capability profile: {profile_id}")
+def _explicit_profile(profile_id: str) -> ReasoningCapabilityProfile:
+    """Resolve one registry entry without inspecting model or endpoint text."""
 
-
-def _is_known_openai_reasoning_model(model: str) -> bool:
-    return model.startswith(("gpt-5", "o1", "o3", "o4", "gpt-oss-"))
-
-
-def _openai_profile(model: str) -> ReasoningCapabilityProfile:
-    if model.startswith("gpt-5.6"):
-        efforts = (
-            ReasoningEffort.LOW,
-            ReasoningEffort.MEDIUM,
-            ReasoningEffort.HIGH,
-            ReasoningEffort.XHIGH,
-            ReasoningEffort.MAX,
+    normalized = profile_id.lower().strip()
+    if ":" in normalized:
+        base_id, version = normalized.rsplit(":", 1)
+        if version != "v1":
+            raise UnsupportedReasoningPolicyError(
+                f"unknown reasoning capability profile version: {profile_id}"
+            )
+        normalized = base_id
+    profile = REASONING_CAPABILITY_PROFILES.get(normalized)
+    if profile is None:
+        raise UnsupportedReasoningPolicyError(
+            f"unknown reasoning capability profile: {profile_id}"
         )
-        supports_disabled = True
-    elif model.startswith(("gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2")):
-        efforts = (
-            ReasoningEffort.LOW,
-            ReasoningEffort.MEDIUM,
-            ReasoningEffort.HIGH,
-            ReasoningEffort.XHIGH,
-        )
-        supports_disabled = True
-    else:
-        efforts = (
-            ReasoningEffort.MINIMAL,
-            ReasoningEffort.LOW,
-            ReasoningEffort.MEDIUM,
-            ReasoningEffort.HIGH,
-        )
-        supports_disabled = model.startswith("gpt-5.1")
-    return ReasoningCapabilityProfile(
-        profile_id=ReasoningCapabilityProfileId.OPENAI_CHAT_KNOWN,
-        version="v1",
-        supports_disabled=supports_disabled,
-        supports_enabled=True,
-        supported_efforts=efforts,
-        default_effort=ReasoningEffort.MEDIUM,
-    )
+    return profile

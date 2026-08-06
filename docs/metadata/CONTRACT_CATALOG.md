@@ -87,6 +87,11 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   `SessionConstraintEntry`, and `SessionConstraintState` are strict nested
   values, not public Metadata kinds. Proposals never control execution;
   active/revoked entries preserve a per-key snapshot and revoked tombstones.
+  `SessionConstraintLimits` is an owned typed bound for pending proposals,
+  active/revoked entries, serialized values, and variant item counts. Newer
+  same-key user proposals source-link and supersede older pending proposals;
+  superseded proposals cannot be activated. Missing limits in historical
+  checkpoints migrate to bounded defaults.
   `TaskGraphNodeMetadata.write_files` and `validation_command`,
   `RuntimeExecutionMode`, and existing guards remain the execution authorities;
   the session ledger can only narrow or project those facts. Assistant text,
@@ -292,6 +297,13 @@ sources out of the assembled request.
 Compaction candidates must forbid truncation and cannot be nested or cyclic.
 Current observation compaction is limited to assistant dialog projections; user
 dialog and required candidates remain outside this algorithm's legal source set.
+The optional `ContextCompactionSummary` is a strict derived value for the
+feature-flagged `llm_rolling_summary_v1` algorithm. It is source-evidence linked,
+bounded by a separate summary token ceiling, and carries no task, permission,
+write-scope, or verification authority. Unknown usage, incomplete finish
+evidence, stale source fingerprints, or a summary that displaces the recent
+suffix restore the deterministic source view. Raw dialog and checkpoint
+artifacts remain authoritative.
 
 `ContextQualityExpectation` and `ContextQualityEvaluation` are strict offline
 owned values, not runtime Metadata owners. Fixture authors explicitly name

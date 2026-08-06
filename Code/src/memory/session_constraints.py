@@ -147,16 +147,18 @@ def activate_constraint_proposal(
         source_hash=proposal.source_hash,
         authority=SessionConstraintAuthority.USER_CONFIRMED,
         supersedes_constraint_id=previous.constraint_id if previous else None,
+        confirmed_at_turn=confirmation_turn,
     )
     entries = [item for item in state.entries if item.constraint_key != proposal.constraint_key]
     entries.append(entry)
-    return state.model_copy(
+    updated = state.model_copy(
         update={
             "revision": state.revision + 1,
             "processed_through_turn": max(state.processed_through_turn, confirmation_turn),
             "entries": entries,
         }
     )
+    return SessionConstraintState.model_validate(updated.model_dump(mode="python"))
 
 
 def revoke_constraint(
@@ -185,13 +187,14 @@ def revoke_constraint(
     )
     entries = [item for item in state.entries if item.constraint_key != constraint_key]
     entries.append(revoked)
-    return state.model_copy(
+    updated = state.model_copy(
         update={
             "revision": state.revision + 1,
             "processed_through_turn": max(state.processed_through_turn, turn_index),
             "entries": entries,
         }
     )
+    return SessionConstraintState.model_validate(updated.model_dump(mode="python"))
 
 
 def build_session_constraint_candidate(
@@ -244,6 +247,7 @@ def session_constraint_projection(state: SessionConstraintState) -> dict[str, An
                 "source_id": entry.source_id,
                 "source_hash": entry.source_hash,
                 "authority": entry.authority,
+                "confirmed_at_turn": entry.confirmed_at_turn,
                 "supersedes_constraint_id": entry.supersedes_constraint_id,
             }
             for entry in active

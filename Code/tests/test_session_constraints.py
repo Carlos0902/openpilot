@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from memory.session_constraints import activate_constraint_proposal, confirm_constraint_proposal
+
 from metadata import (
     RuntimeExecutionMode,
     SessionConstraintAuthority,
@@ -11,6 +13,7 @@ from metadata import (
     SessionConstraintProposalStatus,
     SessionConstraintSourceKind,
     SessionConstraintState,
+    SessionConstraintLimits,
     SessionConstraintValue,
     RuntimeStateMetadata,
 )
@@ -179,3 +182,80 @@ def test_runtime_state_owns_session_constraints_and_legacy_payload_defaults_empt
 
     legacy = RuntimeStateMetadata.model_validate({"goal": "Inspect project"})
     assert legacy.session_constraints.entries == []
+
+
+def test_session_constraint_limits_bound_entries_and_value_serialized_size() -> None:
+    limits = SessionConstraintLimits(max_active_entries=1, max_value_serialized_chars=128)
+    with pytest.raises(ValueError, match="active session constraint"):
+        SessionConstraintState(
+            session_id="session-1",
+            revision=1,
+            processed_through_turn=1,
+            limits=limits,
+            entries=[
+                _entry(constraint_id="constraint-1"),
+                _entry(constraint_id="constraint-2", constraint_key="validation_command", category=SessionConstraintCategory.VALIDATION_COMMAND),
+            ],
+        )
+
+    with pytest.raises(ValueError, match="value serialized"):
+        SessionConstraintState(
+            session_id="session-1",
+            revision=1,
+            processed_through_turn=1,
+            limits=SessionConstraintLimits(max_value_serialized_chars=128),
+            entries=[
+                _entry(
+                    constraint_id="constraint-long",
+                    category=SessionConstraintCategory.WRITE_SCOPE,
+                ).model_copy(
+                    update={"value": SessionConstraintValue(allowed_files=["a" * 200])}
+                )
+            ],
+        )
+
+
+def test_legacy_constraint_checkpoint_without_limits_is_readable() -> None:
+    payload = SessionConstraintState(
+        session_id="session-1",
+        revision=1,
+        processed_through_turn=1,
+        entries=[_entry()],
+    ).model_dump(mode="python")
+    payload.pop("limits")
+
+    restored = SessionConstraintState.model_validate(payload)
+
+    assert restored.limits.max_active_entries > 0
+    assert restored.active_entries[0].constraint_key == "write_scope"
+
+
+def test_direct_constraint_activation_enforces_typed_entry_quota() -> None:
+    proposal_one = SessionConstraintProposal(
+        proposal_id="proposal-one",
+        session_id="session-1",
+        constraint_key="write_scope",
+        category=SessionConstraintCategory.WRITE_SCOPE,
+        value=SessionConstraintValue(allowed_files=["calculator.py"]),
+        statement="Only calculator.py may be modified.",
+        source_kind=SessionConstraintSourceKind.USER_MESSAGE,
+        source_id="dialog:one",
+        source_turn_index=1,
+        source_hash=_SOURCE_HASH,
+    )
+    proposal_two = proposal_one.model_copy(
+        update={
+            "proposal_id": "proposal-two",
+            "constraint_key": "validation_command",
+            "category": SessionConstraintCategory.VALIDATION_COMMAND,
+            "value": SessionConstraintValue(validation_commands=["pytest -q"]),
+            "source_id": "dialog:two",
+        }
+    )
+    state = SessionConstraintState(
+        session_id="session-1",
+        limits=SessionConstraintLimits(max_active_entries=1),
+    )
+    state = activate_constraint_proposal(state, confirm_constraint_proposal(proposal_one), confirmation_turn=1)
+    with pytest.raises(ValueError, match="active session constraint"):
+        activate_constraint_proposal(state, confirm_constraint_proposal(proposal_two), confirmation_turn=2)

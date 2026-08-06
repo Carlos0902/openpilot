@@ -28,6 +28,7 @@ retain ownership of their instructions and source facts.
 | 5E | Quality and legacy convergence | Offline typed quality fixtures protect selection behavior and production legacy callers remain at zero |
 | 6 | Segmented compaction | Large old observations are deterministically masked behind source-linked artifacts while current control and recovery evidence stays exact |
 | 7 | In-session Session Constraint State | Explicit, confirmed conversation constraints survive compaction as bounded required context and are checked at runtime boundaries |
+| 10 | Context governance enhancements | Bounded rolling summaries, explicit session-constraint lifecycle, provider-neutral reasoning profiles, and independent offline acceptance |
 
 Phases 0-5E are complete. Phase 5B was delivered under
 `PHASE_5B_TYPED_MEMORY_ADAPTER_PLAN.md`; its plan was recorded before behavior
@@ -53,6 +54,12 @@ typed, source-linked state preserves explicit in-session constraints through
 compaction, while runtime enforcement remains owned by task/path/verification
 contracts. The offline three-arm replay passed; no cross-session memory write
 or real-task canary is implied.
+
+Phase 10 is delivered under `PHASE_10_CONTEXT_GOVERNANCE_ENHANCEMENT_PLAN.md`.
+Stages 0–5 are green in offline validation. Rolling summaries remain
+feature-flagged and default-off; session constraints remain explicit-confirmation
+and session-scoped; reasoning profiles require explicit typed configuration.
+No real-provider canary or global default switch is implied.
 
 ## Non-goals
 

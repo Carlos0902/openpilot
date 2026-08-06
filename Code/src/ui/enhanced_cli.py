@@ -32,6 +32,14 @@ if TYPE_CHECKING:
 
 
 DEFAULT_IMPROVEMENT_ITERATIONS = 2
+_CONSTRAINT_COMMANDS = frozenset({"/constraints", "/confirm", "/reject", "/revoke"})
+
+
+def _is_constraint_command(user_input: str) -> bool:
+    """Return whether input belongs to the typed session-constraint ingress."""
+
+    command = str(user_input).strip().split(maxsplit=1)[0].casefold() if str(user_input).strip() else ""
+    return command in _CONSTRAINT_COMMANDS
 
 
 def _runtime_diagnostics_enabled() -> bool:
@@ -645,7 +653,7 @@ def _run_interactive_mode(
                     _show_config(ui, settings, runtime_options)
                     continue
 
-                if user_input.startswith("/constraints"):
+                if _is_constraint_command(user_input):
                     ingress_state = _handle_constraint_command(user_input, ingress_state, ui)
                     continue
 

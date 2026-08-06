@@ -26,6 +26,7 @@ from memory.session_constraints import (
     session_constraint_projection,
 )
 from memory.session_dialog import session_turn_ledger_hash
+from memory.rolling_compaction import RollingSummaryRequest, RollingSummaryResult
 from metadata import (
     ContextAssemblyPolicy,
     ContextAssemblyResult,
@@ -73,6 +74,14 @@ class MemoryContextBuilder:
         max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
         max_prompt_tokens: int | None = None,
         token_counter: ProviderTokenCounter | None = None,
+        rolling_summary_enabled: bool = False,
+        rolling_summary_adapter: Callable[[RollingSummaryRequest], RollingSummaryResult]
+        | None = None,
+        rolling_summary_request_factory: Callable[
+            [tuple[ContextCandidate, ...], int], RollingSummaryRequest | None
+        ]
+        | None = None,
+        rolling_summary_token_limit: int = 256,
     ) -> None:
         self.short_memory = short_memory or ShortMemory()
         self.memory_store = memory_store or MemoryStore()
@@ -81,6 +90,10 @@ class MemoryContextBuilder:
         self.max_prompt_chars = max(MIN_PROMPT_CHARS, int(max_prompt_chars))
         self.max_prompt_tokens = int(max_prompt_tokens) if max_prompt_tokens is not None else None
         self.token_counter = token_counter
+        self.rolling_summary_enabled = bool(rolling_summary_enabled)
+        self.rolling_summary_adapter = rolling_summary_adapter
+        self.rolling_summary_request_factory = rolling_summary_request_factory
+        self.rolling_summary_token_limit = max(1, int(rolling_summary_token_limit))
         self.context_assembler = ContextAssembler(
             renderer=self._prompt_text,
             token_counter=token_counter,
@@ -183,6 +196,8 @@ class MemoryContextBuilder:
                     if session_ingress_state is not None
                     else ""
                 ),
+                "rolling_summary_enabled": self.rolling_summary_enabled,
+                "rolling_summary_token_limit": self.rolling_summary_token_limit,
             },
             max_prompt_chars=effective_max_chars,
             max_prompt_tokens=requested_max_tokens,
@@ -354,6 +369,42 @@ class MemoryContextBuilder:
                 if strict_sources:
                     raise ContextSourceError("context_compaction", exc) from exc
                 return candidates, sources, initial, []
+            deterministic_record = record
+
+            # LLM-assisted summaries are an opt-in derived view.  The factory
+            # owns provider invocation and may return no request; the adapter
+            # owns validation.  Any mismatch or fallback keeps this exact
+            # deterministic source record and therefore cannot widen authority.
+            if (
+                self.rolling_summary_enabled
+                and self.rolling_summary_adapter is not None
+                and self.rolling_summary_request_factory is not None
+            ):
+                try:
+                    request = self.rolling_summary_request_factory(
+                        tuple(compacted_sources),
+                        self.rolling_summary_token_limit,
+                    )
+                    if request is not None:
+                        rolling_result = self.rolling_summary_adapter(request)
+                        rolling_record = rolling_result.record
+                        expected_source_ids = [
+                            candidate.candidate_id for candidate in compacted_sources
+                        ]
+                        if (
+                            rolling_record is not None
+                            and rolling_record.source_candidate_ids == expected_source_ids
+                            and rolling_record.source_fingerprint == record.source_fingerprint
+                            and rolling_record.original_chars == record.original_chars
+                            and rolling_record.compacted_chars < rolling_record.original_chars
+                        ):
+                            record = rolling_record
+                except Exception:
+                    # Provider/factory output is untrusted.  The deterministic
+                    # source view remains the only fallback, including in
+                    # non-strict mode; strict source failures are handled by
+                    # the existing artifact sink boundary below.
+                    pass
             compaction_candidate = ContextCandidate(
                 candidate_id=f"compaction:{record.compaction_id}",
                 kind=ContextCandidateKind.ARTIFACT,
@@ -381,6 +432,39 @@ class MemoryContextBuilder:
                 trial.selection.assembly_status == ContextAssemblyStatus.READY
                 and trial_decisions[compaction_candidate.candidate_id].action == "kept"
             )
+            if not compaction_kept and record.algorithm == "llm_rolling_summary_v1":
+                # A generated summary is only a preferred replacement.  If it
+                # cannot fit atomically, retry the exact deterministic source
+                # view before considering any wider omission.  This preserves
+                # the current kill-switch semantics for a too-large summary.
+                record = deterministic_record
+                compaction_candidate = ContextCandidate(
+                    candidate_id=f"compaction:{record.compaction_id}",
+                    kind=ContextCandidateKind.ARTIFACT,
+                    source_id=record.source_fingerprint,
+                    content=record.summary,
+                    retention=ContextCandidateRetention.PREFERRED,
+                    priority=99,
+                    source_order=500,
+                    truncation=ContextCandidateTruncation.FORBIDDEN,
+                    trust=ContextCandidateTrust.DERIVED,
+                    freshness=ContextCandidateFreshness.CURRENT,
+                    compacted_candidate_ids=record.source_candidate_ids,
+                )
+                trial_candidates = [*candidates, compaction_candidate]
+                trial = self.context_assembler.assemble_candidates(
+                    trial_candidates,
+                    policy=policy,
+                    renderer=self._render_candidates,
+                )
+                trial_decisions = {
+                    decision.candidate_id: decision
+                    for decision in trial.selection.candidate_decisions
+                }
+                compaction_kept = (
+                    trial.selection.assembly_status == ContextAssemblyStatus.READY
+                    and trial_decisions[compaction_candidate.candidate_id].action == "kept"
+                )
             newly_limited = [
                 candidate.candidate_id
                 for candidate in dialog_candidates
@@ -388,6 +472,49 @@ class MemoryContextBuilder:
                 and candidate.candidate_id in initially_kept_ids
                 and trial_decisions[candidate.candidate_id].action != "kept"
             ]
+            if (
+                record.algorithm == "llm_rolling_summary_v1"
+                and newly_limited
+            ):
+                # A summary can fit in isolation yet displace the recent
+                # suffix.  Retry the deterministic projection before widening
+                # the governed source segment; recent dialog must never be
+                # sacrificed merely to keep a generated summary.
+                record = deterministic_record
+                compaction_candidate = ContextCandidate(
+                    candidate_id=f"compaction:{record.compaction_id}",
+                    kind=ContextCandidateKind.ARTIFACT,
+                    source_id=record.source_fingerprint,
+                    content=record.summary,
+                    retention=ContextCandidateRetention.PREFERRED,
+                    priority=99,
+                    source_order=500,
+                    truncation=ContextCandidateTruncation.FORBIDDEN,
+                    trust=ContextCandidateTrust.DERIVED,
+                    freshness=ContextCandidateFreshness.CURRENT,
+                    compacted_candidate_ids=record.source_candidate_ids,
+                )
+                trial_candidates = [*candidates, compaction_candidate]
+                trial = self.context_assembler.assemble_candidates(
+                    trial_candidates,
+                    policy=policy,
+                    renderer=self._render_candidates,
+                )
+                trial_decisions = {
+                    decision.candidate_id: decision
+                    for decision in trial.selection.candidate_decisions
+                }
+                compaction_kept = (
+                    trial.selection.assembly_status == ContextAssemblyStatus.READY
+                    and trial_decisions[compaction_candidate.candidate_id].action == "kept"
+                )
+                newly_limited = [
+                    candidate.candidate_id
+                    for candidate in dialog_candidates
+                    if candidate.candidate_id not in compacted_set
+                    and candidate.candidate_id in initially_kept_ids
+                    and trial_decisions[candidate.candidate_id].action != "kept"
+                ]
             if compaction_kept and not newly_limited:
                 try:
                     reference = self._context_compaction_sink(

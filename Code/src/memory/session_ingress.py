@@ -70,12 +70,31 @@ class SessionIngress:
                 "role": turn.role,
                 "content": turn.content,
             }
-            proposals.extend(
-                extract_constraint_proposals(
-                    [raw_message],
-                    session_id=state.identity.conversation_id,
-                )
+            fresh_proposals = extract_constraint_proposals(
+                [raw_message],
+                session_id=state.identity.conversation_id,
             )
+            # A newer explicit proposal supersedes only older *pending*
+            # proposals for the same key. Confirmed/rejected history remains
+            # evidence, while stale pending intent can never be revived.
+            for fresh in fresh_proposals:
+                previous = [
+                    item
+                    for item in proposals
+                    if item.constraint_key == fresh.constraint_key
+                    and item.status == SessionConstraintProposalStatus.PROPOSED
+                    and item.source_turn_index < fresh.source_turn_index
+                ]
+                if previous:
+                    latest = max(previous, key=lambda item: item.source_turn_index)
+                    fresh = fresh.model_copy(update={"supersedes_proposal_id": latest.proposal_id})
+                    proposals = [
+                        item.model_copy(update={"status": SessionConstraintProposalStatus.SUPERSEDED})
+                        if item in previous
+                        else item
+                        for item in proposals
+                    ]
+                proposals.append(fresh)
         constraints = _constraint_state_with_cursor(state.session_constraints, turn.identity.turn_index)
         updated = state.model_copy(
             update={

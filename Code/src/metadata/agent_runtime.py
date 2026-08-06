@@ -99,6 +99,30 @@ class SessionConstraintViolationCode(str, Enum):
     PROJECT_ROOT_MISMATCH = "project_root_mismatch"
 
 
+class SessionConstraintLimits(BaseModel):
+    """Typed hard bounds for conversation-scoped constraint state.
+
+    The limits are part of the state contract so checkpoint restore and replay
+    apply the same fail-closed bounds as live ingress. Missing limits in older
+    checkpoints are migrated to these conservative defaults by Pydantic.
+    """
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
+
+    max_pending_proposals: int = Field(default=32, ge=1, le=256)
+    max_pending_serialized_chars: int = Field(default=32_768, ge=1_024, le=1_000_000)
+    max_active_entries: int = Field(default=16, ge=1, le=128)
+    max_revoked_tombstones: int = Field(default=32, ge=1, le=256)
+    max_active_serialized_chars: int = Field(default=32_768, ge=1_024, le=1_000_000)
+    max_revoked_serialized_chars: int = Field(default=32_768, ge=1_024, le=1_000_000)
+    max_entries_serialized_chars: int = Field(default=65_536, ge=1_024, le=2_000_000)
+    max_value_serialized_chars: int = Field(default=8_192, ge=128, le=1_000_000)
+    max_scope_paths: int = Field(default=64, ge=1, le=512)
+    max_validation_commands: int = Field(default=16, ge=1, le=128)
+    max_acceptance_criteria: int = Field(default=32, ge=1, le=256)
+    max_value_item_chars: int = Field(default=512, ge=1, le=16_384)
+
+
 class SessionConstraintValue(BaseModel):
     """One typed value variant; statement text never controls execution."""
 
@@ -144,6 +168,39 @@ def _validate_session_constraint_category(
     }
     if not expected[category]:
         raise ValueError("session constraint category does not match typed value")
+
+
+def _serialized_chars(value: Any) -> int:
+    """Return deterministic UTF-8 JSON size for a typed value or model list."""
+
+    if isinstance(value, list):
+        payload = [item.model_dump(mode="json") if isinstance(item, BaseModel) else item for item in value]
+    elif isinstance(value, BaseModel):
+        payload = value.model_dump(mode="json")
+    else:
+        payload = value
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return len(encoded.encode("utf-8"))
+
+
+def _validate_constraint_value_limits(
+    value: SessionConstraintValue,
+    limits: SessionConstraintLimits,
+) -> None:
+    """Apply variant-specific hard bounds before a state is accepted."""
+
+    if _serialized_chars(value) > limits.max_value_serialized_chars:
+        raise ValueError("session constraint value serialized size quota exceeded")
+    scope_paths = [*value.allowed_files, *value.forbidden_files]
+    if len(scope_paths) > limits.max_scope_paths:
+        raise ValueError("session constraint scope path quota exceeded")
+    if len(value.validation_commands) > limits.max_validation_commands:
+        raise ValueError("session constraint validation command quota exceeded")
+    if len(value.acceptance_criteria) > limits.max_acceptance_criteria:
+        raise ValueError("session constraint acceptance criterion quota exceeded")
+    items = [*scope_paths, *value.validation_commands, *value.acceptance_criteria]
+    if any(len(str(item)) > limits.max_value_item_chars for item in items):
+        raise ValueError("session constraint value item size quota exceeded")
 
 
 class SessionConstraintProposal(BaseModel):
@@ -195,6 +252,7 @@ class SessionConstraintEntry(BaseModel):
     source_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     authority: SessionConstraintAuthority
     supersedes_constraint_id: str | None = Field(default=None, min_length=1)
+    confirmed_at_turn: int | None = Field(default=None, ge=1)
     revoked_at_turn: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
@@ -202,6 +260,8 @@ class SessionConstraintEntry(BaseModel):
         _validate_session_constraint_category(self.category, self.value)
         if self.supersedes_constraint_id == self.constraint_id:
             raise ValueError("session constraint entry cannot supersede itself")
+        if self.confirmed_at_turn is not None and self.confirmed_at_turn < self.source_turn_index:
+            raise ValueError("confirmed_at_turn cannot precede source_turn_index")
         if self.status == SessionConstraintStatus.REVOKED:
             if self.revoked_at_turn is None:
                 raise ValueError("revoked session constraint requires revoked_at_turn")
@@ -240,6 +300,7 @@ class SessionConstraintState(BaseModel):
     revision: int = Field(default=0, ge=0)
     processed_through_turn: int = Field(default=0, ge=0)
     entries: list[SessionConstraintEntry] = Field(default_factory=list)
+    limits: SessionConstraintLimits = Field(default_factory=SessionConstraintLimits)
 
     @model_validator(mode="after")
     def _snapshot_is_unique_and_cursor_bound(self) -> "SessionConstraintState":
@@ -253,6 +314,23 @@ class SessionConstraintState(BaseModel):
             raise ValueError("session constraint state with entries requires session_id")
         if any(entry.source_turn_index > self.processed_through_turn for entry in self.entries):
             raise ValueError("session constraint source turn exceeds processed cursor")
+        active_count = sum(entry.is_active for entry in self.entries)
+        revoked_count = len(self.entries) - active_count
+        if active_count > self.limits.max_active_entries:
+            raise ValueError("active session constraint entry quota exceeded")
+        if revoked_count > self.limits.max_revoked_tombstones:
+            raise ValueError("revoked session constraint tombstone quota exceeded")
+        active_entries = [entry for entry in self.entries if entry.is_active]
+        revoked_entries = [entry for entry in self.entries if not entry.is_active]
+        if _serialized_chars(active_entries) > self.limits.max_active_serialized_chars:
+            raise ValueError("active session constraint serialized size quota exceeded")
+        if _serialized_chars(revoked_entries) > self.limits.max_revoked_serialized_chars:
+            raise ValueError("revoked session constraint serialized size quota exceeded")
+        serialized = _serialized_chars(self.entries)
+        if serialized > self.limits.max_entries_serialized_chars:
+            raise ValueError("session constraint entries serialized size quota exceeded")
+        for entry in self.entries:
+            _validate_constraint_value_limits(entry.value, self.limits)
         return self
 
     @property
@@ -338,6 +416,13 @@ class SessionIngressState(BaseModel):
         proposal_ids = [proposal.proposal_id for proposal in self.pending_proposals]
         if len(proposal_ids) != len(set(proposal_ids)):
             raise ValueError("session ingress proposal IDs must be unique")
+        limits = self.session_constraints.limits
+        if len(self.pending_proposals) > limits.max_pending_proposals:
+            raise ValueError("pending session constraint proposals quota exceeded")
+        if _serialized_chars(self.pending_proposals) > limits.max_pending_serialized_chars:
+            raise ValueError("pending session constraint proposals serialized size quota exceeded")
+        for proposal in self.pending_proposals:
+            _validate_constraint_value_limits(proposal.value, limits)
         if any(proposal.session_id != self.identity.conversation_id for proposal in self.pending_proposals):
             raise ValueError("session ingress proposal conversation identity differs")
         if any(
@@ -1036,6 +1121,35 @@ class ContextAssemblyStatus(str, Enum):
     GOVERNANCE_BLOCKED = "governance_blocked"
 
 
+class ContextCompactionSummary(BaseModel):
+    """Strict, non-authoritative slots emitted by an LLM compactor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal_delta: str = Field(default="", max_length=240)
+    verified_facts: list[str] = Field(default_factory=list, max_length=8)
+    decisions: list[str] = Field(default_factory=list, max_length=8)
+    open_issues: list[str] = Field(default_factory=list, max_length=8)
+    evidence_ids: list[str] = Field(min_length=1, max_length=16)
+    next_action: str = Field(default="", max_length=240)
+
+    @model_validator(mode="after")
+    def _summary_has_bounded_signal(self) -> "ContextCompactionSummary":
+        if len(self.evidence_ids) != len(set(self.evidence_ids)):
+            raise ValueError("compaction summary evidence IDs must be unique")
+        if not any(
+            (
+                self.goal_delta.strip(),
+                self.verified_facts,
+                self.decisions,
+                self.open_issues,
+                self.next_action.strip(),
+            )
+        ):
+            raise ValueError("compaction summary must not be empty")
+        return self
+
+
 class ContextCompactionRecord(BaseModel):
     """Source-linked deterministic compact projection persisted by a run."""
 
@@ -1047,10 +1161,18 @@ class ContextCompactionRecord(BaseModel):
     algorithm: Literal[
         "deterministic_dialog_extract_v1",
         "deterministic_observation_mask_v1",
+        "llm_rolling_summary_v1",
     ]
     summary: str = Field(min_length=1)
     original_chars: int = Field(ge=1)
     compacted_chars: int = Field(ge=1)
+    summary_payload: ContextCompactionSummary | None = None
+    summary_token_limit: int | None = Field(default=None, ge=1)
+    summary_token_count: int | None = Field(default=None, ge=0)
+    previous_summary_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
 
     @model_validator(mode="after")
     def _source_ids_and_sizes_are_consistent(self) -> "ContextCompactionRecord":
@@ -1060,6 +1182,28 @@ class ContextCompactionRecord(BaseModel):
             raise ValueError("compacted_chars must match summary length")
         if self.compacted_chars >= self.original_chars:
             raise ValueError("compaction summary must be smaller than its sources")
+        if self.algorithm == "llm_rolling_summary_v1":
+            if self.summary_payload is None:
+                raise ValueError("llm compaction requires summary_payload")
+            if self.summary_token_limit is None or self.summary_token_count is None:
+                raise ValueError("llm compaction requires summary token evidence")
+            if self.summary_token_count > self.summary_token_limit:
+                raise ValueError("summary_token_count exceeds summary_token_limit")
+            unknown_evidence = set(self.summary_payload.evidence_ids) - set(
+                self.source_candidate_ids
+            )
+            if unknown_evidence:
+                raise ValueError("summary evidence must reference source candidates")
+        elif any(
+            value is not None
+            for value in (
+                self.summary_payload,
+                self.summary_token_limit,
+                self.summary_token_count,
+                self.previous_summary_fingerprint,
+            )
+        ):
+            raise ValueError("deterministic compaction cannot carry llm summary evidence")
         return self
 
 

@@ -184,24 +184,27 @@ def test_provider_endpoint_identity_preserves_non_default_port_without_credentia
     )
 
 
-def test_profile_auto_selection_requires_official_host_and_known_model() -> None:
+def test_profile_selection_requires_explicit_profile_and_never_guesses_from_model() -> None:
     official = _settings(
         OPENPILOT_LLM_BASE_URL="https://api.openai.com/v1",
         OPENPILOT_LLM_MODEL="gpt-5.6-terra",
     )
-    spoofed = _settings(
-        OPENPILOT_LLM_BASE_URL="https://api.openai.com.attacker.invalid/v1",
-        OPENPILOT_LLM_MODEL="gpt-5.6-terra",
+    explicit = _settings(
+        OPENPILOT_LLM_BASE_URL="https://api.openai.com/v1",
+        OPENPILOT_LLM_MODEL="custom-model-name",
+        OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="openai-chat-known",
     )
 
     assert (
         select_reasoning_capability_profile(official).profile_id
-        == ReasoningCapabilityProfileId.OPENAI_CHAT_KNOWN
-    )
-    assert (
-        select_reasoning_capability_profile(spoofed).profile_id
         == ReasoningCapabilityProfileId.GENERIC_OPENAI_COMPATIBLE
     )
+    assert select_reasoning_capability_profile(official).version == "v1"
+    assert (
+        select_reasoning_capability_profile(explicit).profile_id
+        == ReasoningCapabilityProfileId.OPENAI_CHAT_KNOWN
+    )
+    assert select_reasoning_capability_profile(explicit).version == "v1"
 
 
 def test_reasoning_capability_profile_override_is_typed_at_config_boundary() -> None:
@@ -221,6 +224,7 @@ def test_openai_chat_profile_renders_supported_effort() -> None:
         OPENPILOT_LLM_PROVIDER="openai",
         OPENPILOT_LLM_BASE_URL="https://api.openai.com/v1",
         OPENPILOT_LLM_MODEL="gpt-5.6-terra",
+        OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="openai-chat-known",
     )
     policy = ReasoningPolicy(mode=ReasoningMode.ENABLED, effort=ReasoningEffort.LOW)
 
@@ -236,6 +240,7 @@ def test_deepseek_profile_maps_low_to_documented_high() -> None:
         OPENPILOT_LLM_PROVIDER="deepseek",
         OPENPILOT_LLM_BASE_URL="https://api.deepseek.com",
         OPENPILOT_LLM_MODEL="deepseek-v4-pro",
+        OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="deepseek-chat-known",
     )
     policy = ReasoningPolicy(
         mode=ReasoningMode.ENABLED,
@@ -258,6 +263,7 @@ def test_deepseek_profile_renders_explicit_non_thinking_mode() -> None:
         OPENPILOT_LLM_PROVIDER="deepseek",
         OPENPILOT_LLM_BASE_URL="https://api.deepseek.com/v1",
         OPENPILOT_LLM_MODEL="deepseek-v4-flash",
+        OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="deepseek-chat-known",
     )
 
     resolved = resolve_reasoning_policy(
@@ -300,6 +306,7 @@ def test_llm_client_renders_deepseek_policy_into_transport(monkeypatch) -> None:
             OPENPILOT_LLM_PROVIDER="deepseek",
             OPENPILOT_LLM_BASE_URL="https://api.deepseek.com",
             OPENPILOT_LLM_MODEL="deepseek-v4-pro",
+            OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="deepseek-chat-known",
         ),
         enable_cache=False,
     )
@@ -334,6 +341,7 @@ def test_cache_identity_binds_provider_model_and_effective_policy() -> None:
             OPENPILOT_LLM_PROVIDER="openai",
             OPENPILOT_LLM_BASE_URL="https://api.openai.com/v1",
             OPENPILOT_LLM_MODEL="gpt-5.6-terra",
+            OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="openai-chat-known",
         )
     )
     plain = LLMRequest(messages=[LLMMessage(role="user", content="same")])

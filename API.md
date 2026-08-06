@@ -61,7 +61,7 @@ OpenAI-compatible providers are configured with environment variables:
 | `OPENPILOT_LLM_MODEL` | No | `gpt-4o-mini` | Chat completion model name. |
 | `OPENPILOT_LLM_TIMEOUT_SECONDS` | No | `60` | Provider timeout. |
 | `OPENPILOT_LLM_TEMPERATURE` | No | `0.2` | Default sampling temperature. |
-| `OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE` | No | endpoint-selected | Optional typed override: `generic-openai-compatible`, `openai-chat-known`, or `deepseek-chat-known`. |
+| `OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE` | No | unset (generic no-control) | Optional typed opt-in to the versioned `v1` profile `generic-openai-compatible`, `openai-chat-known`, or `deepseek-chat-known`; endpoint and model names never select a profile. |
 | `OPENPILOT_TOOL_EVENT_REASONING_MODE` | No | `disabled` | Economical policy for typed routine tool decisions; accepts only `provider_default` or `disabled`. |
 | `OPENPILOT_LLM_TOKENIZER_PATH` | No | Local DeepSeek cache | Optional explicit provider tokenizer JSON path. |
 | `OPENPILOT_CONTEXT_MAX_PROMPT_TOKENS` | No | `4096` | Exact token budget for the memory-context slice when a provider tokenizer is available. |
@@ -383,6 +383,11 @@ User dialog, required candidates, and system instructions are never
 observation-compacted. Historical `deterministic_dialog_extract_v1` records remain
 readable; new memory projections use `deterministic_observation_mask_v1`. If a compactor cannot be
 selected completely, assembly atomically falls back to the source candidates.
+The opt-in `llm_rolling_summary_v1` projection uses a strict nested summary
+payload and separate summary-token evidence; it is accepted only when its
+source fingerprint, usage/finish evidence, and recent-suffix fit are validated.
+The default remains deterministic observation masking, and invalid or
+over-budget generated summaries fall back to that current view.
 Recoverable tool-planning prompts apply the same boundary ephemerally to explicit
 large observation fields while retaining paths, commands, operation kind, symbol,
 mode, errors, and the original typed metadata unchanged.
@@ -453,6 +458,11 @@ round-trips the bounded turn/proposal snapshot. Resume rejects a supplied
 ingress state whose identity or constraint snapshot differs from the
 checkpoint. The main tool-event loop fails closed before Provider transport if
 the complete active constraint projection was removed by prompt budgeting.
+The interactive ingress routes `/constraints`, `/confirm`, `/reject`, and
+`/revoke` through one reducer; newer same-key pending proposals supersede older
+ones, and typed `SessionConstraintLimits` bound proposal/entry counts and
+serialized values. Active entries retain the confirmation turn and revoked
+tombstones retain the revocation turn; quota violations fail closed.
 This establishes offline production wiring; it does not authorize a
 full-conversation Provider canary or claim a Token/quality gain.
 

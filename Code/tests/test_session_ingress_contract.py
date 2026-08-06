@@ -9,6 +9,7 @@ from memory.session_ingress import (
     validate_resume_identity,
 )
 from metadata import ConversationIdentity
+from metadata import SessionConstraintLimits
 from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
 
 
@@ -40,6 +41,60 @@ def test_user_turn_creates_pending_proposals_but_not_active_authority() -> None:
     assert len(updated.pending_proposals) == 2
     assert updated.session_constraints.active_entries == []
     assert updated.turns[0].message_id == "user-1"
+
+
+def test_pending_proposal_quota_fails_closed() -> None:
+    base = _state()
+    state = base.model_copy(
+        update={
+            "session_constraints": base.session_constraints.model_copy(
+                update={"limits": SessionConstraintLimits(max_pending_proposals=1)}
+            )
+        }
+    )
+    # One user turn yields two proposals, exceeding the typed pending quota.
+    with pytest.raises(ValueError, match="pending session constraint proposals"):
+        SessionIngress.open_turn(
+            state,
+            SessionTurn(
+                identity=_identity(),
+                message_id="user-1",
+                role="user",
+                content="Only calculator.py may be modified. The validation command must be `pytest -q`.",
+            ),
+        )
+
+
+def test_new_same_key_user_proposal_supersedes_older_pending_proposal() -> None:
+    state = SessionIngress.open_turn(
+        _state(),
+        SessionTurn(
+            identity=_identity(),
+            message_id="user-1",
+            role="user",
+            content="Only calculator.py may be modified.",
+        ),
+    )
+    old_id = state.pending_proposals[0].proposal_id
+    state = SessionIngress.open_turn(
+        state,
+        SessionTurn(
+            identity=_identity(turn_index=2),
+            message_id="user-2",
+            role="user",
+            content="Only divide.py may be modified.",
+        ),
+    )
+
+    old = next(item for item in state.pending_proposals if item.proposal_id == old_id)
+    new = next(item for item in state.pending_proposals if item.proposal_id != old_id)
+    assert old.status == "superseded"
+    assert new.supersedes_proposal_id == old_id
+    with pytest.raises(ValueError, match="not pending"):
+        SessionIngress.confirm_proposal(state, proposal_id=old_id, confirmation_turn=3)
+
+    activated = SessionIngress.confirm_proposal(state, proposal_id=new.proposal_id, confirmation_turn=3)
+    assert activated.session_constraints.active_entries[0].value.allowed_files == ["divide.py"]
 
 
 def test_assistant_turn_cannot_create_or_activate_constraints() -> None:
