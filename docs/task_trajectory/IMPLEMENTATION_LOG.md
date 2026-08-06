@@ -2196,3 +2196,118 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - 决策：offline GO；仅允许后续小流量、独立 instrumented real-provider canary。
   不切换全局 Compact/reasoning 默认，不声称真实 LLM semantic quality 或 native
   Anthropic/Gemini 支持。
+
+### Context Phase 11：Stage 6A real-provider readiness and manifest
+
+- 阶段计划：先写 `docs/context_management/PHASE_11_STAGE_6A_PROVIDER_READINESS_PLAN.md`，
+  冻结 credential-free endpoint identity、显式 versioned profile、exact tokenizer
+  要求、独立 summary budget、Current/Treatment flags、kill switch、source-bound
+  manifest 和已有 provider attempt receipt contract；本阶段禁止 Provider/network。
+- 原因探查：真实 Provider 试验如果没有前置 readiness，缺少凭据、未知 profile、
+  不可计数 tokenizer 或非只读路径都可能在 transport 前混入实验，导致“没有调用”
+  与“调用但证据不完整”无法区分，也会把实验清单误当成运行时 authority。
+- 实现修复：新增 experiment-owned `stage17_real_provider_readiness.py`，定义严格
+  `ProviderReadiness`、`RollingSummaryBudgetPolicy`、`ExperimentFlags`、typed
+  blocker 和 source/session/constraint/task/completion hash 绑定的
+  `RollingSummaryExperimentManifest`。复用 `normalized_provider_endpoint`、
+  `ProviderTokenCounter`、`calculate_summary_budget` 和既有
+  `ProviderAttemptReceipt` 版本，不新增生产 `MetadataKind`，Treatment 未通过
+  readiness 时 fail closed。
+- 验证证据：新增 readiness/manifest 7 个离线测试；与 summary、rolling、reasoning、
+  tokenizer focused 集合合计 **79 passed**。没有创建 LLM client、HTTP 请求、
+  Provider call、project/memory mutation 或泄露 credential 的 artifact。
+- 出口判断：Stage 6A offline GO；只允许进入 Stage 6B 的 shadow 规划。真实
+  Provider semantic quality、usage、finish reason 和 token reduction 仍未测量。
+- 剩余限制：当前只证明“可安全进入实验”的边界；还没有 provider-neutral shadow
+  caller、captured response artifact、recorded replay 或 paired canary。
+
+### Context Phase 11：Stage 6B provider-neutral rolling-summary shadow
+
+- 阶段计划：先写 `docs/context_management/PHASE_11_STAGE_6B_PROVIDER_SHADOW_PLAN.md`，
+  冻结 source snapshot、dynamic summary budget、strict JSON request、injected
+  transport、attempt receipt 和 `used_in_prompt=false` observation boundary。
+- 原因探查：如果真实 Provider 返回后直接交给 ContextBuilder，shadow 会同时改变
+  Compact 和 Provider 质量，无法归因，也可能让 untrusted summary 取得 authority；
+  因此先只测 transport/usage/finish/fallback，保持 Current 行为不变。
+- 实现修复：新增 experiment-owned `stage18_provider_shadow.py`。它绑定 Stage 6A
+  manifest，复用 `RollingSummaryAdapter` 和 `ProviderAttemptReceipt`，动态计算
+  summary ceiling；zero budget、invalid manifest、非 Treatment、异常、unknown
+  usage、truncated、stale source 和 invalid payload 均 fail closed，返回
+  observation 而不修改 Prompt。
+- 验证证据：Stage 6A/6B/attempt telemetry/summary focused 集合 **75 passed**；
+  覆盖 response/attempt hash、usage 不补零、finish reason、provider exception、
+  source size 和 no-transport gates。未调用 Provider/network，也未产生
+  project/memory mutation。
+- 出口判断：Stage 6B offline GO；可进入 recorded replay 设计。真实 Provider
+  调用仍需 readiness-admitted、可回放的 response artifact 和独立 replay gate。
+- 剩余限制：尚未持久化 shadow artifact、验证 replay 与原始 source/manifest 的
+  原子关系，也未执行 paired canary 或真实 token reduction 分析。
+
+### Context Phase 11：Stage 6C recorded rolling-summary replay
+
+- 阶段计划：先写 `docs/context_management/PHASE_11_STAGE_6C_RECORDED_REPLAY_PLAN.md`，
+  冻结 response artifact 的 source/manifest/request hash 绑定、credential-free
+  序列化、`replay_receipt` no-transport 语义和 outcome drift 门禁。
+- 原因探查：仅凭一次 shadow response 不能证明结果可重现；如果回放时重新调用
+  Provider，会把网络波动、reasoning 或模型变化混入 Compact 归因。因此先将
+  response/usage/finish/source 作为 artifact，完全离线重跑同一 adapter。
+- 实现修复：新增严格 `RecordedShadowArtifact`、`capture_recorded_artifact` 和
+  `replay_recorded_artifact`。回放前验证 manifest 和 request hash；回放使用既有
+  `RollingSummaryAdapter` 与 `replay_receipt`，对 accepted/fallback、summary record
+  和 source lineage 做 exact compare。pre-transport、provider exception 和无
+  structured payload 的尝试不能伪装成 replayable artifact。
+- 验证证据：Stage 6A/6B/6C/telemetry/summary focused 集合 **74 passed**；覆盖
+  accepted replay、unknown-usage fallback replay、tampered source、replay no
+  transport、non-replayable attempt。无 Provider/network 或 project/memory mutation。
+- 出口判断：Stage 6C offline GO；可进入小流量 Current/Treatment paired canary
+  设计。真实 semantic quality 和 token reduction 仍未宣称。
+- 剩余限制：尚未在真实 Provider 上收集多目的 paired 数据，也未验证 mutation、
+  verification、required/provenance 与 task-quality gate 的联合结果。
+
+### Context Phase 11：Stage 6D small paired Current/Treatment canary gate
+
+- 阶段计划：先写 `docs/context_management/PHASE_11_STAGE_6D_PAIRED_CANARY_PLAN.md`，
+  冻结三种目的、同源/同约束 paired evidence、显式 `used_in_prompt`、required/
+  provenance/verification/quality/mutation 门禁和 no-global-rollout 语义。
+- 原因探查：token 下降本身不能证明 Compact 变好；如果 summary 进入 Prompt 时
+  丢了 required constraint、source lineage 或验证证据，调用减少反而是坏结果。
+  因此 canary 先把安全/质量 gate 与 token/call/fallback accounting 分开。
+- 实现修复：新增 `stage20_paired_canary.py`。三种 purpose 必须覆盖；Current 和
+  Treatment 共享 source/constraint hash；Treatment 只有在 accepted summary 的
+  compaction ID、required retention、provenance、verification、quality 和零 mutation
+  同时成立时才算真正使用 summary；fallback/unknown usage 单独计数。
+- 验证证据：Stage 6A–6D、provider attempt telemetry、summary focused 集合
+  **84 passed**；覆盖三目的通过、fallback、required/mutation/source mismatch、
+  kill switch、purpose coverage 和 no-global-rollout。未执行 Provider/network 或
+  project/memory mutation。
+- 出口判断：Stage 6D offline GO；进入 Stage 6E 做全量回归、实际 readiness 检查和
+  真实 Provider 流量决策。任何真实 canary 仍必须显式 opt-in，不能修改默认。
+- 剩余限制：尚无真实 Provider 的多目的 paired 数据；当前 token reduction 是离线
+  fixture 的 gate 证据，不是生产收益结论。
+
+### Context Phase 11：Stage 6E final real-provider shadow decision
+
+- 阶段计划：先写 `docs/context_management/PHASE_11_STAGE_6E_FINAL_GATE_PLAN.md`，
+  冻结 full regression、readiness、最多三次低风险 shadow、完整 attempt receipt、
+  以及“Transport 成功不等于 Compact 成功”的决策边界。
+- 实验执行：环境中的真实 endpoint/model/tokenizer readiness 通过；原始配置没有
+  explicit profile，因此仅在进程内显式声明 `generic-openai-compatible:v1`，不根据
+  `deepseek-v4-flash` 猜 reasoning 能力，也不修改 env/生产默认。首轮 3 calls 因
+  final report 未投影 error fields 被丢弃；修复 receipt projection 后重新执行同样
+  上限的 3-call authoritative run。
+- 结果证据：Code 全量 **1040 passed**；Stage 6A–6E focused **88 passed**；
+  compileall/diff-check 通过。权威 run 的 3 calls（context_compaction、goal_plan、
+  tool_event_decision）全部 `InvalidLLMResponseError`/validation，`finish_reason=length`，
+  output=128 且 reasoning=128；input/output/total 分别为 495/128/623、506/128/634、
+  503/128/631。usage 完整可 reconciliation，unknown usage=0，但 accepted summary=0、
+  fallback=3、replayable artifact=0。
+- 根因判断：128-token summary ceiling 被 Provider-default reasoning 完全占用，导致
+  JSON summary 截断；这是 reasoning/completion allocation 信号，不是 segmented
+  Compact 语义质量结论。attempt telemetry 已保留 usage、reasoning、finish、error
+  category/type、retry recommendation 和 request hash。
+- 决策：`global_default_changed=false`，Current deterministic context 保持生产唯一
+  model-facing projection；不进入 paired Treatment canary。下一阶段应单独做
+  explicit provider reasoning/completion allocation experiment，完成后再重跑 Compact。
+- 文档：完整结果见 `docs/context_management/PHASE_11_STAGE_6E_RESULT.md`；剩余限制是
+  尚无有效 summary response、replay artifact 或真实 token reduction/semantic quality
+  结论。
