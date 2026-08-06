@@ -245,6 +245,19 @@ def test_command_approval_gate_allows_local_single_file_executable_bit(tmp_path)
     assert decision.requires_confirmation is False
 
 
+def test_command_approval_gate_does_not_treat_external_executable_path_as_system_write(tmp_path) -> None:
+    tool_root = tmp_path / "opt" / "anaconda3" / "bin"
+    tool_root.mkdir(parents=True)
+    interpreter = tool_root / "python3.13"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    decision = CommandApprovalGate().evaluate(f"/usr/bin/env {interpreter} --version", cwd=str(tmp_path))
+
+    assert decision.auto_approved is True
+    assert decision.requires_confirmation is False
+
+
 def test_command_executor_stops_when_user_declines_high_risk_command(tmp_path) -> None:
     approvals = []
 
@@ -282,3 +295,45 @@ def test_command_executor_runs_after_user_approves_high_risk_command(tmp_path) -
 
     assert approvals == ["sudo --version"]
     assert result.result.attributes["command_approval"]["requires_confirmation"] is True
+
+
+def test_command_executor_blocks_project_external_absolute_command_path(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="outside project boundary"):
+        command_executor(
+            ToolInputMetadata.from_mapping(
+                "command_executor",
+                {
+                    "command": f"cat {outside}",
+                    "mode": "dry_run",
+                    "cwd": str(project),
+                    "project_path": str(project),
+                },
+            )
+        )
+
+
+def test_command_executor_corrects_hallucinated_absolute_project_path_in_dry_run(tmp_path) -> None:
+    project = tmp_path / "project"
+    target = project / "src" / "main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('ok')\n", encoding="utf-8")
+
+    result = command_executor(
+        ToolInputMetadata.from_mapping(
+            "command_executor",
+            {
+                "command": "python /workspace/openpilot/src/main.py --help",
+                "mode": "dry_run",
+                "cwd": str(project),
+                "project_path": str(project),
+            },
+        )
+    )
+
+    assert result.result.command == f"python {target.resolve()} --help"
+    assert result.result.attributes["command_approval"]["command"] == f"python {target.resolve()} --help"

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from memory.project_path_resolver import ensure_resolved_path
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
 from core.tool_contracts import PermissionLevel, ToolCapability, ToolDefinition, ToolFailureMode
@@ -52,7 +53,17 @@ FILE_DELETE_TOOL_DEFINITION = ToolDefinition(
 @metadata_tool_result("file_delete_tool")
 def file_delete_tool_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
     params = input_metadata.to_params()
-    file_path = Path(str(params["file_path"])).expanduser()
+    project_path = params.get("project_path")
+    file_path = (
+        ensure_resolved_path(
+            params["file_path"],
+            project_path,
+            operation="delete",
+            intent_kind="existing_file",
+        )
+        if project_path
+        else Path(str(params["file_path"])).expanduser()
+    )
     if not file_path.exists():
         raise FileNotFoundError(f"Delete target file not found: {file_path}")
     if not file_path.is_file():

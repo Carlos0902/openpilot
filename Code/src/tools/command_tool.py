@@ -378,8 +378,10 @@ def command_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
     approval_decision = CommandApprovalGate().approve(
         command,
         cwd=str(cwd) if cwd else None,
+        project_path=str(params.get("project_path") or "") or None,
         approval_callback=params.get("_command_approval_callback"),
     )
+    command = approval_decision.command
     tool = CommandTool(default_timeout=float(timeout))
     result = tool.execute(
         command=command,

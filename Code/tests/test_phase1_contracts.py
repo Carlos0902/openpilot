@@ -22,7 +22,13 @@ from agent_generator.runner import _complete_empty_slots
 from agent_generator.slot_generator import generate_slots
 from core.instrumented_llm import InstrumentedLLMClient
 from core.llm import LLMClient, LLMMessage, LLMRequest
-from core.exceptions import ErrorCategory, InvalidLLMResponseError, LLMProviderError, LLMTimeoutError
+from core.exceptions import (
+    ContextAssemblyBudgetError,
+    ErrorCategory,
+    InvalidLLMResponseError,
+    LLMProviderError,
+    LLMTimeoutError,
+)
 from core.openpilot_log import OpenPilotLogger
 from core.semantic_analyzer import SemanticAnalyzer
 from core.semantic_types import RiskLevel, TaskType
@@ -30,6 +36,8 @@ from ui.enhanced_ui import EnhancedUI
 from ui.progress_tracker import ProgressTracker
 from metadata import (
     CollectedDataMetadata,
+    ContextAssemblyStatus,
+    ContextSelectionMetadata,
     ResultStatus,
     SearchArtifactMetadata,
     ToolContractMetadata,
@@ -496,6 +504,21 @@ def test_llm_cache_key_includes_max_tokens() -> None:
     assert client._make_cache_key(request_10) != client._make_cache_key(request_20)
 
 
+def test_llm_client_rejects_typed_budget_insufficient_request_before_transport() -> None:
+    client = LLMClient(FakeLLMSettings())
+    request = LLMRequest(
+        messages=[LLMMessage(role="user", content="must not be sent")],
+        context_selection=ContextSelectionMetadata(
+            max_prompt_chars=10,
+            assembly_status=ContextAssemblyStatus.BUDGET_INSUFFICIENT,
+            omitted_required_candidate_ids=["required"],
+        ),
+    )
+
+    with pytest.raises(ContextAssemblyBudgetError):
+        client.complete(request)
+
+
 def test_llm_empty_length_response_is_not_cached(monkeypatch) -> None:
     client = LLMClient(FakeLLMSettings())
     responses = [
@@ -583,8 +606,10 @@ def test_llm_json_mode_retries_after_cached_parse_failure(monkeypatch) -> None:
 
 def test_llm_json_mode_invalid_after_retries_raises_clean_error(monkeypatch) -> None:
     client = LLMClient(FakeLLMSettings())
+    provider_calls = []
 
     def fake_create(_openai_client, _payload):
+        provider_calls.append(_payload)
         return _fake_chat_response("<not-json>")
 
     monkeypatch.setattr(client, "_create_completion_with_transport_retry", fake_create)
@@ -605,6 +630,9 @@ def test_llm_json_mode_invalid_after_retries_raises_clean_error(monkeypatch) -> 
     assert exc.value.context["response_preview_start"] == "<not-json>"
     assert exc.value.context["json_repair_attempts"] == 1
     assert "transport_retry_history" in exc.value.context
+    # max_retries is the total JSON-attempt count, not "one initial call plus
+    # one retry". Transport retries remain independently controlled.
+    assert len(provider_calls) == 1
 
 
 def test_llm_transport_retries_without_env_proxy_after_network_error(monkeypatch) -> None:

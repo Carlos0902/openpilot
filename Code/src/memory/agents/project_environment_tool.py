@@ -5,12 +5,17 @@ from __future__ import annotations
 import platform
 import sys
 import ast
+import hashlib
+import importlib.metadata
 import os
 from pathlib import Path
 from typing import Any
 
 from metadata import (
     DependencyStrategyMetadata,
+    EnvironmentOperation,
+    EnvironmentReadiness,
+    EnvironmentSyncMetadata,
     ProjectDependencyMetadata,
     ToolContractMetadata,
     ToolInputMetadata,
@@ -21,7 +26,7 @@ from metadata import (
 
 from core.python_packages import IMPORT_TO_DISTRIBUTION, distribution_for_import
 from core.python_requirements import is_supported_requirement_line
-from core.project_stack import load_or_create_project_stack_preset
+from core.project_stack import load_or_create_project_stack_preset, load_project_stack_preset
 from memory.agents.git_manager_agent import GitManagerAgent, GitManagerError
 from memory.memory_models import MemoryRecord, MemoryType
 from memory.agents.virtual_environment_manager import (
@@ -44,7 +49,7 @@ PROJECT_ENVIRONMENT_TOOL_DEFINITION = ToolDefinition(
     display_name="Project Environment Tool",
     description="Create or sync a project-bound Python virtual environment and install detected dependencies",
     version="1.0.0",
-    capabilities=[ToolCapability.FILE_READ, ToolCapability.SHELL_EXECUTION, ToolCapability.NETWORK],
+    capabilities=[ToolCapability.FILE_READ, ToolCapability.FILE_WRITE, ToolCapability.SHELL_EXECUTION, ToolCapability.NETWORK],
     permission_level=PermissionLevel.MEDIUM,
     contract_metadata=ToolContractMetadata(
         tool_name='project_environment_tool',
@@ -75,6 +80,27 @@ PROJECT_ENVIRONMENT_TOOL_DEFINITION = ToolDefinition(
 )
 
 
+PROJECT_ENVIRONMENT_PREFLIGHT_DEFINITION = ToolDefinition(
+    name="project_environment_preflight_tool",
+    display_name="Project Environment Preflight",
+    description="Inspect project-local environment readiness without creating files or executing commands",
+    version="1.0.0",
+    capabilities=[ToolCapability.FILE_READ],
+    permission_level=PermissionLevel.LOW,
+    contract_metadata=ToolContractMetadata(
+        tool_name="project_environment_preflight_tool",
+        input_metadata_type="ToolInputMetadata",
+        output_metadata_type="ToolResultMetadata",
+        required_input_fields=["project_path"],
+        input_defaults={"written_files": [], "entry_files": [], "run_command": "", "env_name": ".venv"},
+    ),
+    timeout_seconds=20,
+    max_retries=0,
+    tags=["environment", "preflight", "read_only", "project"],
+    audit_required=False,
+)
+
+
 THIRD_PARTY_IMPORT_MAP = IMPORT_TO_DISTRIBUTION
 
 DEPENDENCY_ROLE_HINTS = {
@@ -97,6 +123,102 @@ DEPENDENCY_ROLE_HINTS = {
 }
 
 PACKAGING_TOOL_PACKAGES = {"pip", "setuptools", "wheel"}
+DEPENDENCY_SCAN_IGNORED_PARTS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
+MAX_DEPENDENCY_SCAN_FILES = 200
+
+
+def inspect_project_environment(
+    *,
+    project_path: str | Path,
+    written_files: list[str] | None = None,
+    entry_files: list[str] | None = None,
+    run_command: str = "",
+    env_name: str = ".venv",
+) -> EnvironmentSyncMetadata:
+    """Inspect one project environment using filesystem reads only."""
+
+    project = Path(project_path).expanduser()
+    files = _coerce_path_list(written_files or []) + _coerce_path_list(entry_files or [])
+    if not project.exists() or not project.is_dir():
+        return EnvironmentSyncMetadata(
+            operation=EnvironmentOperation.PREFLIGHT,
+            readiness=EnvironmentReadiness.SETUP_REQUIRED,
+            environment_id=_environment_identity(project, env_name),
+            project_path=str(project),
+            env_name=env_name,
+            venv_path=str(project / env_name),
+            run_command=run_command,
+            command_cwd=str(project),
+            warnings=["Project directory does not exist yet."],
+        )
+
+    requirements = project / "requirements.txt"
+    dependency_source = "requirements.txt" if requirements.exists() else "import_scan"
+    detected_packages = (
+        _read_requirements_packages(requirements)
+        if requirements.exists()
+        else infer_project_dependencies(project, files)
+    )
+    env_path = project / env_name
+    python_executable = _venv_python_path(env_path)
+    pip_executable = _venv_pip_path(env_path)
+    installed_packages = _read_installed_distributions(env_path) if env_path.is_dir() else []
+    environment_id = _environment_identity(project, env_name, installed_packages=installed_packages)
+    installed_names = _installed_package_names(installed_packages)
+    missing_packages = [
+        package for package in detected_packages if _package_key(package) not in installed_names
+    ]
+    if not env_path.is_dir():
+        readiness = EnvironmentReadiness.SETUP_REQUIRED
+    elif not python_executable.is_file() or not pip_executable.is_file():
+        readiness = EnvironmentReadiness.BLOCKED
+    elif missing_packages:
+        readiness = EnvironmentReadiness.STALE
+    else:
+        readiness = EnvironmentReadiness.READY
+    dependencies = build_project_dependency_context(
+        project_path=project,
+        files=files,
+        detected_packages=detected_packages,
+        installed_packages=installed_packages,
+        dependency_source=dependency_source,
+    )
+    ready = readiness == EnvironmentReadiness.READY
+    return EnvironmentSyncMetadata(
+        operation=EnvironmentOperation.PREFLIGHT,
+        readiness=readiness,
+        environment_id=environment_id,
+        project_path=str(project),
+        env_name=env_name,
+        venv_path=str(env_path),
+        python_executable=str(python_executable) if ready else "",
+        pip_executable=str(pip_executable) if ready else "",
+        run_command=_venv_run_command(project, files, run_command),
+        command_cwd=str(project),
+        command_env=_venv_command_env(env_path) if ready else {},
+        python_command=str(python_executable) if ready else "",
+        pip_command=str(pip_executable) if ready else "",
+        dependency_source=dependency_source,
+        setup_commands=_venv_setup_commands(env_name, detected_packages, dependency_source),
+        detected_packages=detected_packages,
+        installed_packages=installed_packages,
+        missing_packages=missing_packages,
+        dependencies=dependencies,
+        dependency_strategy=build_dependency_strategy(dependencies),
+        stack_preset=load_project_stack_preset(project),
+    )
+
+
+@metadata_tool_result("project_environment_preflight_tool")
+def project_environment_preflight_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
+    params = input_metadata.to_params()
+    return inspect_project_environment(
+        project_path=str(params["project_path"]),
+        written_files=_coerce_path_list(params.get("written_files", [])),
+        entry_files=_coerce_path_list(params.get("entry_files", [])),
+        run_command=str(params.get("run_command") or ""),
+        env_name=str(params.get("env_name") or ".venv"),
+    )
 
 
 @metadata_tool_result('project_environment_tool')
@@ -104,6 +226,10 @@ def project_environment_tool_executor(input_metadata: ToolInputMetadata) -> Tool
     params = input_metadata.to_params()
     """Create/sync a project-local .venv and record dependency context."""
     project_path = Path(params["project_path"]).expanduser()
+    operation = params.get("environment_operation") or EnvironmentOperation.SETUP
+    operation = operation if isinstance(operation, EnvironmentOperation) else EnvironmentOperation(str(operation))
+    if operation not in {EnvironmentOperation.SETUP, EnvironmentOperation.SYNC}:
+        raise ValueError("project_environment_tool requires setup or sync environment_operation")
     project_path.mkdir(parents=True, exist_ok=True)
     env_name = str(params.get("env_name") or ".venv")
     written_files = _coerce_path_list(params.get("written_files", []))
@@ -197,6 +323,13 @@ def project_environment_tool_executor(input_metadata: ToolInputMetadata) -> Tool
     setup_commands = _venv_setup_commands(env_name, detected_packages, dependency_source)
     command_env = _venv_command_env(env_path)
     payload = {
+        "operation": operation.value,
+        "readiness": EnvironmentReadiness.READY.value,
+        "environment_id": _environment_identity(
+            project_path,
+            env_name,
+            installed_packages=packages,
+        ),
         "project_path": str(project_path),
         "venv_path": str(env_path),
         "env_name": env_name,
@@ -367,9 +500,14 @@ def _candidate_python_files(project_path: Path, files: list[str]) -> list[Path]:
             path = project_path / path
         if path.exists() and path.suffix == ".py" and path not in candidates:
             candidates.append(path)
-    if candidates:
-        return candidates
-    return [path for path in sorted(project_path.glob("*.py")) if path.is_file()]
+    for path in sorted(project_path.rglob("*.py")):
+        if len(candidates) >= MAX_DEPENDENCY_SCAN_FILES:
+            break
+        if not path.is_file() or any(part in DEPENDENCY_SCAN_IGNORED_PARTS for part in path.parts):
+            continue
+        if path not in candidates:
+            candidates.append(path)
+    return candidates
 
 
 def _read_top_level_imports(path: Path) -> set[str]:
@@ -470,6 +608,48 @@ def _installed_package_names(packages: list[str]) -> set[str]:
         if name:
             names.add(_package_key(name))
     return names
+
+
+def _environment_identity(
+    project_path: Path,
+    env_name: str,
+    *,
+    installed_packages: list[str] | None = None,
+) -> str:
+    project = project_path.expanduser().resolve()
+    env_path = project / env_name
+    identity_parts = [str(project), env_name]
+    config_path = env_path / "pyvenv.cfg"
+    if config_path.is_file():
+        try:
+            identity_parts.append(hashlib.sha256(config_path.read_bytes()).hexdigest())
+        except OSError:
+            identity_parts.append("pyvenv_cfg_unreadable")
+    packages = installed_packages
+    if packages is None and env_path.is_dir():
+        packages = _read_installed_distributions(env_path)
+    identity_parts.extend(sorted(packages or [], key=str.lower))
+    payload = "\0".join(identity_parts).encode("utf-8")
+    return f"env:sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _read_installed_distributions(env_path: Path) -> list[str]:
+    site_packages = sorted(env_path.glob("lib/python*/site-packages"))
+    windows_site = env_path / "Lib" / "site-packages"
+    if windows_site.is_dir():
+        site_packages.append(windows_site)
+    packages: list[str] = []
+    for site_path in site_packages:
+        try:
+            distributions = importlib.metadata.distributions(path=[str(site_path)])
+            for distribution in distributions:
+                name = str(distribution.metadata.get("Name") or "").strip()
+                version = str(distribution.version or "").strip()
+                if name:
+                    packages.append(f"{name}=={version}" if version else name)
+        except (OSError, ValueError):
+            continue
+    return sorted(set(packages), key=str.lower)
 
 
 def _package_key(package: str) -> str:

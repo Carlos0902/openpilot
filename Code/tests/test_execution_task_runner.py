@@ -86,6 +86,9 @@ class FakeRuntime:
     _blocking_dependency = IntelligentAutopilot._blocking_dependency
     _blocked_task_result = IntelligentAutopilot._blocked_task_result
     _execution_history_payload = IntelligentAutopilot._execution_history_payload
+    _history_result_summary = IntelligentAutopilot._history_result_summary
+    _history_observed_paths = IntelligentAutopilot._history_observed_paths
+    _task_parent_context = IntelligentAutopilot._task_parent_context
 
     def __init__(self, tmp_path, *, enhanced: bool = False, fail_order: bool = False) -> None:
         self.console = Console(record=True, width=100)

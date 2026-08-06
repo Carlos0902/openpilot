@@ -51,6 +51,10 @@ class IterationResult(BaseModel):
     retry_history: list[dict] = Field(default_factory=list)
     remaining_goals: list[str] = Field(default_factory=list)
     repair_completed: bool = False
+    rollback_applied: bool = False
+    rollback_files: list[str] = Field(default_factory=list)
+    rollback_snapshot_ref: str = ""
+    rollback_error: str | None = None
 
 
 class ProjectStateSnapshot(BaseModel):
@@ -95,6 +99,7 @@ class DesignedImprovementTask(BaseModel):
     target_files: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
     risk_notes: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
 
 
 class AutonomousIterationResult(BaseModel):

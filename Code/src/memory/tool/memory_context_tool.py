@@ -6,7 +6,9 @@ from typing import Any
 
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
-from memory.context_builder import MemoryContextBuilder
+from memory.context_builder import DEFAULT_MAX_PROMPT_CHARS, DEFAULT_MAX_PROMPT_TOKENS, MemoryContextBuilder
+from core.config import LLMSettings
+from core.token_counting import ProviderTokenCounter
 from core.tool_contracts import (
     PermissionLevel,
     ToolCapability,
@@ -27,7 +29,14 @@ MEMORY_CONTEXT_TOOL_DEFINITION = ToolDefinition(
         input_metadata_type="ToolInputMetadata",
         output_metadata_type="ToolResultMetadata",
         required_input_fields=['query'],
-        input_defaults={'project_path': '.', 'include_environment': True, 'limit': 10, 'system_prompt': ''},
+        input_defaults={
+            'project_path': '.',
+            'include_environment': True,
+            'limit': 10,
+            'system_prompt': '',
+            'max_total_chars': DEFAULT_MAX_PROMPT_CHARS,
+            'max_tokens': DEFAULT_MAX_PROMPT_TOKENS,
+        },
     ),
     timeout_seconds=30,
     max_retries=1,
@@ -58,11 +67,14 @@ def memory_context_executor(input_metadata: ToolInputMetadata) -> ToolResultMeta
 
     builder = params.get("_memory_context_builder")
     if builder is None:
+        settings = LLMSettings()
         builder = MemoryContextBuilder(
             short_memory=params.get("_short_memory"),
             memory_store=params.get("_memory_store"),
             memory_vault_agent=params.get("_memory_vault_agent"),
             project_manager=params.get("_project_manager"),
+            token_counter=ProviderTokenCounter.from_settings(settings),
+            max_prompt_tokens=int(params.get("max_tokens") or settings.context_max_prompt_tokens),
         )
 
     return builder.build(
@@ -71,4 +83,6 @@ def memory_context_executor(input_metadata: ToolInputMetadata) -> ToolResultMeta
         include_environment=bool(params.get("include_environment", True)),
         limit=int(params.get("limit", 10)),
         system_prompt=str(params.get("system_prompt") or ""),
+        max_prompt_chars=int(params.get("max_total_chars") or DEFAULT_MAX_PROMPT_CHARS),
+        max_prompt_tokens=(int(params["max_tokens"]) if params.get("max_tokens") else None),
     )

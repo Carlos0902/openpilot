@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from memory.project_path_resolver import extract_command_path_references, ground_command_paths_within_project
+
 
 @dataclass(frozen=True)
 class CommandApprovalDecision:
@@ -74,8 +76,22 @@ class CommandApprovalGate:
         command: str,
         *,
         cwd: str | None = None,
+        project_path: str | None = None,
         approval_callback: Callable[[CommandApprovalDecision], bool] | None = None,
     ) -> CommandApprovalDecision:
+        command = str(command or "").strip()
+        cwd = str(cwd or "").strip()
+        project_root = str(project_path or cwd or "").strip()
+        if project_root:
+            command, _intents, resolutions = ground_command_paths_within_project(
+                command,
+                project_root,
+                source="command_approval",
+                evidence=[command],
+            )
+            blocking = next((item for item in resolutions if item.status in {"blocked", "ambiguous"}), None)
+            if blocking is not None:
+                raise ValueError(f"Command path boundary check failed. {blocking.reason}")
         decision = self.evaluate(command, cwd=cwd)
         if not decision.requires_confirmation:
             return decision
@@ -106,7 +122,6 @@ def _split_command(command: str) -> list[str]:
 
 
 def _writes_system_path(command: str) -> bool:
-    lowered = command.lower()
     system_paths = (
         "/bin/",
         "/etc/",
@@ -117,7 +132,13 @@ def _writes_system_path(command: str) -> bool:
         "/usr/",
         "/var/",
     )
-    return any(re.search(rf"(^|[\\s'\"=]){re.escape(path)}", lowered) for path in system_paths)
+    for reference in extract_command_path_references(command):
+        if reference.intent_kind not in {"command_cwd", "command_data_path", "command_redirection_path"}:
+            continue
+        lowered = reference.raw_path.lower()
+        if any(lowered == path[:-1] or lowered.startswith(path) for path in system_paths):
+            return True
+    return False
 
 
 def _is_safe_local_executable_chmod(tokens: list[str], cwd: str) -> bool:

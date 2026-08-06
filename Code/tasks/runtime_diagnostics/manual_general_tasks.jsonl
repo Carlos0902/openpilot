@@ -1,0 +1,10 @@
+{"task_id":"manual_understanding_001","source":"manual","raw_input":"请总结这个项目的核心模块及各自职责，优先基于仓库内现有文档和代码结构。","attachments":[],"tags":["understanding","readonly","general"]}
+{"task_id":"manual_architecture_001","source":"manual","raw_input":"请梳理从 CLI 入口到主执行运行时的核心链路，并指出关键模块之间的关系。","attachments":[],"tags":["architecture","readonly","general"]}
+{"task_id":"manual_config_001","source":"manual","raw_input":"请说明这个项目的 LLM 配置是如何加载、校验并注入到运行时中的。","attachments":[],"tags":["configuration","readonly","general"]}
+{"task_id":"manual_metadata_001","source":"manual","raw_input":"请解释 metadata 在这个项目中的角色，并区分它和 core、tools、memory 模块的职责边界。","attachments":[],"tags":["metadata","readonly","general"]}
+{"task_id":"manual_routing_001","source":"manual","raw_input":"请定位任务路由发生的位置，并解释当前系统如何决定任务走哪条执行路径。","attachments":[],"tags":["routing","readonly","general"]}
+{"task_id":"manual_verification_001","source":"manual","raw_input":"请分析系统在高风险或写操作之后，是如何决定和组织验证步骤的。","attachments":[],"tags":["verification","readonly","general"]}
+{"task_id":"manual_runtime_state_001","source":"manual","raw_input":"请说明运行时状态如何记录 unknowns、assumptions、tool history 和 verification status。","attachments":[],"tags":["runtime_state","readonly","general"]}
+{"task_id":"manual_tool_error_001","source":"manual","raw_input":"请定位工具错误是如何被捕获和表达的，并说明 recoverable 与 failure metadata 的关系。","attachments":[],"tags":["tool_execution","readonly","general"]}
+{"task_id":"manual_memory_001","source":"manual","raw_input":"请总结 memory 是如何被接入任务执行链路中的，以及它主要影响哪些阶段。","attachments":[],"tags":["memory","readonly","general"]}
+{"task_id":"manual_diagnostics_001","source":"manual","raw_input":"请找出当前仓库里已经有哪些日志、事件或状态信息可以用于诊断一次失败的任务执行。","attachments":[],"tags":["diagnostics","readonly","general"]}

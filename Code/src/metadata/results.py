@@ -25,6 +25,8 @@ from metadata.bugfix import (
 )
 from metadata.project import (
     DependencyStrategyMetadata,
+    EnvironmentOperation,
+    EnvironmentReadiness,
     EnvironmentSyncMetadata,
     GitRepositoryMetadata,
     GitSnapshotMetadata,
@@ -57,7 +59,7 @@ class ResultStatus(str, Enum):
 
 
 class FailureMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.FAILURE
+    kind: Literal[MetadataKind.FAILURE] = MetadataKind.FAILURE
     error_type: str
     error_message: str
     error_code: str | None = None
@@ -68,7 +70,7 @@ class FailureMetadata(MetadataBase):
 
 
 class ToolResultMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.TOOL_RESULT
+    kind: Literal[MetadataKind.TOOL_RESULT] = MetadataKind.TOOL_RESULT
     tool_name: str
     status: ResultStatus
     result: SerializeAsAny[MetadataBase] | None = None
@@ -321,6 +323,9 @@ def payload_to_artifact(tool_name: str, payload: Any, input_metadata: Any = None
         if isinstance(git_snapshot, dict):
             git_snapshot = GitSnapshotMetadata.model_validate(git_snapshot)
         return EnvironmentSyncMetadata(
+            operation=EnvironmentOperation(str(payload.get("operation") or EnvironmentOperation.LEGACY_SYNC.value)),
+            readiness=EnvironmentReadiness(str(payload.get("readiness") or EnvironmentReadiness.UNKNOWN.value)),
+            environment_id=str(payload.get("environment_id") or ""),
             project_path=str(payload.get("project_path") or ""),
             env_name=str(payload.get("env_name") or ".venv"),
             venv_path=str(payload.get("venv_path") or ""),
@@ -347,6 +352,9 @@ def payload_to_artifact(tool_name: str, payload: Any, input_metadata: Any = None
             operations=list(payload.get("operations") or []),
             warnings=list(payload.get("warnings") or []),
             annotations=attr_without(
+                "operation",
+                "readiness",
+                "environment_id",
                 "project_path",
                 "venv_path",
                 "python_executable",
@@ -439,6 +447,7 @@ def payload_to_artifact(tool_name: str, payload: Any, input_metadata: Any = None
             next_iteration_goal=str(payload.get("next_iteration_goal") or ""),
             must_implement_next=[str(item) for item in payload.get("must_implement_next") or []],
             blocking_risks=[str(item) for item in payload.get("blocking_risks") or []],
+            evidence_ids=[str(item) for item in payload.get("evidence_ids") or []],
             designed_tasks=list(payload.get("designed_tasks") or []),
             product_judgment=payload.get("product_judgment") if isinstance(payload.get("product_judgment"), dict) else {},
             stack_preset=payload.get("stack_preset") if isinstance(payload.get("stack_preset"), dict) else {},
@@ -461,6 +470,7 @@ def payload_to_artifact(tool_name: str, payload: Any, input_metadata: Any = None
                 "next_iteration_goal",
                 "must_implement_next",
                 "blocking_risks",
+                "evidence_ids",
                 "designed_tasks",
                 "product_judgment",
                 "stack_preset",
@@ -522,7 +532,7 @@ def tool_result_payload(result: Any) -> Any:
 
 
 class TaskResultMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.TASK_RESULT
+    kind: Literal[MetadataKind.TASK_RESULT] = MetadataKind.TASK_RESULT
     task_id: str
     status: ResultStatus
     result: SerializeAsAny[ToolResultMetadata | MetadataBase] | None = None

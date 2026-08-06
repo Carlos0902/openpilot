@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from enum import Enum
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from metadata.base import JsonValue, MetadataBase, MetadataKind
 
@@ -36,7 +37,7 @@ class ProblemSignalMetadata(MetadataBase):
     """Raw evidence that something might require repair or replanning."""
 
     kind: Literal[MetadataKind.PROBLEM_SIGNAL] = MetadataKind.PROBLEM_SIGNAL
-    source: str = "tool_execution"
+    signal_source: str = "tool_execution"
     category: str = "ambiguous_task"
     message: str = ""
     evidence: list[str] = Field(default_factory=list)
@@ -44,6 +45,14 @@ class ProblemSignalMetadata(MetadataBase):
     tool_name: str = ""
     target_files: list[str] = Field(default_factory=list)
     raw_payload: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_source(cls, value: Any) -> Any:
+        if isinstance(value, dict) and isinstance(value.get("source"), str):
+            value = dict(value)
+            value.setdefault("signal_source", value.pop("source"))
+        return value
 
 
 class ProblemJudgmentMetadata(MetadataBase):
@@ -85,6 +94,8 @@ class TaskGraphNodeMetadata(MetadataBase):
     kind: Literal[MetadataKind.TASK_GRAPH_NODE] = MetadataKind.TASK_GRAPH_NODE
     task_id: str
     description: str = ""
+    priority: Literal["low", "medium", "high", "critical"] = "medium"
+    estimated_effort: float | None = None
     task_kind: str = "general"
     difficulty: str = "simple"
     required_inputs: list[str] = Field(default_factory=list)
@@ -94,6 +105,9 @@ class TaskGraphNodeMetadata(MetadataBase):
     dependencies: list[str] = Field(default_factory=list)
     can_run_parallel: bool = True
     validation_command: str = ""
+    tags: list[str] = Field(default_factory=list)
+    problem_resolution_depth: int = Field(default=0, ge=0)
+    problem_resolution_parent_task_id: str | None = None
 
 
 class TaskGraphEdgeMetadata(MetadataBase):
@@ -409,6 +423,7 @@ class ImprovementAnalysisMetadata(MetadataBase):
     next_iteration_goal: str = ""
     must_implement_next: list[str] = Field(default_factory=list)
     blocking_risks: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
     designed_tasks: list[dict[str, JsonValue]] = Field(default_factory=list)
     product_judgment: dict[str, JsonValue] = Field(default_factory=dict)
     stack_preset: dict[str, JsonValue] = Field(default_factory=dict)
@@ -419,8 +434,26 @@ class ImprovementAnalysisMetadata(MetadataBase):
     selected_candidate: ImprovementCandidateMetadata | None = None
 
 
+class EnvironmentOperation(str, Enum):
+    LEGACY_SYNC = "legacy_sync"
+    PREFLIGHT = "preflight"
+    SETUP = "setup"
+    SYNC = "sync"
+
+
+class EnvironmentReadiness(str, Enum):
+    UNKNOWN = "unknown"
+    SETUP_REQUIRED = "setup_required"
+    READY = "ready"
+    STALE = "stale"
+    BLOCKED = "blocked"
+
+
 class EnvironmentSyncMetadata(MetadataBase):
     kind: Literal[MetadataKind.ENVIRONMENT_SYNC] = MetadataKind.ENVIRONMENT_SYNC
+    operation: EnvironmentOperation = EnvironmentOperation.LEGACY_SYNC
+    readiness: EnvironmentReadiness = EnvironmentReadiness.UNKNOWN
+    environment_id: str = ""
     project_path: str = ""
     env_name: str = ".venv"
     venv_path: str = ""
@@ -444,6 +477,22 @@ class EnvironmentSyncMetadata(MetadataBase):
     git_snapshot: GitSnapshotMetadata | None = None
     operations: list[dict[str, JsonValue]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _ready_environment_has_execution_identity(self) -> "EnvironmentSyncMetadata":
+        if self.readiness == EnvironmentReadiness.READY:
+            missing = [
+                name
+                for name, value in (
+                    ("environment_id", self.environment_id),
+                    ("python_executable", self.python_executable),
+                    ("command_cwd", self.command_cwd),
+                )
+                if not str(value or "").strip()
+            ]
+            if missing:
+                raise ValueError(f"ready environment requires: {', '.join(missing)}")
+        return self
 
 
 class AutonomyDecisionMetadata(MetadataBase):

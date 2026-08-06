@@ -6,14 +6,27 @@ from autonomous_iteration.models import EvaluationResult, IterationResult
 from autonomous_iteration.project_improvement_runtime import ProjectImprovementRuntime
 from core.openpilot_log import OpenPilotLogger
 from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
-from metadata import FailureMetadata, ResultStatus, ToolExecutionEnvelopeMetadata, ToolInputMetadata, ToolResultMetadata, payload_to_artifact
+from metadata import (
+    ConversationIdentity,
+    FailureMetadata,
+    ResultStatus,
+    SessionIngressState,
+    ToolExecutionEnvelopeMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+    payload_to_artifact,
+)
+from runtime_diagnostics import DiagnosticRecorder
+from runtime_diagnostics.hooks import RuntimeDiagnosticsHooks
 
 
 class FakeIterationAgent:
     def __init__(self) -> None:
         self.callbacks_seen: set[str] = set()
+        self.session_ingress_state = None
 
     def run_project_pipeline(self, **kwargs):
+        self.session_ingress_state = kwargs.get("session_ingress_state")
         evaluation = EvaluationResult(
             validation_passed=True,
             runnable=True,
@@ -24,7 +37,23 @@ class FakeIterationAgent:
         state = kwargs["read_project_state"](evaluation, 0)
         result = kwargs["apply_improvement"](1, evaluation, ["Improve app.py"], {"summary": "report"}, False)
         report = kwargs["analyze_improvements"](0, evaluation)
-        kwargs["on_progress"]("context_loader", {"context": {"related_memories": [], "related_files": []}, "iteration": 0})
+        kwargs["on_progress"](
+            "context_loader",
+            {
+                "context": {
+                    "related_memories": [],
+                    "related_files": [],
+                    "context_selection": {
+                        "kind": "context_selection",
+                        "max_prompt_chars": 16_000,
+                        "original_prompt_chars": 120,
+                        "final_prompt_chars": 120,
+                        "truncated": False,
+                    },
+                },
+                "iteration": 0,
+            },
+        )
         self.callbacks_seen = {"read_project_state", "apply_improvement", "analyze_improvements", "on_progress"}
         return {
             "success": True,
@@ -76,6 +105,7 @@ class FakeAutopilot:
         self.iterative_improvement = FakeIterationAgent()
         self.memory_store = None
         self.progress_events: list[str] = []
+        self.runtime_diagnostics_hooks = RuntimeDiagnosticsHooks(DiagnosticRecorder(tmp_path))
         self.environment_success = environment_success
         self.environment_failures_before_success = environment_failures_before_success
         self.environment_error = environment_error
@@ -253,18 +283,81 @@ def test_project_improvement_runtime_success_callbacks_and_shape(tmp_path) -> No
     assert autopilot.progress_events == ["context_loader"]
 
 
+def test_project_improvement_runtime_forwards_session_ingress_state(tmp_path) -> None:
+    autopilot = FakeAutopilot(tmp_path)
+    runtime = ProjectImprovementRuntime(autopilot)
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="session",
+            run_id="run-1",
+            turn_index=0,
+            project_root=str(tmp_path),
+        )
+    )
+
+    runtime.run(
+        goal="Improve project",
+        project_path=tmp_path,
+        written_files=[str(tmp_path / "app.py")],
+        session_ingress_state=state,
+    )
+
+    assert autopilot.iterative_improvement.session_ingress_state is state
+
+
+def test_project_improvement_runtime_records_trajectory_events(tmp_path) -> None:
+    autopilot = FakeAutopilot(tmp_path)
+    runtime = ProjectImprovementRuntime(autopilot)
+
+    runtime.run(
+        goal="Inspect project runtime flow",
+        project_path=tmp_path,
+        written_files=[str(tmp_path / "app.py")],
+    )
+
+    run = autopilot.runtime_diagnostics_hooks.recorder.load_run(autopilot.session_id)
+    assert run is not None
+    events = autopilot.runtime_diagnostics_hooks.recorder.load_trajectory_events(run.run_id)
+    event_types = [event["event_type"] for event in events]
+    assert "pipeline_started" in event_types
+    assert "environment_sync_completed" in event_types
+    assert "pipeline_progress" in event_types
+    assert "project_state_read" in event_types
+    assert "pipeline_finished" in event_types
+    progress_event = next(event for event in events if event["event_type"] == "pipeline_progress")
+    assert progress_event["payload"]["annotations"]["module"] == "project_improvement_runtime"
+    assert progress_event["payload"]["correlation"]["session_id"] == autopilot.session_id
+    assert progress_event["payload"]["output_summary"]["context"]["context_selection"]["kind"] == "context_selection"
+
+
 def test_intelligent_autopilot_iterative_improvement_proxy_uses_project_improvement_runtime(tmp_path) -> None:
     class FakeProjectImprovementRuntime:
+        def __init__(self):
+            self.kwargs = None
+
         def run(self, **kwargs):
+            self.kwargs = kwargs
             return {"success": True, "goal": kwargs["goal"]}
 
     autopilot = IntelligentAutopilot(FakeLLM(), log_file=tmp_path / "autopilot.jsonl")
-    autopilot.project_improvement_runtime = FakeProjectImprovementRuntime()
+    proxy = FakeProjectImprovementRuntime()
+    autopilot.project_improvement_runtime = proxy
+    conversation_id = autopilot.session_id or "conversation-1"
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id=conversation_id,
+            run_id="run-1",
+            turn_index=0,
+            project_root=str(tmp_path),
+        )
+    )
 
     result = autopilot._run_iterative_improvement(
         goal="Improve project",
         project_path=tmp_path,
         written_files=[str(tmp_path / "app.py")],
+        session_ingress_state=state,
     )
 
     assert result == {"success": True, "goal": "Improve project"}
+    assert proxy.kwargs["session_ingress_state"] is state

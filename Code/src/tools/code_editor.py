@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 import textwrap
 import uuid
 from pathlib import Path
 
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from core.llm import LLMMessage
+from core.exceptions import ContextAssemblyBudgetError
+from core.reasoning import routine_tool_reasoning_policy
+from autonomous_iteration.enhancement_completion_budget import (
+    EnhancementCompletionBudgetCoordinator,
+)
+from memory.context_assembly import build_context_llm_request
+from memory.project_path_resolver import ensure_resolved_path
+from metadata import (
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
+    EnhancementCompletionComplexity,
+    EnhancementCompletionDecisionValue,
+    EnhancementCompletionRequest,
+    EnhancementCompletionRequirement,
+    RuntimeBudgetMetadata,
+    ToolContractMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+    metadata_tool_result,
+)
 
 from core.tool_contracts import PermissionLevel, ToolCapability, ToolDefinition, ToolFailureMode
 
@@ -57,7 +78,27 @@ def code_editor_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
             from core.llm import LLMClient
 
             llm_client = LLMClient(LLMSettings())
-        replacement = _extract_code(_call_llm(llm_client, _build_prompt(params, current_snippet, language)), language).rstrip()
+        runtime_budget = params.get("_runtime_budget")
+        enhancement_requirement = params.get("_enhancement_requirement")
+        replacement = _extract_code(
+            _call_llm(
+                llm_client,
+                _build_prompt(params, current_snippet, language),
+                runtime_budget=(
+                    runtime_budget
+                    if isinstance(runtime_budget, RuntimeBudgetMetadata)
+                    else None
+                ),
+                enhancement_requirement=(
+                    enhancement_requirement
+                    if isinstance(
+                        enhancement_requirement, EnhancementCompletionRequirement
+                    )
+                    else None
+                ),
+            ),
+            language,
+        ).rstrip()
 
     if not replacement:
         raise ValueError("code_editor produced empty replacement_text")
@@ -94,7 +135,17 @@ def _source_from_params(params: dict[str, object]) -> str:
     file_path = params.get("file_path")
     if not file_path:
         raise ValueError("code_editor requires file_path or code")
-    path = Path(str(file_path)).expanduser()
+    project_path = params.get("project_path")
+    path = (
+        ensure_resolved_path(
+            file_path,
+            project_path,
+            operation="read",
+            intent_kind="existing_file",
+        )
+        if project_path
+        else Path(str(file_path)).expanduser()
+    )
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Code edit target file not found: {path}")
     return path.read_text(encoding=str(params.get("encoding") or "utf-8"))
@@ -153,19 +204,95 @@ Return only the replacement code in a fenced code block.
 """
 
 
-def _call_llm(llm_client: object, prompt: str) -> str:
-    if hasattr(llm_client, "complete"):
-        from core.llm import LLMMessage, LLMRequest
-
-        response = llm_client.complete(
-            LLMRequest(messages=[LLMMessage(role="user", content=prompt)], response_format="text", temperature=0.2)
+def _call_llm(
+    llm_client: object,
+    prompt: str,
+    *,
+    runtime_budget: RuntimeBudgetMetadata | None = None,
+    enhancement_requirement: EnhancementCompletionRequirement | None = None,
+) -> str:
+    request = build_context_llm_request(
+        llm_client,
+        messages=[LLMMessage(role="user", content=prompt)],
+        purpose=ContextRequestPurpose.CODE_EDIT,
+        response_format="text",
+        temperature=0.2,
+        transport_retries=0,
+        user_truncation=ContextCandidateTruncation.FORBIDDEN,
+    )
+    reservation = None
+    enhancement_budget = None
+    if runtime_budget is not None:
+        enhancement_budget = EnhancementCompletionBudgetCoordinator(runtime_budget)
+        reservation = enhancement_budget.reserve(
+            EnhancementCompletionRequest(
+                logical_key=(
+                    "code_edit:"
+                    + hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                ),
+                purpose=ContextRequestPurpose.CODE_EDIT,
+                complexity=EnhancementCompletionComplexity.ROUTINE,
+                prompt_tokens=int(
+                    getattr(request.context_selection, "final_prompt_tokens", 0) or 0
+                ),
+                remaining_calls=1,
+                remaining_value=EnhancementCompletionDecisionValue.HIGH,
+                requirement=(
+                    enhancement_requirement
+                    or EnhancementCompletionRequirement.OPTIONAL
+                ),
+            )
         )
+        if reservation is None:
+            raise ContextAssemblyBudgetError(
+                ["enhancement_completion_budget:code_edit"]
+            )
+        request = request.model_copy(
+            update={
+                "max_tokens": reservation.max_tokens,
+                "trace_info": {
+                    **request.trace_info,
+                    "completion_budget": {
+                        "purpose": ContextRequestPurpose.CODE_EDIT.value,
+                        "reservation_id": reservation.reservation_id,
+                        "reserved_tokens": reservation.max_tokens,
+                        "remaining_tokens": (
+                            runtime_budget.enhancement_completion_tokens_remaining
+                        ),
+                    },
+                },
+                "reasoning_policy": routine_tool_reasoning_policy(
+                    getattr(llm_client, "settings", None), routine=True
+                ),
+            }
+        )
+    if hasattr(llm_client, "complete"):
+        try:
+            response = llm_client.complete(request)
+        except Exception as exc:
+            if enhancement_budget is not None and reservation is not None:
+                enhancement_budget.reconcile_failure(reservation, exc)
+            raise
+        if enhancement_budget is not None and reservation is not None:
+            usage = getattr(response, "usage", None)
+            actual_tokens = None
+            if isinstance(usage, dict):
+                actual_tokens = usage.get(
+                    "completion_tokens", usage.get("output_tokens")
+                )
+            enhancement_budget.reconcile(
+                reservation,
+                actual_tokens=(
+                    int(actual_tokens) if actual_tokens is not None else None
+                ),
+                finish_reason=getattr(response, "finish_reason", None),
+            )
         return str(response.content)
     if hasattr(llm_client, "generate"):
-        return str(llm_client.generate(prompt))
+        return str(llm_client.generate("\n\n".join(message.content for message in request.messages)))
     if hasattr(llm_client, "chat"):
-        return str(llm_client.chat([{"role": "user", "content": prompt}]))
-    return str(llm_client(prompt))
+        return str(llm_client.chat([message.model_dump() for message in request.messages]))
+    return str(llm_client("\n\n".join(message.content for message in request.messages)))
 
 
 def _extract_code(raw_response: str, language: str) -> str:

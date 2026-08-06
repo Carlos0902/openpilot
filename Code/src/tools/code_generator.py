@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import time
 import uuid
 from typing import Any, Optional
 
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from metadata import (
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
+    ToolContractMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+    metadata_tool_result,
+    EnhancementCompletionComplexity,
+    EnhancementCompletionDecisionValue,
+    EnhancementCompletionRequest,
+    EnhancementCompletionRequirement,
+    RuntimeBudgetMetadata,
+)
 
-from core.exceptions import OpenPilotError
+from core.exceptions import ContextAssemblyBudgetError, InvalidLLMResponseError, OpenPilotError
+from core.llm import LLMMessage
+from core.reasoning import routine_tool_reasoning_policy
+from autonomous_iteration.enhancement_completion_budget import EnhancementCompletionBudgetCoordinator
+from memory.context_assembly import (
+    build_context_candidate_request,
+    build_context_llm_request,
+)
 from core.tool_contracts import (
     PermissionLevel,
     ToolCapability,
@@ -19,6 +39,7 @@ from core.tool_contracts import (
     ToolFailureMode,
 )
 from tools.code_models import CodeGenerationRequest, CodeLanguage, GeneratedCode
+from tools.code_generation_context import build_code_generation_candidates
 
 
 CODE_GENERATION_LLM_TIMEOUT_SECONDS = 90.0
@@ -107,7 +128,17 @@ def code_generator_executor(input_metadata: ToolInputMetadata) -> ToolResultMeta
             settings = LLMSettings()
             llm_client = LLMClient(settings)
 
-        generator = CodeGenerator(None if use_local_fallback else llm_client)
+        runtime_budget = params.get("_runtime_budget")
+        enhancement_requirement = params.get("_enhancement_requirement")
+        generator = CodeGenerator(
+            None if use_local_fallback else llm_client,
+            runtime_budget=(runtime_budget if isinstance(runtime_budget, RuntimeBudgetMetadata) else None),
+            enhancement_requirement=(
+                enhancement_requirement
+                if isinstance(enhancement_requirement, EnhancementCompletionRequirement)
+                else None
+            ),
+        )
 
         # Create request
         request = CodeGenerationRequest(
@@ -180,7 +211,13 @@ class CodeGenerator:
 请只返回 Shell 代码，不要包含任何解释文字。代码应该用 ```bash 代码块包裹。
 """
 
-    def __init__(self, llm_client: Optional[object] = None):
+    def __init__(
+        self,
+        llm_client: Optional[object] = None,
+        *,
+        runtime_budget: RuntimeBudgetMetadata | None = None,
+        enhancement_requirement: EnhancementCompletionRequirement | None = None,
+    ):
         """
         初始化代码生成器
 
@@ -188,6 +225,13 @@ class CodeGenerator:
             llm_client: LLM 客户端（如果为 None，使用模拟生成）
         """
         self.llm_client = llm_client
+        self.enhancement_requirement = enhancement_requirement
+        self.runtime_budget = (
+            runtime_budget
+            if runtime_budget is not None and enhancement_requirement is not None
+            else RuntimeBudgetMetadata()
+        )
+        self.enhancement_budget = EnhancementCompletionBudgetCoordinator(self.runtime_budget)
         self._generation_count = 0
 
     def generate_code(self, request: CodeGenerationRequest) -> GeneratedCode:
@@ -207,7 +251,7 @@ class CodeGenerator:
 
         # 2. 调用 LLM 生成代码
         if self.llm_client:
-            raw_response = self._call_llm(prompt)
+            raw_response = self._call_llm(prompt, generation_request=request)
         else:
             # 模拟生成（用于测试）
             raw_response = self._simulate_generation(request)
@@ -407,29 +451,138 @@ TOOL OUTPUT REQUIREMENTS:
 
         return "\n".join(constraints)
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(
+        self,
+        prompt: str,
+        *,
+        generation_request: CodeGenerationRequest | None = None,
+    ) -> str:
         """调用 LLM"""
         # 调用实际的 LLM API。真实 provider 错误必须向上传递，交给
         # LLM/tool retry 层分类处理，避免误写入模拟代码。
-        if hasattr(self.llm_client, 'complete'):
-            # LLMClient 使用 complete 方法，需要 LLMRequest 对象
-            from core.llm import LLMRequest, LLMMessage
-            request = LLMRequest(
-                messages=[LLMMessage(role="user", content=prompt)],
+        if generation_request is not None and generation_request.prompt_context:
+            request = build_context_candidate_request(
+                self.llm_client,
+                candidates=build_code_generation_candidates(generation_request),
+                purpose=ContextRequestPurpose.CODE_GENERATION,
                 response_format="text",
                 temperature=0.7,
                 timeout_seconds=CODE_GENERATION_LLM_TIMEOUT_SECONDS,
                 transport_retries=0,
             )
-            response = self.llm_client.complete(request)
+        else:
+            request = build_context_llm_request(
+                self.llm_client,
+                messages=[LLMMessage(role="user", content=prompt)],
+                purpose=ContextRequestPurpose.CODE_GENERATION,
+                response_format="text",
+                temperature=0.7,
+                timeout_seconds=CODE_GENERATION_LLM_TIMEOUT_SECONDS,
+                transport_retries=0,
+                user_truncation=ContextCandidateTruncation.FORBIDDEN,
+            )
+        project_context = (
+            generation_request.prompt_context.get("project_context")
+            if generation_request is not None
+            and isinstance(generation_request.prompt_context.get("project_context"), dict)
+            else {}
+        )
+        written_files = project_context.get("written_files") if isinstance(project_context, dict) else []
+        routine = bool(
+            generation_request is not None
+            and generation_request.prompt_context
+            and str(generation_request.prompt_context.get("operation_kind") or "file_create")
+            == "file_create"
+            and str(project_context.get("target_file") or "").strip()
+            and len(written_files or []) <= 1
+        )
+        generation_identity = json.dumps(
+            (
+                generation_request.model_dump(
+                    mode="json", exclude={"request_id", "created_at"}
+                )
+                if generation_request is not None
+                else {"prompt": prompt}
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        reservation = self.enhancement_budget.reserve(
+            EnhancementCompletionRequest(
+                logical_key=(
+                    "code_generation:"
+                    + hashlib.sha256(generation_identity.encode("utf-8")).hexdigest()
+                ),
+                purpose=ContextRequestPurpose.CODE_GENERATION,
+                complexity=(
+                    EnhancementCompletionComplexity.ROUTINE
+                    if routine
+                    else EnhancementCompletionComplexity.COMPLEX
+                ),
+                prompt_tokens=int(getattr(request.context_selection, "final_prompt_tokens", 0) or 0),
+                remaining_calls=1,
+                remaining_value=EnhancementCompletionDecisionValue.HIGH,
+                requirement=(
+                    self.enhancement_requirement
+                    or EnhancementCompletionRequirement.REQUIRED
+                ),
+            )
+        )
+        if reservation is None:
+            raise ContextAssemblyBudgetError(["enhancement_completion_budget:code_generation"])
+        request = request.model_copy(
+            update={
+                "max_tokens": reservation.max_tokens,
+                "trace_info": {
+                    **request.trace_info,
+                    "completion_budget": {
+                        "purpose": ContextRequestPurpose.CODE_GENERATION.value,
+                        "reservation_id": reservation.reservation_id,
+                        "reserved_tokens": reservation.max_tokens,
+                        "remaining_tokens": self.runtime_budget.enhancement_completion_tokens_remaining,
+                    },
+                },
+                "reasoning_policy": routine_tool_reasoning_policy(
+                    getattr(self.llm_client, "settings", None),
+                    routine=routine,
+                ),
+            }
+        )
+        if hasattr(self.llm_client, 'complete'):
+            try:
+                response = self.llm_client.complete(request)
+            except Exception as exc:
+                self.enhancement_budget.reconcile_failure(reservation, exc)
+                raise
+            usage = getattr(response, "usage", None)
+            actual_tokens = None
+            if isinstance(usage, dict):
+                actual_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+            self.enhancement_budget.reconcile(
+                reservation,
+                actual_tokens=int(actual_tokens) if actual_tokens is not None else None,
+                finish_reason=getattr(response, "finish_reason", None),
+                response_empty=not bool(str(getattr(response, "content", "") or "")),
+            )
+            if str(getattr(response, "finish_reason", "") or "").lower() in {
+                "length",
+                "max_tokens",
+            }:
+                raise InvalidLLMResponseError(
+                    "Code generation reached its completion limit; truncated source is not safe to apply.",
+                    response_text=str(getattr(response, "content", "") or ""),
+                    usage=usage if isinstance(usage, dict) else None,
+                    finish_reason=getattr(response, "finish_reason", None),
+                )
             return response.content
         elif hasattr(self.llm_client, 'generate'):
-            response = self.llm_client.generate(prompt)
+            response = self.llm_client.generate("\n\n".join(message.content for message in request.messages))
         elif hasattr(self.llm_client, 'chat'):
-            response = self.llm_client.chat([{"role": "user", "content": prompt}])
+            response = self.llm_client.chat([message.model_dump() for message in request.messages])
         else:
             # 如果 LLM 客户端没有标准方法，尝试直接调用
-            response = self.llm_client(prompt)
+            response = self.llm_client("\n\n".join(message.content for message in request.messages))
 
         # 确保返回字符串
         if isinstance(response, dict):

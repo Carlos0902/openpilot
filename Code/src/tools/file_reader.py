@@ -6,6 +6,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
+from memory.project_path_resolver import ensure_resolved_path
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
 from core.tool_contracts import (
@@ -130,7 +131,17 @@ def file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
         PermissionError: If no read permission
         ValueError: If file too large or encoding error
     """
-    file_path = Path(params["file_path"])
+    project_path = params.get("project_path")
+    file_path = (
+        ensure_resolved_path(
+            params["file_path"],
+            project_path,
+            operation="read",
+            intent_kind="existing_file",
+        )
+        if project_path
+        else Path(params["file_path"])
+    )
     encoding = params.get("encoding", "utf-8")
     max_size_mb = params.get("max_size_mb", 10)
     read_mode = str(params.get("read_mode", "full") or "full").lower()

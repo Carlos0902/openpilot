@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import uuid
 from html import escape
 from pathlib import Path
@@ -11,8 +12,13 @@ from typing import Any
 
 from autonomous_iteration.models import EvaluationResult, IterationResult
 from autonomous_iteration.task_models import Task, TaskPriority
+from core.llm import LLMMessage
 from memory.agents.git_manager_agent import GitManagerAgent, GitManagerError
+from memory.context_assembly import build_context_llm_request
 from metadata import (
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
+    EnhancementCompletionRequirement,
     FailureMetadata,
     GitSnapshotMetadata,
     ResultStatus,
@@ -84,6 +90,22 @@ class AutonomousTaskExecutor:
 
         target_file = Path(resolution.primary_file.file_path).expanduser()
         edit_kind = resolution.recommended_edit_kind
+        readme_update_requested = self._designed_task_targets_file(
+            improvement_report,
+            project_path=project_path,
+            target_file=readme_path,
+        )
+        authorized_write_files = [str(target_file)]
+        if readme_update_requested:
+            authorized_write_files.append(str(readme_path))
+        task = task.model_copy(
+            update={
+                "kind": "repair" if is_repair else "implement",
+                "read_files": [str(target_file)],
+                "write_files": authorized_write_files,
+                "validation_command": run_command or evaluation.run_command or "",
+            }
+        )
         try:
             current_content = target_file.read_text(encoding="utf-8")
         except OSError as exc:
@@ -317,6 +339,7 @@ class AutonomousTaskExecutor:
             )
         environment_payload = environment_result.output
         run_command = str(environment_payload.get("run_command") or run_command)
+        task = task.model_copy(update={"validation_command": run_command})
 
         review_prompt_context = self.runtime._build_prompt_context(
             original_goal=goal,
@@ -356,31 +379,39 @@ class AutonomousTaskExecutor:
             success=review_result.success,
             error=review_result.error_message,
         )
-        readme_result = self.runtime._execute_fast_tool(
-            task=task,
-            step_id=f"iteration_{iteration}_readme_tool",
-            tool_name="readme_tool",
-            input_metadata=ToolInputMetadata.from_mapping("readme_tool", {
-                "project_path": str(project_path),
-                "project_summary": f"{goal}\n\nRecent Improvements:\n- " + "\n- ".join(
-                    (getattr(self.runtime, "_project_improvement_actions", []) or []) + actions
-                ),
-                "written_files": written_files,
-                "entry_files": [str(target_file)],
-                "run_command": run_command,
-                "setup_commands": environment_payload.get("setup_commands") or [],
-                "environment": self.runtime._readme_environment_context(environment_payload),
-                "overwrite": True,
-            }),
-            parent_task_id=self.runtime._dashboard_stage_id("execution"),
-        )
-        self._log_agent(
-            "readme_update_completed",
-            {"iteration": iteration},
-            {"success": readme_result.success},
-            success=readme_result.success,
-            error=readme_result.error_message,
-        )
+        readme_result = None
+        if readme_update_requested:
+            readme_result = self.runtime._execute_fast_tool(
+                task=task,
+                step_id=f"iteration_{iteration}_readme_tool",
+                tool_name="readme_tool",
+                input_metadata=ToolInputMetadata.from_mapping("readme_tool", {
+                    "project_path": str(project_path),
+                    "project_summary": f"{goal}\n\nRecent Improvements:\n- " + "\n- ".join(
+                        (getattr(self.runtime, "_project_improvement_actions", []) or []) + actions
+                    ),
+                    "written_files": written_files,
+                    "entry_files": [str(target_file)],
+                    "run_command": run_command,
+                    "setup_commands": environment_payload.get("setup_commands") or [],
+                    "environment": self.runtime._readme_environment_context(environment_payload),
+                    "overwrite": True,
+                }),
+                parent_task_id=self.runtime._dashboard_stage_id("execution"),
+            )
+            self._log_agent(
+                "readme_update_completed",
+                {"iteration": iteration},
+                {"success": readme_result.success},
+                success=readme_result.success,
+                error=readme_result.error_message,
+            )
+        else:
+            self._log_agent(
+                "readme_update_skipped",
+                {"iteration": iteration},
+                {"reason": "not_in_designed_task_targets"},
+            )
 
         review_payload = review_result.output or {}
         review_approved = bool(review_payload.get("approved", True))
@@ -406,26 +437,28 @@ class AutonomousTaskExecutor:
                 write_result = retry_result["write_result"]
                 review_payload = review_result.output or {}
                 review_approved = bool(review_payload.get("approved", True))
-                readme_result = self.runtime._execute_fast_tool(
-                    task=task,
-                    step_id=f"iteration_{iteration}_product_intent_retry_readme_tool",
-                    tool_name="readme_tool",
-                    input_metadata=ToolInputMetadata.from_mapping("readme_tool", {
-                        "project_path": str(project_path),
-                        "project_summary": f"{goal}\n\nRecent Improvements:\n- " + "\n- ".join(
-                            (getattr(self.runtime, "_project_improvement_actions", []) or []) + actions
-                        ),
-                        "written_files": written_files,
-                        "entry_files": [str(target_file)],
-                        "run_command": run_command,
-                        "setup_commands": environment_payload.get("setup_commands") or [],
-                        "environment": self.runtime._readme_environment_context(environment_payload),
-                        "overwrite": True,
-                    }),
-                    parent_task_id=self.runtime._dashboard_stage_id("execution"),
-                )
+                if readme_update_requested:
+                    readme_result = self.runtime._execute_fast_tool(
+                        task=task,
+                        step_id=f"iteration_{iteration}_product_intent_retry_readme_tool",
+                        tool_name="readme_tool",
+                        input_metadata=ToolInputMetadata.from_mapping("readme_tool", {
+                            "project_path": str(project_path),
+                            "project_summary": f"{goal}\n\nRecent Improvements:\n- " + "\n- ".join(
+                                (getattr(self.runtime, "_project_improvement_actions", []) or []) + actions
+                            ),
+                            "written_files": written_files,
+                            "entry_files": [str(target_file)],
+                            "run_command": run_command,
+                            "setup_commands": environment_payload.get("setup_commands") or [],
+                            "environment": self.runtime._readme_environment_context(environment_payload),
+                            "overwrite": True,
+                        }),
+                        parent_task_id=self.runtime._dashboard_stage_id("execution"),
+                    )
 
-        success = review_result.success and review_approved and readme_result.success
+        readme_succeeded = readme_result is None or readme_result.success
+        success = review_result.success and review_approved and readme_succeeded
         if success:
             self.runtime._project_improvement_actions = (getattr(self.runtime, "_project_improvement_actions", []) or []) + actions
         if self.runtime.enhanced_ui:
@@ -455,7 +488,10 @@ class AutonomousTaskExecutor:
             validation_passed=success,
             completed_successful_iteration=False,
             applied_actions=actions,
-            changed_files=[str(target_file)],
+            changed_files=[
+                str(target_file),
+                *([str(readme_path)] if readme_update_requested and readme_succeeded else []),
+            ],
             success=success,
             error=failure_reason,
             failure_stage=None if success else "Task Executor",
@@ -635,10 +671,10 @@ class AutonomousTaskExecutor:
         llm_client = getattr(self.runtime, "llm_client", None)
         if llm_client and hasattr(llm_client, "complete"):
             try:
-                from core.llm import LLMMessage, LLMRequest
-
                 response = llm_client.complete(
-                    LLMRequest(
+                    build_context_llm_request(
+                        llm_client,
+                        purpose=ContextRequestPurpose.TEXT_FILE_GENERATION,
                         messages=[
                             LLMMessage(
                                 role="user",
@@ -658,6 +694,7 @@ class AutonomousTaskExecutor:
                             )
                         ],
                         temperature=0.2,
+                        user_truncation=ContextCandidateTruncation.FORBIDDEN,
                     ),
                     max_retries=1,
                     use_cache=False,
@@ -748,6 +785,26 @@ class AutonomousTaskExecutor:
                 if isinstance(task, dict):
                     return task
         return {}
+
+    def _designed_task_targets_file(
+        self,
+        improvement_report: dict[str, Any],
+        *,
+        project_path: Path,
+        target_file: Path,
+    ) -> bool:
+        designed_task = self._primary_designed_task(improvement_report)
+        requested_targets = self._string_list(designed_task.get("target_files"))
+        if not requested_targets:
+            return False
+        canonical_target = target_file.expanduser().resolve(strict=False)
+        for raw_target in requested_targets:
+            candidate = Path(raw_target).expanduser()
+            if not candidate.is_absolute():
+                candidate = project_path / candidate
+            if candidate.resolve(strict=False) == canonical_target:
+                return True
+        return False
 
     def _target_file_hints(
         self,
@@ -1077,7 +1134,10 @@ class AutonomousTaskExecutor:
         if warning_check:
             fix_instruction += f"\nWarning reason: {warning_check.reason}"
             fix_instruction += f"\nRecommended fix: {warning_check.recommended_fix}"
-        issue_target_files = self._validation_issue_target_files(evaluation) or [str(target_file)]
+        issue_target_files = self._scope_failing_files_to_task(
+            self._validation_issue_target_files(evaluation),
+            [str(target_file)],
+        ) or [str(target_file)]
         snapshot = self._create_git_snapshot(
             project_path=target_file.parent,
             iteration=iteration,
@@ -1417,7 +1477,26 @@ class AutonomousTaskExecutor:
     def should_retry_code_generation_attempt(self, result: ToolExecutionEnvelopeMetadata) -> bool:
         if result.success:
             return False
-        return self.is_timeout_tool_result(result)
+        failure = result.failure
+        details = failure.details if failure and isinstance(failure.details, dict) else {}
+        provider_attempt = details.get("provider_attempt")
+        if not isinstance(provider_attempt, dict):
+            return False
+        if provider_attempt.get("finish_reason") != "length":
+            return False
+        usage = provider_attempt.get("usage")
+        if not isinstance(usage, dict):
+            return False
+        return any(
+            usage.get(key) is not None
+            for key in (
+                "input_tokens",
+                "prompt_tokens",
+                "output_tokens",
+                "completion_tokens",
+                "total_tokens",
+            )
+        )
 
     def build_project_improvement_prompt(
         self,
@@ -1500,7 +1579,19 @@ class AutonomousTaskExecutor:
         mode = mode or ("compact" if simplified else "full")
         step_prefix = "" if mode == "full" else f"{mode}_"
         prompt_context = prompt_context or {}
-        current_code = str(prompt_context.get("current_code") or "")
+        project_context = (
+            prompt_context.get("project_context")
+            if isinstance(prompt_context.get("project_context"), dict)
+            else {}
+        )
+        try:
+            current_code = target_file.read_text(encoding="utf-8")
+        except OSError:
+            current_code = str(
+                project_context.get("current_code_context")
+                or prompt_context.get("current_code")
+                or ""
+            )
         symbol_name = self._infer_target_symbol(current_code, prompt_context)
         tool_name = "code_editor" if symbol_name else "code_generator"
         input_metadata_payload = {
@@ -1523,11 +1614,37 @@ class AutonomousTaskExecutor:
             input_metadata_payload["operation_kind"] = "file_replace"
         if prompt_context:
             input_metadata_payload["prompt_context"] = prompt_context
+        input_metadata = ToolInputMetadata.from_mapping(tool_name, input_metadata_payload)
+        if tool_name in {"code_generator", "code_editor"}:
+            budget_resolver = getattr(self.runtime, "_enhancement_runtime_budget", None)
+            if callable(budget_resolver):
+                improvement_policy = getattr(
+                    self.runtime, "project_improvement_policy", None
+                )
+                input_metadata = input_metadata.model_copy(
+                    update={
+                        "runtime_handles": {
+                            **input_metadata.runtime_handles,
+                            "_runtime_budget": budget_resolver(),
+                            "_enhancement_requirement": (
+                                EnhancementCompletionRequirement.REQUIRED
+                                if bool(
+                                    getattr(
+                                        improvement_policy,
+                                        "controls_top_level_success",
+                                        False,
+                                    )
+                                )
+                                else EnhancementCompletionRequirement.OPTIONAL
+                            ),
+                        }
+                    }
+                )
         result = self.runtime._execute_fast_tool(
             task=task,
             step_id=f"iteration_{iteration}_{step_prefix}{tool_name}",
             tool_name=tool_name,
-            input_metadata=ToolInputMetadata.from_mapping(tool_name, input_metadata_payload),
+            input_metadata=input_metadata,
             parent_task_id=self.runtime._dashboard_stage_id("execution"),
         )
         self._log_agent(
@@ -1556,19 +1673,25 @@ class AutonomousTaskExecutor:
         ]
         if not symbols:
             return None
-        haystack = " ".join(
-            str(item)
-            for item in (
-                prompt_context.get("tool_task"),
-                prompt_context.get("iteration_goal"),
-                prompt_context.get("agent_instruction"),
-                prompt_context.get("acceptance_criteria"),
-                prompt_context.get("improvement_report_summary"),
-            )
-        ).lower()
-        for symbol in symbols:
-            if symbol.lower() in haystack:
-                return symbol
+        evidence_layers = (
+            prompt_context.get("iteration_goal"),
+            prompt_context.get("acceptance_criteria"),
+            prompt_context.get("tool_task"),
+            prompt_context.get("improvement_report_summary"),
+        )
+        for evidence in evidence_layers:
+            haystack = str(evidence or "").lower()
+            if not haystack:
+                continue
+            matches = []
+            for symbol in symbols:
+                escaped = re.escape(symbol.lower())
+                if re.search(rf"(?<![a-z0-9_]){escaped}(?![a-z0-9_])", haystack):
+                    matches.append(symbol)
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                return None
         return None
 
     def is_timeout_tool_result(self, result: ToolExecutionEnvelopeMetadata) -> bool:

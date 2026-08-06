@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -15,13 +15,14 @@ from metadata.artifacts import (
     TextArtifactMetadata,
 )
 from metadata.base import JsonValue, MetadataBase, MetadataKind
+from metadata.project import EnvironmentOperation
 from metadata.results import FailureMetadata, ToolResultMetadata
 
 
 class ToolInputMetadata(MetadataBase):
     """Strict tool input payload used instead of free-form params."""
 
-    kind: MetadataKind = MetadataKind.TOOL_INPUT
+    kind: Literal[MetadataKind.TOOL_INPUT] = MetadataKind.TOOL_INPUT
     tool_name: str = ""
 
     # File/text/code fields
@@ -83,6 +84,9 @@ class ToolInputMetadata(MetadataBase):
     llm_cleanup: bool | None = None
     cleanup_instruction: str | None = None
     command: str | None = None
+    requested_command: str | None = None
+    effective_interpreter: str | None = None
+    environment_id: str | None = None
     mode: str | None = None
     timeout: int | None = None
     cwd: str | None = None
@@ -104,6 +108,7 @@ class ToolInputMetadata(MetadataBase):
     entry_files: list[str] = Field(default_factory=list)
     run_command: str | None = None
     env_name: str | None = None
+    environment_operation: EnvironmentOperation | None = None
     install: bool | None = None
     readme_path: str | None = None
     memory_query: str | None = None
@@ -111,6 +116,12 @@ class ToolInputMetadata(MetadataBase):
     validation_result: dict[str, JsonValue] = Field(default_factory=dict)
     stack_preset_update: dict[str, JsonValue] = Field(default_factory=dict)
     memory_context: dict[str, JsonValue] = Field(default_factory=dict)
+    # Digest of the authoritative session-turn ledger used to derive any
+    # model-facing dialog candidates. Raw ingress remains a runtime handle.
+    session_turn_source_hash: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
     iteration: int | None = None
     include_environment: bool | None = None
     limit: int | None = None
@@ -172,7 +183,7 @@ class ToolInputMetadata(MetadataBase):
 
 
 class ToolSelectionMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.TOOL_SELECTION
+    kind: Literal[MetadataKind.TOOL_SELECTION] = MetadataKind.TOOL_SELECTION
     step_id: str
     tool_name: str
     reason: str
@@ -185,7 +196,7 @@ class ToolSelectionMetadata(MetadataBase):
 
 
 class ToolContractMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.TOOL_CONTRACT
+    kind: Literal[MetadataKind.TOOL_CONTRACT] = MetadataKind.TOOL_CONTRACT
     tool_name: str
     input_metadata_type: str
     output_metadata_type: str
@@ -198,7 +209,7 @@ class ToolContractMetadata(MetadataBase):
 
 
 class ToolChainMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.TOOL_CHAIN
+    kind: Literal[MetadataKind.TOOL_CHAIN] = MetadataKind.TOOL_CHAIN
     tool_results: list[ToolResultMetadata] = Field(default_factory=list)
     final_result: ToolResultMetadata | None = None
 
@@ -206,7 +217,7 @@ class ToolChainMetadata(MetadataBase):
 class ToolContextMetadata(MetadataBase):
     """Runtime context attached to a tool event without changing tool inputs."""
 
-    kind: MetadataKind = MetadataKind.TOOL_CONTEXT
+    kind: Literal[MetadataKind.TOOL_CONTEXT] = MetadataKind.TOOL_CONTEXT
     session_id: str = ""
     task_id: str = ""
     step_id: str = ""
@@ -225,7 +236,7 @@ class ToolContextMetadata(MetadataBase):
 class ToolCallMetadata(MetadataBase):
     """One requested tool call inside a typed tool event loop."""
 
-    kind: MetadataKind = MetadataKind.TOOL_CALL
+    kind: Literal[MetadataKind.TOOL_CALL] = MetadataKind.TOOL_CALL
     session_id: str
     task_id: str
     step_id: str
@@ -244,7 +255,7 @@ class ToolCallMetadata(MetadataBase):
 class ToolErrorMetadata(MetadataBase):
     """Recoverable or terminal tool protocol/execution error."""
 
-    kind: MetadataKind = MetadataKind.TOOL_ERROR
+    kind: Literal[MetadataKind.TOOL_ERROR] = MetadataKind.TOOL_ERROR
     session_id: str
     task_id: str
     step_id: str
@@ -265,7 +276,7 @@ class ToolErrorMetadata(MetadataBase):
 class ToolEventMetadata(MetadataBase):
     """Lifecycle event for a tool call in the event loop."""
 
-    kind: MetadataKind = MetadataKind.TOOL_EVENT
+    kind: Literal[MetadataKind.TOOL_EVENT] = MetadataKind.TOOL_EVENT
     session_id: str
     task_id: str
     step_id: str
@@ -288,7 +299,7 @@ class ToolEventMetadata(MetadataBase):
 class ToolLoopMetadata(MetadataBase):
     """Complete typed event-loop trace for one task."""
 
-    kind: MetadataKind = MetadataKind.TOOL_LOOP
+    kind: Literal[MetadataKind.TOOL_LOOP] = MetadataKind.TOOL_LOOP
     session_id: str
     task_id: str
     status: str

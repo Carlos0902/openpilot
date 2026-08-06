@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from memory.project_path_resolver import ensure_resolved_path
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
 from core.tool_contracts import PermissionLevel, ToolCapability, ToolDefinition, ToolFailureMode
@@ -54,7 +55,17 @@ FILE_PATCH_WRITER_DEFINITION = ToolDefinition(
 @metadata_tool_result("file_patch_writer")
 def file_patch_writer_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
     params = input_metadata.to_params()
-    file_path = Path(str(params["file_path"])).expanduser()
+    project_path = params.get("project_path")
+    file_path = (
+        ensure_resolved_path(
+            params["file_path"],
+            project_path,
+            operation="patch",
+            intent_kind="existing_file",
+        )
+        if project_path
+        else Path(str(params["file_path"])).expanduser()
+    )
     encoding = str(params.get("encoding") or "utf-8")
     if not file_path.exists() or not file_path.is_file():
         raise FileNotFoundError(f"Patch target file not found: {file_path}")

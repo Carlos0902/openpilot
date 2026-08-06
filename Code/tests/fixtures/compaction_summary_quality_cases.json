@@ -1,0 +1,14 @@
+{
+  "history_lengths": ["short", "medium", "long"],
+  "relevance": ["strong", "partial", "irrelevant"],
+  "purposes": ["iteration_goal", "iteration_task_design", "code_generation", "bug_fix"],
+  "failure_modes": ["valid", "empty", "malformed", "overlong", "unknown_usage"],
+  "required_invariants": [
+    "required_constraint_recall",
+    "recent_suffix_unchanged",
+    "authority_fields_absent",
+    "source_evidence_linked",
+    "bounded_summary",
+    "deterministic_fallback"
+  ]
+}

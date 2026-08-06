@@ -13,13 +13,20 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from metadata import (
+    ContextRequestPurpose,
+    ToolContractMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+    metadata_tool_result,
+)
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urldefrag, urljoin, urlparse
 
 import httpx
 
 from core.llm import LLMClient, LLMMessage, LLMRequest
+from memory.context_assembly import build_context_llm_request
 from core.tool_contracts import (
     PermissionLevel,
     ToolCapability,
@@ -660,7 +667,9 @@ def _llm_search_query_variants(*, query: str, llm_client: Any) -> list[str]:
     )
     try:
         response = llm_client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                llm_client,
+                purpose=ContextRequestPurpose.WEB_QUERY_GENERATION,
                 messages=[
                     LLMMessage(
                         role="system",
@@ -1008,7 +1017,9 @@ def _select_redirect_links_with_llm(
     )
     try:
         response = llm_client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                llm_client,
+                purpose=ContextRequestPurpose.WEB_LINK_SELECTION,
                 messages=[
                     LLMMessage(
                         role="system",
@@ -1112,7 +1123,9 @@ def _clean_with_llm(
     )
     try:
         response = llm_client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                llm_client,
+                purpose=ContextRequestPurpose.WEB_CLEANUP,
                 messages=[
                     LLMMessage(
                         role="system",

@@ -9,11 +9,14 @@ from typing import Any
 
 from core.command_approval import CommandApprovalGate
 from core.llm import LLMClient, LLMMessage, LLMRequest
+from memory.context_assembly import build_context_llm_request
 from core.tool_contracts import PermissionLevel, ToolCapability, ToolDefinition, ToolFailureMode
 from metadata import (
     BugFixAttemptMetadata,
     BugFixResultMetadata,
     CommandArtifactMetadata,
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
     FailureMetadata,
     ResultStatus,
     ToolContractMetadata,
@@ -494,7 +497,9 @@ def _request_fix(
     fix_instruction: str,
     terminal_smoke: bool,
 ) -> dict[str, Any]:
-    request = LLMRequest(
+    request = build_context_llm_request(
+        llm_client,
+        purpose=ContextRequestPurpose.BUG_FIX,
         messages=[
             LLMMessage(
                 role="system",
@@ -542,6 +547,7 @@ def _request_fix(
         temperature=0.0,
         max_tokens=6000,
         trace_info={"tool": "bug_fix_tool", "task": "runtime_bug_fix", "iteration": iteration},
+        user_truncation=ContextCandidateTruncation.FORBIDDEN,
     )
     response = llm_client.complete(request)
     if getattr(response, "parsed_json", None) is not None:

@@ -81,7 +81,12 @@ class MetadataKind(str, Enum):
     TASK_GRAPH_EDGE = "task_graph_edge"
     EXECUTION_STATE = "execution_state"
     RUNTIME_BUDGET = "runtime_budget"
+    CONTEXT_SELECTION = "context_selection"
+    RUNTIME_CHECKPOINT = "runtime_checkpoint"
+    RUNTIME_RESUME_DECISION = "runtime_resume_decision"
     RUNTIME_STATE = "runtime_state"
+    PATH_INTENT = "path_intent"
+    PATH_RESOLUTION = "path_resolution"
     DECISION_NEED = "decision_need"
     EDIT_PLAN = "edit_plan"
     VERIFICATION_PLAN = "verification_plan"
@@ -213,7 +218,7 @@ def _json_safe(value: Any, seen: set[int]) -> Any:
         seen.add(object_id)
         try:
             return {
-                str(key): _json_safe(item, seen)
+                str(key.value if isinstance(key, Enum) else key): _json_safe(item, seen)
                 for key, item in value.items()
                 if not str(key).startswith("_")
             }

@@ -129,6 +129,53 @@ class GitManagerAgent:
             target_files=[str(item) for item in target_files or []],
         )
 
+    def restore_files(
+        self,
+        project_path: str | Path,
+        *,
+        source_ref: str,
+        target_files: list[str],
+    ) -> list[str]:
+        """Restore explicit project-local files to one safety snapshot."""
+
+        project = self._project(project_path)
+        self._ensure_git_available()
+        if not source_ref:
+            raise GitManagerError("restore requires a safety snapshot ref")
+        restored: list[str] = []
+        for raw_path in target_files:
+            candidate = Path(raw_path).expanduser()
+            resolved = candidate.resolve() if candidate.is_absolute() else (project / candidate).resolve()
+            try:
+                relative = resolved.relative_to(project)
+            except ValueError as exc:
+                raise GitManagerError(f"restore target escapes project boundary: {raw_path}") from exc
+            if not relative.parts:
+                raise GitManagerError("restore target cannot be the project root")
+            relative_text = str(relative)
+            tracked = self._git(
+                project,
+                "cat-file",
+                "-e",
+                f"{source_ref}:{relative_text}",
+                check=False,
+            ).returncode == 0
+            if tracked:
+                self._git(
+                    project,
+                    "restore",
+                    "--source",
+                    source_ref,
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    relative_text,
+                )
+            elif resolved.exists() and resolved.is_file():
+                resolved.unlink()
+            restored.append(str(resolved))
+        return restored
+
     def repository_metadata(self, project_path: str | Path, *, ignored_paths: list[str] | None = None) -> GitRepositoryMetadata:
         project = self._project(project_path)
         status = self._status(project) if (project / ".git").exists() else []

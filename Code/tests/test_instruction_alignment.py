@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from autonomous_iteration.models import DesignedImprovementTask
 from autonomous_iteration.agents.context_loader import (
     DEFAULT_AUTONOMOUS_ITERATION_SYSTEM_PROMPT,
@@ -19,7 +21,13 @@ from memory.agents.virtual_environment_manager import VirtualEnvironmentManager
 from memory.memory_models import MemoryRecord, MemoryType
 from memory.memory_store import MemoryStore
 from tools.task_classifier import task_classifier_executor
-from metadata import TaskRouteMetadata, ToolInputMetadata
+from metadata import (
+    ConversationIdentity,
+    SessionConstraintState,
+    SessionIngressState,
+    TaskRouteMetadata,
+    ToolInputMetadata,
+)
 from tools.builtin_tools import register_builtin_tools
 from tools.tool_executor import ToolExecutor
 from tools.tool_selection import ToolSelection
@@ -143,6 +151,109 @@ def test_autonomous_iteration_pipeline_stage_order_and_decomposition() -> None:
     assert decomposition["depth"] == 1
     assert decomposition["difficulty"]["level"] == "low"
     assert len(decomposition["subtasks"]) == 2
+
+
+def test_context_loader_forwards_session_constraint_state() -> None:
+    captured: dict[str, object] = {}
+
+    class Builder:
+        def build(self, query, **kwargs):
+            captured.update(kwargs)
+            return {"query": query}
+
+    state = SessionConstraintState(session_id="session-1", revision=2)
+    pipeline = AutonomousIterationPipeline(
+        context_loader=ContextLoaderAgent(memory_context_builder=Builder()),
+        goal_maker=GoalMakerAgent(lambda *args: []),
+        task_designer=TaskDesignerAgent(lambda *args: []),
+        task_decomposer=TaskDecomposerAgent(lambda tasks: [], lambda tasks: {}),
+    )
+
+    pipeline.load_context("goal", ".", 0, session_constraints=state)
+
+    assert captured["session_constraints"] is state
+    assert captured["project_index_mode"] == "read_only"
+    assert captured["strict_sources"] is True
+
+
+def test_context_loader_forwards_optional_session_ingress_state() -> None:
+    captured: dict[str, object] = {}
+
+    class Builder:
+        def build(self, query, **kwargs):
+            captured.update(kwargs)
+            return {"query": query}
+
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root="/project",
+        )
+    )
+    ContextLoaderAgent(memory_context_builder=Builder()).run(
+        "goal",
+        "/project",
+        session_ingress_state=state,
+    )
+
+    assert captured["session_ingress_state"] is state
+
+
+def test_context_loader_rejects_session_ingress_project_identity_mismatch() -> None:
+    class Builder:
+        def build(self, query, **kwargs):
+            return {"query": query}
+
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root="/owned-project",
+        )
+    )
+
+    with pytest.raises(ValueError, match="project identity"):
+        ContextLoaderAgent(memory_context_builder=Builder()).run(
+            "goal",
+            "/other-project",
+            session_ingress_state=state,
+        )
+
+
+def test_pipeline_forwards_session_ingress_state_to_context_loader() -> None:
+    captured: dict[str, object] = {}
+
+    class ContextLoader:
+        def run(self, goal, project_path, iteration, **kwargs):
+            captured.update(kwargs)
+            return {"query": goal}
+
+    pipeline = AutonomousIterationPipeline(
+        context_loader=ContextLoader(),
+        goal_maker=GoalMakerAgent(lambda *args: []),
+        task_designer=TaskDesignerAgent(lambda *args: []),
+        task_decomposer=TaskDecomposerAgent(lambda tasks: [], lambda tasks: {}),
+    )
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root="/project",
+        )
+    )
+
+    pipeline.load_context(
+        "goal",
+        "/project",
+        0,
+        session_ingress_state=state,
+    )
+
+    assert captured["session_ingress_state"] is state
 
 
 def test_tool_executor_structured_logs_include_source_type(tmp_path) -> None:
@@ -362,8 +473,8 @@ def test_execute_goal_interactive_routes_with_task_classifier(monkeypatch) -> No
         calls.append(("agent", task))
         return "agent-result"
 
-    def fake_autopilot(goal, ui, tracker, llm_client, logger, runtime_options):
-        calls.append(("autopilot", goal))
+    def fake_autopilot(goal, ui, tracker, llm_client, logger, runtime_options, context=None):
+        calls.append(("autopilot", goal, dict(context or {})))
         return "autopilot-result"
 
     monkeypatch.setattr(enhanced_cli, "_execute_agent_generator", fake_agent)
@@ -393,8 +504,11 @@ def test_execute_goal_interactive_routes_with_task_classifier(monkeypatch) -> No
         )
         == "autopilot-result"
     )
-    assert calls[-1] == ("autopilot", "帮我做一个项目")
-    assert calls == [("agent", "生成一个可复用的研究报告 agent"), ("autopilot", "帮我做一个项目")]
+    assert calls[-1][0:2] == ("autopilot", "帮我做一个项目")
+    assert calls[-1][2]["source"] == "interactive"
+    assert str(calls[-1][2]["task_id"]).startswith("cli_")
+    assert calls[0] == ("agent", "生成一个可复用的研究报告 agent")
+    assert len(calls) == 2
 
 
 def test_execute_goal_interactive_intercepts_shell_activation(monkeypatch) -> None:
@@ -426,3 +540,17 @@ def test_execute_goal_interactive_intercepts_shell_activation(monkeypatch) -> No
     assert result is None
     assert calls == []
     assert any("Shell state command" in message for message in UI.console.messages)
+
+
+def test_runtime_diagnostics_are_enabled_by_default_and_explicitly_disableable(monkeypatch) -> None:
+    from ui import enhanced_cli
+
+    monkeypatch.delenv("OPENPILOT_RUNTIME_DIAGNOSTICS_ENABLED", raising=False)
+    assert enhanced_cli._runtime_diagnostics_enabled() is True
+
+    for value in ("0", "false", "no", "off"):
+        monkeypatch.setenv("OPENPILOT_RUNTIME_DIAGNOSTICS_ENABLED", value)
+        assert enhanced_cli._runtime_diagnostics_enabled() is False
+
+    monkeypatch.setenv("OPENPILOT_RUNTIME_DIAGNOSTICS_ENABLED", "1")
+    assert enhanced_cli._runtime_diagnostics_enabled() is True

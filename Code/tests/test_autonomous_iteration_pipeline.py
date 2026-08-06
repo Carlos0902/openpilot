@@ -3,11 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 
-from autonomous_iteration.models import EvaluationResult, IterationResult
+from autonomous_iteration.models import EvaluationResult, IterationResult, ProjectStateSnapshot
 from autonomous_iteration.agents.iteration_agent import AutonomousIterationAgent
 from autonomous_iteration.project_iteration import ProjectIterationHelper
+from memory.agents.git_manager_agent import GitManagerAgent
+from memory.memory_models import MemoryType
+from memory.memory_store import MemoryStore
+from core.exceptions import ContextSourceError
+from metadata import ConversationIdentity, SessionIngressState
 
 
 class FakeEvaluator:
@@ -94,6 +100,8 @@ class FakeMemoryContextBuilder:
         include_environment: bool,
         limit: int,
         system_prompt: str = "",
+        project_index_mode: str = "refresh",
+        strict_sources: bool = False,
     ) -> dict:
         return {
             "query": query,
@@ -105,6 +113,40 @@ class FakeMemoryContextBuilder:
             "environment_context": [{"content": "Python environment ready."}],
             "prompt_text": f"## System Prompt\n{system_prompt}\n\n## Dialog Context\nUSER: 原始用户需求",
         }
+
+
+class RecordingJsonLLM:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.context_selections: list[object] = []
+
+    def complete(self, request, **kwargs):
+        prompt = "\n\n".join(message.content for message in request.messages)
+        self.prompts.append(prompt)
+        self.context_selections.append(request.context_selection)
+        if "Goal Maker Agent" in prompt:
+            parsed_json = {
+                "goals": [
+                    {
+                        "id": "goal-1",
+                        "title": "Improve context budgeting",
+                        "acceptance_criteria": ["Context evidence is not duplicated"],
+                    }
+                ]
+            }
+        else:
+            parsed_json = {
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "goal_id": "goal-1",
+                        "description": "Remove duplicated context evidence",
+                        "target_files": ["app.py"],
+                        "acceptance_criteria": ["Prompt contains one context copy"],
+                    }
+                ]
+            }
+        return SimpleNamespace(parsed_json=parsed_json, content="")
 
 
 def _project_state(project_path: Path) -> dict:
@@ -119,6 +161,81 @@ def _project_state(project_path: Path) -> dict:
         "validation_context": {},
         "safe_target_files": [str(project_path / "app.py")],
     }
+
+
+def test_iteration_agent_forwards_session_ingress_state_to_pipeline(tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class Pipeline:
+        def load_context(self, goal, project_path, iteration, **kwargs):
+            captured.update(kwargs)
+            return {"query": goal}
+
+    agent = object.__new__(AutonomousIterationAgent)
+    agent.pipeline = Pipeline()
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="session-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root=str(tmp_path),
+        )
+    )
+
+    result = agent._load_context(
+        goal="Improve project",
+        project_path=tmp_path,
+        iteration=0,
+        session_ingress_state=state,
+    )
+
+    assert result["query"] == "Improve project"
+    assert captured["session_ingress_state"] is state
+
+
+def test_iteration_agent_does_not_turn_context_source_failure_into_empty_success() -> None:
+    class Pipeline:
+        def load_context(self, *args, **kwargs):
+            raise OSError("context source unavailable")
+
+    agent = object.__new__(AutonomousIterationAgent)
+    agent.pipeline = Pipeline()
+
+    with pytest.raises(ContextSourceError, match="Context source unavailable"):
+        agent._load_context(
+            goal="Inspect project",
+            project_path=".",
+            iteration=0,
+        )
+
+
+def test_goal_and_task_prompts_use_granular_memory_without_reloading_prompt_text(tmp_path) -> None:
+    marker = "UNIQUE_CONTEXT_FACT"
+    llm = RecordingJsonLLM()
+    agent = AutonomousIterationAgent(FakeEvaluator(), llm_client=llm)
+    project_state = ProjectStateSnapshot(
+        project_path=str(tmp_path),
+        safe_target_files=["app.py"],
+        memory_records=[{"id": "fact", "content": marker, "attributes": {}}],
+        memory_context={
+            "dialog_context": [{"role": "user", "content": marker}],
+            "related_memories": [{"content": marker}],
+            "prompt_text": f"## Dialog Context\nUSER: {marker}",
+            "context_selection": {
+                "kind": "context_selection",
+                "max_prompt_chars": 500,
+                "final_prompt_chars": 40,
+            },
+        },
+    )
+    evaluation = FakeEvaluator().evaluate_project()
+
+    goals = agent._make_goals(project_state, evaluation, {}, 0)
+    agent._design_tasks(project_state, goals[0], {}, 0)
+
+    assert len(llm.prompts) == 2
+    assert all(prompt.count(marker) == 1 for prompt in llm.prompts)
+    assert all(selection is not None for selection in llm.context_selections)
 
 
 def test_autonomous_iteration_events_and_memory_context(tmp_path) -> None:
@@ -228,11 +345,13 @@ def test_autonomous_iteration_repair_path_reports_full_stage_chain(tmp_path) -> 
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("print(missing)\n", encoding="utf-8")
+    memory_store = MemoryStore(tmp_path / "memory")
     agent = AutonomousIterationAgent(
         FailingEvaluator(),
         required_successful_improvements=1,
         max_iteration_attempts=2,
         memory_context_builder=FakeMemoryContextBuilder(),
+        memory_store=memory_store,
     )
 
     def apply_improvement(iteration, evaluation, actions, improvement_report, is_repair):
@@ -273,6 +392,11 @@ def test_autonomous_iteration_repair_path_reports_full_stage_chain(tmp_path) -> 
     assert events.index("decomposition_started") < events.index("decomposition")
     assert events.index("task_designer") < events.index("decomposition")
     assert events.index("decomposition") < events.index("iteration_started")
+    failed_memory = memory_store.load_all(MemoryType.TASK)[0]
+    assert failed_memory.attributes["project_path"] == str(project.resolve())
+    assert failed_memory.attributes["failure_stage"] == "Task Executor"
+    assert failed_memory.attributes["failed_tool"] == "code_generator"
+    assert failed_memory.attributes["selected_candidate_id"] == reports[0]["selected_candidate"]["candidate_id"]
 
 
 def test_autonomous_iteration_task_executor_failure_stage_remains_compatible(tmp_path) -> None:
@@ -353,7 +477,7 @@ def test_repair_attempt_does_not_consume_successful_improvement_count(tmp_path) 
     assert result["iterations"][0].completed_successful_iteration is False
 
 
-def test_budget_exhaustion_happens_before_next_iteration_setup(tmp_path) -> None:
+def test_failed_modification_stops_before_next_iteration_setup(tmp_path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "app.py").write_text("print('hello')\n", encoding="utf-8")
@@ -385,12 +509,54 @@ def test_budget_exhaustion_happens_before_next_iteration_setup(tmp_path) -> None
     )
 
     assert result["success"] is False
-    assert result["failure_stage"] == "Iteration Budget"
-    assert result["failed_tool"] == "iteration_controller"
-    assert result["attempts_used"] == result["max_iteration_attempts"]
-    assert events[-1] == "max_attempts_reached"
-    assert "project_state" not in events[events.index("max_attempts_reached") :]
-    assert "iteration_started" not in events[events.index("max_attempts_reached") :]
+    assert result["failure_stage"] == "Modification Evaluator"
+    assert result["failed_tool"] == "project_evaluator"
+    assert result["attempts_used"] == 1
+    assert events[-1] == "iteration_completed"
+    assert "max_attempts_reached" not in events
+    assert events.count("iteration_started") == 1
+
+
+def test_failed_optional_improvement_restores_pre_iteration_files(tmp_path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    app = project / "app.py"
+    app.write_text("print('verified core')\n", encoding="utf-8")
+    agent = AutonomousIterationAgent(
+        SequenceEvaluator([True, False]),
+        required_successful_improvements=1,
+        max_iteration_attempts=2,
+        memory_context_builder=FakeMemoryContextBuilder(),
+    )
+    applied_iterations: list[int] = []
+
+    def apply_improvement(iteration, evaluation, actions, improvement_report, is_repair):
+        applied_iterations.append(iteration)
+        app.write_text("raise RuntimeError('broken enhancement')\n", encoding="utf-8")
+        GitManagerAgent().snapshot(project, reason="post_write_environment_sync")
+        return IterationResult(
+            iteration=iteration,
+            validation_passed=False,
+            completed_successful_iteration=False,
+            applied_actions=actions,
+            changed_files=[str(app)],
+            success=True,
+        )
+
+    result = agent.run_project_pipeline(
+        goal="Improve project",
+        project_path=project,
+        written_files=[str(app)],
+        apply_improvement=apply_improvement,
+        read_project_state=lambda evaluation, iteration: _project_state(project),
+    )
+
+    assert result["success"] is False
+    assert app.read_text(encoding="utf-8") == "print('verified core')\n"
+    assert result["iterations"][0].rollback_applied is True
+    assert result["iterations"][0].rollback_files == [str(app)]
+    assert result["iterations"][0].rollback_snapshot_ref
+    assert applied_iterations == [1]
 
 
 def test_project_iteration_prompt_expands_attempt_budget(monkeypatch, tmp_path) -> None:
@@ -419,3 +585,5 @@ def test_project_iteration_prompt_expands_attempt_budget(monkeypatch, tmp_path) 
     assert autopilot.iterative_improvement.required_successful_improvements == 5
     assert autopilot.max_iteration_attempts == 8
     assert autopilot.iterative_improvement.max_iteration_attempts == 8
+    assert autopilot.project_improvement_policy.requirement == "required"
+    assert autopilot.project_improvement_policy.source == "user_selected"

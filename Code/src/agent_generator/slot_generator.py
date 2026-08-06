@@ -8,6 +8,8 @@ from typing import Any
 
 from agent_generator.models import Slot, SlotKind
 from core.llm import LLMClient, LLMMessage, LLMRequest
+from memory.context_assembly import build_context_llm_request
+from metadata import ContextRequestPurpose
 from ui.environment_guard import agent_generator_llm_error_message, is_socks_dependency_error, raise_for_missing_socksio
 
 
@@ -40,7 +42,9 @@ def generate_slots(task: str, *, llm_client: Any | None = None) -> list[Slot]:
 def _generate_slot_payload(task: str, client: Any) -> dict[str, Any]:
     try:
         response = client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                client,
+                purpose=ContextRequestPurpose.SLOT_GENERATION,
                 response_format="json_object",
                 temperature=0.2,
                 trace_info={"tool": "agent_generator", "task": "slot_generation"},
@@ -101,7 +105,9 @@ def _repair_slot_language(task: str, user_language: str, slots: list[Slot], clie
     }
     try:
         response = client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                client,
+                purpose=ContextRequestPurpose.SLOT_LANGUAGE_REPAIR,
                 response_format="json_object",
                 temperature=0.0,
                 trace_info={"tool": "agent_generator", "task": "slot_language_repair"},

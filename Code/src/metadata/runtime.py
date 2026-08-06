@@ -2,24 +2,115 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from metadata.base import JsonValue, MetadataBase, MetadataKind
+from metadata.agent_runtime import ContextSelectionMetadata
 from metadata.results import FailureMetadata, ResultStatus, TaskResultMetadata, ToolResultMetadata
 from metadata.tooling import ToolContextMetadata, ToolEventMetadata, ToolInputMetadata
 
 
+class ReasoningMode(str, Enum):
+    PROVIDER_DEFAULT = "provider_default"
+    DISABLED = "disabled"
+    ADAPTIVE = "adaptive"
+    ENABLED = "enabled"
+
+
+class ReasoningDecisionComplexity(str, Enum):
+    """Provider-neutral complexity of one model decision.
+
+    This is separate from completion reservation complexity so routing
+    reasoning cannot silently change the completion budget.
+    """
+
+    ROUTINE = "routine"
+    STANDARD = "standard"
+    COMPLEX = "complex"
+
+
+class ReasoningEffort(str, Enum):
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
+class UnsupportedReasoningBehavior(str, Enum):
+    REJECT = "reject"
+    CLAMP = "clamp"
+    PROVIDER_DEFAULT = "provider_default"
+
+
+class ReasoningResolution(str, Enum):
+    EXACT = "exact"
+    MAPPED = "mapped"
+    CLAMPED = "clamped"
+    OMITTED = "omitted"
+    UNSUPPORTED = "unsupported"
+
+
+class ReasoningCapabilityProfileId(str, Enum):
+    GENERIC_OPENAI_COMPATIBLE = "generic-openai-compatible"
+    OPENAI_CHAT_KNOWN = "openai-chat-known"
+    DEEPSEEK_CHAT_KNOWN = "deepseek-chat-known"
+
+
+class ReasoningTransportFamily(str, Enum):
+    OPENAI_CHAT_COMPLETIONS = "openai_chat_completions"
+
+
+class ReasoningPolicy(BaseModel):
+    """Provider-neutral reasoning intent owned by one LLM request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ReasoningMode = ReasoningMode.PROVIDER_DEFAULT
+    effort: ReasoningEffort | None = None
+    token_budget: int | None = Field(default=None, ge=0)
+    unsupported_behavior: UnsupportedReasoningBehavior = UnsupportedReasoningBehavior.REJECT
+
+    @model_validator(mode="after")
+    def _mode_fields_are_compatible(self) -> "ReasoningPolicy":
+        if self.mode in {ReasoningMode.PROVIDER_DEFAULT, ReasoningMode.DISABLED} and (
+            self.effort is not None or self.token_budget is not None
+        ):
+            raise ValueError("provider_default and disabled reasoning cannot set effort or token_budget")
+        return self
+
+
+class ResolvedReasoningPolicy(BaseModel):
+    """Capability-resolved reasoning observation used by transport and audit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested: ReasoningPolicy
+    effective_mode: ReasoningMode
+    effective_effort: ReasoningEffort | None = None
+    effective_token_budget: int | None = Field(default=None, ge=0)
+    resolution: ReasoningResolution
+    profile_id: ReasoningCapabilityProfileId
+    profile_version: str
+    transport_family: ReasoningTransportFamily
+
+
 class LLMRequestMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.LLM_REQUEST
+    kind: Literal[MetadataKind.LLM_REQUEST] = MetadataKind.LLM_REQUEST
     task: str | None = None
     purpose: str | None = None
     trace_info: dict[str, JsonValue] = Field(default_factory=dict)
+    context_selection: ContextSelectionMetadata | None = None
+    reasoning_policy: ReasoningPolicy = Field(default_factory=ReasoningPolicy)
+    resolved_reasoning_policy: ResolvedReasoningPolicy | None = None
 
 
 class LLMResponseMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.LLM_RESPONSE
+    kind: Literal[MetadataKind.LLM_RESPONSE] = MetadataKind.LLM_RESPONSE
     model: str = ""
     provider: str = ""
     usage: dict[str, JsonValue] = Field(default_factory=dict)
@@ -28,7 +119,7 @@ class LLMResponseMetadata(MetadataBase):
 
 
 class ExecutionContextMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.EXECUTION_CONTEXT
+    kind: Literal[MetadataKind.EXECUTION_CONTEXT] = MetadataKind.EXECUTION_CONTEXT
     execution_id: str
     tool_name: str
     step_id: str
@@ -40,7 +131,7 @@ class ExecutionContextMetadata(MetadataBase):
 
 
 class LogEventMetadata(MetadataBase):
-    kind: MetadataKind = MetadataKind.LOG_EVENT
+    kind: Literal[MetadataKind.LOG_EVENT] = MetadataKind.LOG_EVENT
     source_type: str
     source_name: str
     phase: str

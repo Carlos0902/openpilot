@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,24 @@ class TaskPriority(str, Enum):
     CRITICAL = "critical"
 
 
+TaskKind: TypeAlias = Literal[
+    "general",
+    "inspect",
+    "inspection",
+    "analysis",
+    "investigate",
+    "implement",
+    "repair",
+    "validate",
+    "validation",
+    "verify",
+    "test",
+    "document",
+    "documentation",
+    "codebase_understanding",
+]
+
+
 class Task(BaseModel):
     """A task in the agent system."""
 
@@ -41,7 +59,7 @@ class Task(BaseModel):
     estimated_effort: float | None = None  # Estimated effort in arbitrary units
     actual_effort: float | None = None
     assigned_agent: str | None = None
-    kind: str = "general"
+    kind: TaskKind = "general"
     difficulty: str = "simple"
     required_inputs: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
@@ -242,4 +260,6 @@ class TaskExecutionResult(BaseModel):
     result_metadata: TaskResultMetadata | None = None
     error: str | None = None
     duration: float | None = None
+    result_summary: str | None = None
+    observed_paths: list[str] = Field(default_factory=list)
     attributes: dict[str, Any] = Field(default_factory=dict)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from memory.project_path_resolver import ensure_resolved_path
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
 from core.python_requirements import invalid_requirement_lines, is_requirements_file
@@ -72,12 +73,24 @@ def file_writer_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
         FileExistsError: If file exists and overwrite=False
         OSError: If disk full or other OS error
     """
-    file_path = Path(params["file_path"])
+    project_path = params.get("project_path")
+    requested_operation = str(params.get("operation_kind") or "create_file").lower()
+    intent_kind = "planned_new_file" if requested_operation in {"create_file", "file_create", "directory_generate"} else "existing_file"
+    file_path = (
+        ensure_resolved_path(
+            params["file_path"],
+            project_path,
+            operation="write",
+            intent_kind=intent_kind,
+        )
+        if project_path
+        else Path(params["file_path"])
+    )
     content = params["content"]
     encoding = params.get("encoding", "utf-8")
     create_dirs = params.get("create_dirs", True)
     overwrite = params.get("overwrite", True)
-    operation_kind = str(params.get("operation_kind") or "create_file").lower()
+    operation_kind = requested_operation
 
     if is_requirements_file(file_path):
         invalid_lines = invalid_requirement_lines(str(content))

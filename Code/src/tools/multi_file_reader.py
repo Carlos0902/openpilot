@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from memory.project_index import ProjectIndexManager
+from memory.project_path_resolver import ensure_resolved_path
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
 from core.tool_contracts import (
@@ -55,13 +56,23 @@ MULTI_FILE_READER_DEFINITION = ToolDefinition(
 def multi_file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadata:
     params = input_metadata.to_params()
     """Read multiple files and combine them into one text payload."""
+    project_path = params.get("project_path")
     file_paths = params.get("file_paths") or params.get("files")
     sketch_files: list[str] = []
     if not file_paths:
         directory_path_value = params.get("directory_path")
         if not directory_path_value:
             raise ValueError("multi_file_reader requires file_paths or directory_path")
-        directory_path = Path(directory_path_value)
+        directory_path = (
+            ensure_resolved_path(
+                directory_path_value,
+                project_path,
+                operation="read",
+                intent_kind="existing_directory",
+            )
+            if project_path
+            else Path(directory_path_value)
+        )
         if not directory_path.exists():
             raise FileNotFoundError(f"Directory not found: {directory_path}")
         if not directory_path.is_dir():
@@ -76,6 +87,18 @@ def multi_file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultM
     else:
         if isinstance(file_paths, str):
             file_paths = [file_paths]
+        if project_path:
+            file_paths = [
+                str(
+                    ensure_resolved_path(
+                        file_path,
+                        project_path,
+                        operation="read",
+                        intent_kind="existing_file",
+                    )
+                )
+                for file_path in file_paths
+            ]
         sketch_files.extend(_ensure_parent_sketches(file_paths))
 
     encoding = params.get("encoding", "utf-8")

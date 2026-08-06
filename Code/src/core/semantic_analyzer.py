@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from core.exceptions import InvalidLLMResponseError
 from core.llm import LLMMessage, LLMRequest, LLMResponse
+from memory.context_assembly import build_context_llm_request
+from metadata import ContextCandidateTruncation, ContextRequestPurpose
 from core.semantic_types import RiskLevel, STANDARD_RESOURCES, TaskType
 from core.tool_contracts import ToolCapability
 
@@ -218,7 +220,9 @@ class SemanticAnalyzer:
             "constraints": constraints or [],
         }
         response = self.llm_client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                self.llm_client,
+                purpose=ContextRequestPurpose.SEMANTIC_GOAL,
                 messages=[
                     LLMMessage(role="system", content=GOAL_SYSTEM_PROMPT),
                     LLMMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
@@ -228,6 +232,7 @@ class SemanticAnalyzer:
                 timeout_seconds=BEST_EFFORT_TIMEOUT_SECONDS,
                 transport_retries=0,
                 trace_info={"semantic_task": "goal"},
+                user_truncation=ContextCandidateTruncation.FORBIDDEN,
             )
         )
         raw = self._response_payload(response)
@@ -327,7 +332,9 @@ class SemanticAnalyzer:
             },
         }
         response = self.llm_client.complete(
-            LLMRequest(
+            build_context_llm_request(
+                self.llm_client,
+                purpose=ContextRequestPurpose.SEMANTIC_PLAN_STEP,
                 messages=[
                     LLMMessage(role="system", content=STEP_SYSTEM_PROMPT),
                     LLMMessage(role="user", content=json.dumps(payload, ensure_ascii=False)),
@@ -337,6 +344,7 @@ class SemanticAnalyzer:
                 timeout_seconds=BEST_EFFORT_TIMEOUT_SECONDS,
                 transport_retries=0,
                 trace_info={"semantic_task": "plan_step", "step_id": step.id},
+                user_truncation=ContextCandidateTruncation.FORBIDDEN,
             )
         )
         raw = self._response_payload(response)

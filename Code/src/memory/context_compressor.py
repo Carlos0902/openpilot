@@ -6,11 +6,14 @@ Inspired by Claude Code's compaction system.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
 from core.llm import LLMClient, LLMMessage, LLMRequest
+from memory.context_assembly import build_context_llm_request
 from memory.short_memory import Message
+from metadata import ContextRequestPurpose
 
 
 @dataclass
@@ -43,6 +46,11 @@ class ContextCompressor:
             min_preserved_messages: Minimum number of recent messages to preserve
             target_compression_ratio: Target ratio of compressed to original tokens
         """
+        warnings.warn(
+            "ContextCompressor is legacy; use artifact-backed context compaction",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.llm_client = llm_client
         self.compression_threshold = compression_threshold
         self.min_preserved_messages = min_preserved_messages
@@ -154,7 +162,9 @@ Provide a concise summary (aim for {int(len(conversation) * self.target_compress
 
         # Generate summary
         try:
-            request = LLMRequest(
+            request = build_context_llm_request(
+                self.llm_client,
+                purpose=ContextRequestPurpose.MEMORY_COMPRESSION,
                 messages=[
                     LLMMessage(role="user", content=prompt)
                 ],

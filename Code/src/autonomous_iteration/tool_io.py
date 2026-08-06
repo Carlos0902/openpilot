@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from autonomous_iteration.planning_surface import PlanningSurfaceCatalog, PlanningSurfaceSelector
+from autonomous_iteration.planning_surface import ToolCapabilityCardProvider
 from metadata import CodeArtifactMetadata
 from metadata import ToolInputMetadata, ToolResultMetadata, artifact_to_tool_input
 from core.python_requirements import is_requirements_file
@@ -232,6 +234,45 @@ class ExecutionToolIO:
 
         result = "\n\n".join(tool_descriptions)
         self._log_function("format_tools_for_llm", {"tool_count": len(tools)}, {"chars": len(result)})
+        return result
+
+    def format_planning_surface(
+        self,
+        tools: list[Any],
+        *,
+        task_description: str,
+        goal: str = "",
+        history_text: str = "",
+        retry_reason: str = "",
+        signal: Any | None = None,
+        plan_data: dict[str, Any] | None = None,
+        capability_card_providers: list[Any] | None = None,
+    ) -> str:
+        providers = [ToolCapabilityCardProvider(tools), *(capability_card_providers or [])]
+        catalog = PlanningSurfaceCatalog.from_providers(providers)
+        selection = PlanningSurfaceSelector().select(
+            catalog,
+            task_description=task_description,
+            goal=goal,
+            history_text=history_text,
+            retry_reason=retry_reason,
+            signal=signal,
+            plan_data=plan_data,
+        )
+        result = selection.render()
+        self._log_function(
+            "format_planning_surface",
+            {
+                "tool_count": len(tools),
+                "task_preview": task_description[:120],
+                "retry_reason": retry_reason[:120],
+            },
+            {
+                "chars": len(result),
+                "core_card_ids": [card.card_id for card in selection.core_cards],
+                "deferred_card_ids": [card.card_id for card in selection.deferred_cards],
+            },
+        )
         return result
 
     def map_reason_to_enum(self, reason_text: str) -> str:

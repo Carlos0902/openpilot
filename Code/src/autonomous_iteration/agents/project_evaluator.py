@@ -17,7 +17,16 @@ from typing import Any, Callable
 
 from autonomous_iteration.improvement_context import ImprovementContextHelper
 from autonomous_iteration.models import EvaluationResult
-from metadata import ProductIntentMetadata, ValidationIssueMetadata, WarningCheckResultMetadata, WarningItemMetadata
+from core.llm import LLMMessage
+from memory.context_assembly import build_context_llm_request
+from metadata import (
+    ContextCandidateTruncation,
+    ContextRequestPurpose,
+    ProductIntentMetadata,
+    ValidationIssueMetadata,
+    WarningCheckResultMetadata,
+    WarningItemMetadata,
+)
 from tools.terminal_smoke import (
     looks_like_terminal_python_source,
     run_terminal_command,
@@ -1281,28 +1290,29 @@ class ProjectEvaluatorAgent:
         client = self.llm_client
         if client is None:
             return ""
+        request = build_context_llm_request(
+            client,
+            messages=[LLMMessage(role="user", content=prompt)],
+            purpose=ContextRequestPurpose.RUNTIME_OUTPUT_EVALUATION,
+            response_format="json_object",
+            temperature=0.0,
+            max_tokens=300,
+            timeout_seconds=10,
+            transport_retries=0,
+            user_truncation=ContextCandidateTruncation.TAIL,
+        )
         if hasattr(client, "complete"):
-            from core.llm import LLMMessage, LLMRequest
-
-            request = LLMRequest(
-                messages=[LLMMessage(role="user", content=prompt)],
-                response_format="json_object",
-                temperature=0.0,
-                max_tokens=300,
-                timeout_seconds=10,
-                transport_retries=0,
-            )
             try:
                 response = client.complete(request, max_retries=1, use_cache=False)
             except TypeError:
                 response = client.complete(request)
             return str(getattr(response, "content", response))
         if hasattr(client, "generate"):
-            return str(client.generate(prompt))
+            return str(client.generate("\n\n".join(message.content for message in request.messages)))
         if hasattr(client, "chat"):
-            return str(client.chat([{"role": "user", "content": prompt}]))
+            return str(client.chat([message.model_dump() for message in request.messages]))
         if callable(client):
-            return str(client(prompt))
+            return str(client("\n\n".join(message.content for message in request.messages)))
         return ""
 
     def _fallback_runtime_system_output_decision(

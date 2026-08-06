@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 from datetime import datetime
 from pathlib import Path
@@ -11,11 +12,16 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from autonomous_iteration.runtime_controller import ToolRouter
+from autonomous_iteration.runtime_controller import ToolRouter, apply_read_only_runtime_mode, is_read_only_analysis_goal
 from autonomous_iteration.task_models import Task, TaskExecutionContext, TaskExecutionResult, TaskStatus
 from core.llm import LLMMessage, LLMRequest
+from core.reasoning import routine_tool_reasoning_policy
 from core.tool_event_loop import ToolEventLoopRunner
+from memory.context_assembly import build_context_llm_request
+from memory.session_constraints import session_constraint_prompt_text
 from metadata import (
+    AgentPhase,
+    ContextRequestPurpose,
     DecisionNeedMetadata,
     DifficultyAssessmentMetadata,
     FailureMetadata,
@@ -23,7 +29,10 @@ from metadata import (
     ProblemSignalMetadata,
     ResultStatus,
     ResolutionPlanMetadata,
+    ReasoningPolicy,
     RuntimeStateMetadata,
+    SessionConstraintState,
+    SessionIngressState,
     TaskResultMetadata,
     TextArtifactMetadata,
     ToolInputMetadata,
@@ -145,6 +154,46 @@ MUTATING_OR_EXECUTING_NEED_TYPES = {
     "write_file",
 }
 
+FILE_MUTATION_NEED_TYPES = {
+    "bug_fix",
+    "bug_fix_tool",
+    "code_file_create",
+    "code_generation",
+    "code_patch",
+    "code_symbol_modify",
+    "code_unit_generate",
+    "delete_file",
+    "directory_generate",
+    "documentation",
+    "file_delete",
+    "file_write",
+    "fix_bug",
+    "generate_code",
+    "generate_code_unit",
+    "modify_symbol",
+    "readme",
+    "readme_generation",
+    "remove_file",
+    "repair",
+    "write_file",
+}
+
+INSPECTION_NEED_TYPES = {
+    "file_read",
+    "inspect_file",
+    "multi_file_read",
+    "project_structure",
+    "read_directory",
+    "read_file",
+    "reference_search",
+    "research",
+    "web_search",
+}
+
+_EXECUTION_HISTORY_PROMPT_MAX_CHARS = 900
+_EXECUTION_HISTORY_RECENT_STATUS_LIMIT = 5
+_EXECUTION_HISTORY_EVIDENCE_PATH_LIMIT = 8
+
 
 class DecisionNeedValidationError(ValueError):
     """Raised when an LLM decision need cannot be normalized into metadata."""
@@ -168,6 +217,49 @@ class ToolPlanningTaskExecutor:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
+    def guard_preselected_tool_call(
+        self,
+        task: Task,
+        tool_call: Any,
+        selection: ToolSelection,
+    ) -> Any | None:
+        """Apply the standard edit guard to a caller-selected tool invocation."""
+        return ToolEventLoopRunner(self)._guard_project_state_change_if_needed(
+            task,
+            tool_call,
+            selection,
+        )
+
+    def _reasoning_policy_for_task(self, task: Task | None = None) -> ReasoningPolicy:
+        active_task = task or getattr(self, "_active_task", None)
+        routine = False
+        if active_task is not None:
+            task_kind = str(active_task.kind).strip().lower()
+            read_files = list(active_task.read_files or [])
+            write_files = list(active_task.write_files or [])
+            if task_kind in {
+                "inspect",
+                "inspection",
+                "analysis",
+                "investigate",
+                "codebase_understanding",
+            }:
+                routine = bool(read_files) and not write_files
+            elif task_kind in {"validate", "validation", "verify", "verification"}:
+                routine = bool(str(active_task.validation_command or "").strip())
+            elif task_kind in {
+                "implement",
+                "implementation",
+                "modify",
+                "edit",
+                "write",
+            }:
+                routine = len(write_files) == 1 and len(read_files) <= 2
+        return routine_tool_reasoning_policy(
+            getattr(self.runtime.llm_client, "settings", None),
+            routine=routine,
+        )
+
     def execute_task(self, task: Task, context: TaskExecutionContext) -> TaskExecutionResult:
         """Execute a single task by generating and executing tool calls."""
         start_time = datetime.now()
@@ -180,12 +272,14 @@ class ToolPlanningTaskExecutor:
         try:
             self._active_task_id = task.id
             self._active_task_description = task.description
+            self._active_task = task
             goal = context.parent_context.get("goal", "")
             self._active_goal = goal
             self._active_context = context
             self._empty_plan_retry_attempted = False
-            tools_description = self.runtime._format_tools_for_llm(self.runtime.tool_registry.list_all())
-            prompt = self._build_tool_plan_prompt(task.description, goal, tools_description, context)
+            self._reset_subtask_local_no_progress_block(task)
+            planning_surface = self._planning_surface_for_prompt(task.description, goal, context=context)
+            prompt = self._build_tool_plan_prompt(task.description, goal, planning_surface, context)
 
             self.runtime.logger.log_event(
                 "llm_tool_planning",
@@ -203,22 +297,61 @@ class ToolPlanningTaskExecutor:
             loop_result = ToolEventLoopRunner(self).run(task, prompt)
             tool_results = loop_result.tool_results
             last_output = loop_result.last_output
-            all_succeeded = loop_result.success
+            all_tools_succeeded = loop_result.success
+            observed_modified_files = self._observed_modified_files(tool_results)
+            completion_error = self._completion_evidence_error(
+                task,
+                tool_results,
+                observed_modified_files=observed_modified_files,
+            ) if all_tools_succeeded else None
+            all_succeeded = all_tools_succeeded and completion_error is None
             output = {
                 "task_id": task.id,
                 "description": task.description,
                 "status": "completed" if all_succeeded else "failed",
                 "tool_results": tool_results,
                 "tool_loop": loop_result.loop_metadata.to_json_dict(),
-                "all_tools_succeeded": all_succeeded,
+                "all_tools_succeeded": all_tools_succeeded,
+                "completion_evidence_satisfied": completion_error is None,
+                "observed_modified_files": observed_modified_files,
                 "final_output": last_output,
             }
             duration = (datetime.now() - start_time).total_seconds()
             tool_error_msg = self._build_tool_error(tool_results)
-            error_msg = None if all_succeeded else (tool_error_msg or loop_result.error_message)
+            error_msg = None if all_succeeded else (completion_error or tool_error_msg or loop_result.error_message)
             failure_details = {"tool_loop": loop_result.loop_metadata.to_json_dict()}
-            if loop_result.loop_metadata.final_error:
-                failure_details.update(loop_result.loop_metadata.final_error.details or {})
+            final_failure = loop_result.loop_metadata.final_error
+            if completion_error:
+                diagnostics = getattr(self.runtime, "runtime_diagnostics_hooks", None)
+                if diagnostics and hasattr(diagnostics, "on_log_event"):
+                    diagnostics.on_log_event(
+                        task_id=task.id,
+                        session_id=self._session_id(),
+                        source_type="agent",
+                        source_name="autonomous_iteration.agents.tool_planning_executor",
+                        phase="task_completion",
+                        event_type="task_completion_rejected",
+                        success=False,
+                        output_summary={
+                            "planned_write_files": list(task.write_files),
+                            "observed_modified_files": observed_modified_files,
+                            "validation_command": task.validation_command,
+                        },
+                        error=completion_error,
+                    )
+                final_failure = FailureMetadata(
+                    error_type="CompletionEvidenceMissing",
+                    error_message=completion_error,
+                    recoverable=False,
+                    details={
+                        "task_kind": task.kind,
+                        "planned_write_files": list(task.write_files),
+                        "observed_modified_files": observed_modified_files,
+                        "validation_command": task.validation_command,
+                    },
+                )
+            if final_failure:
+                failure_details.update(final_failure.details or {})
 
             result = TaskExecutionResult(
                 task_id=task.id,
@@ -228,8 +361,8 @@ class ToolPlanningTaskExecutor:
                     status=ResultStatus.SUCCESS if all_succeeded else ResultStatus.FAIL,
                     result=TextArtifactMetadata(content="completed", attributes=output) if all_succeeded else None,
                     failure=FailureMetadata(
-                        error_type=loop_result.loop_metadata.final_error.error_type
-                        if loop_result.loop_metadata.final_error
+                        error_type=final_failure.error_type
+                        if final_failure
                         else "ToolExecutionFailed",
                         error_message=error_msg or "Tool execution failed",
                         details=failure_details,
@@ -244,6 +377,7 @@ class ToolPlanningTaskExecutor:
                     "start_time": start_time.isoformat(),
                     "end_time": datetime.now().isoformat(),
                     "tool_count": len(tool_results),
+                    "observed_modified_files": observed_modified_files,
                 },
             )
             self._log(
@@ -314,22 +448,28 @@ class ToolPlanningTaskExecutor:
         self,
         task_description: str,
         goal: str,
-        tools_description: str,
+        planning_surface: str,
         context: TaskExecutionContext | None = None,
     ) -> str:
         history = self._execution_history_summary(context)
-        return f"""You are an AI assistant that selects and sequences tools to accomplish tasks.
+        project_context = self._project_context_summary(context)
+        project_section = f"Current Project Context:\n{project_context}\n" if project_context else ""
+        constraint_state = self._session_constraints_from_context(context)
+        constraint_prompt = session_constraint_prompt_text(constraint_state) if constraint_state else ""
+        constraint_section = f"{constraint_prompt}\n" if constraint_prompt else ""
+        read_only_notice = self._read_only_notice(task_description, goal, context)
+        read_only_section = f"{read_only_notice}\n" if read_only_notice else ""
+        return f"""You are an AI assistant that plans decision_needs for tasks.
+Do not choose tools. The runtime ToolRouter maps decision_needs to concrete tools under budget, path, risk, and permission checks.
 
 Task: {task_description}
 Overall Goal: {goal}
-Previous Task Results:
+{constraint_section}{project_section}Previous Task Results:
 {history}
+{read_only_section}
 
-Available Tools:
-{tools_description}
-
-Generate a JSON plan with decision_needs. The runtime ToolRouter is the only component
-allowed to map needs to concrete tools using budget, risk, and permission checks.
+Planning Surface:
+{planning_surface}
 
 Output ONLY valid JSON in this format:
 {{
@@ -347,32 +487,102 @@ Output ONLY valid JSON in this format:
 Allowed need_type values:
 file_read, project_structure, web_search, command_check, file_write, file_delete, code_file_create,
 directory_generate, code_unit_generate, code_symbol_modify, code_patch, code_generation,
-code_execution, readme_generation.
+code_execution, readme_generation, bug_fix, repair.
 
 Optional fields may include: target_path, operation_kind, target_scope, symbol_name,
 symbol_type, insertion_hint, patch_mode, candidate_paths, query, command, risk_level,
 attributes. Omit unknown or unavailable optional fields. Do not emit null.
 
 Important:
-- Previous task outputs are provided above in Previous Task Results. Use that shared history directly.
-- Never invent or read intermediate files such as subtask_0.md, subtask_1.md, requirements.md, or plan.md unless they appear in previous tool outputs or the user explicitly requested them.
-- If previous task results are absent or failed, infer sensible defaults from the original goal instead of reading a made-up plan file.
-- For project creation, use directory_generate/code_file_create/file_write directly and create the needed files in the target directory.
-- Always distinguish create_file, add_symbol, modify_symbol, and code_patch before selecting needs.
-- For new code files or generated project files, emit code_file_create or directory_generate, then file_write with operation_kind create_file.
-- For adding a function/class to an existing file, emit file_read, then code_unit_generate with operation_kind add_symbol, then file_write with operation_kind add_symbol so ToolRouter uses file_patch_writer.
-- For modifying an existing function/class, emit file_read, then code_symbol_modify or code_patch with operation_kind modify_symbol, then file_write with operation_kind modify_symbol so ToolRouter uses file_patch_writer.
-- For deleting an existing file, emit file_read or project_structure first for evidence, then file_delete with operation_kind delete_file so ToolRouter uses file_delete_tool.
-- Do not plan code_generator + file_writer for edits to existing functions/classes.
-- code_generator only supports executable code languages: python, shell, bash. Never use language "text"
-- For design, outline, planning, or prose-only tasks, either return planning metadata through an appropriate text/documentation tool or write Markdown/text with file_writer/readme_tool
-- For completed project/code deliveries, emit a readme_generation need after file_write to create README.md with run instructions
-- Autopilot will run hard validation and autonomous-iteration improvement analysis after project delivery
-- Provide actual values for all parameters, do not use null or placeholders
-- If you need to pass output from one tool to another, generate the content directly in the first tool
-- For command_executor, input_metadata.mode must be one of: dry_run, interactive, automatic
-- For project commands, use mode "automatic" and do not use source/activate/cd/export; OpenPilot injects the target cwd and virtual environment from metadata
+- Use latest_change and evidence_paths in Previous Task Results; never invent plan files.
+- Never invent or read intermediate files such as subtask_0.md, subtask_1.md, requirements.md, or plan.md unless previous results or the user explicitly mention them.
+- When Current Project Context gives a project root, prefer paths already observed in Previous Task Results or directory-sketch evidence. Do not invent nested directories or filenames under that root without evidence.
+- Prefer evidence before mutation: inspect files/directories first, then mutate with concrete target paths.
+- For new code files, use code_file_create or directory_generate, then file_write with operation_kind create_file.
+- For existing-file additions, use file_read, then code_unit_generate with add_symbol, then file_write with add_symbol semantics.
+- For existing-file edits, use file_read, then code_symbol_modify or code_patch with modify_symbol, then file_write with modify_symbol semantics.
+- For deletion, gather evidence first, then use file_delete with operation_kind delete_file.
+- Code-generation needs only support executable code languages: python, shell, bash. Never plan language "text".
+- For docs-only delivery, use readme_generation or text/file writing needs instead of code generation.
+- After completed code/project delivery, emit readme_generation for run instructions when a README is still needed.
+- Provide values only. Do not emit null, placeholders, or tool_calls.
+- If a later need depends on generated content, assume the first need produces the content directly for routing.
+- For command-style validation, keep mode compatible with automatic/dry_run/interactive semantics and never plan source/activate/cd/export wrappers.
 """
+
+    @staticmethod
+    def _session_constraints_from_context(
+        context: TaskExecutionContext | None,
+    ) -> SessionConstraintState | None:
+        if context is None:
+            return None
+        states: list[SessionConstraintState] = []
+        for container in (
+            getattr(context, "parent_context", {}),
+            getattr(context, "shared_state", {}),
+        ):
+            if not isinstance(container, dict):
+                continue
+            if "session_constraints" in container:
+                state = container.get("session_constraints")
+                if not isinstance(state, SessionConstraintState):
+                    raise TypeError("session_constraints must be a validated SessionConstraintState")
+                ingress = container.get("session_ingress_state")
+                if ingress is not None and not isinstance(ingress, SessionIngressState):
+                    raise TypeError("session_ingress_state must be a validated SessionIngressState")
+                if isinstance(ingress, SessionIngressState) and ingress.session_constraints != state:
+                    raise ValueError("session ingress and constraint state differ")
+                states.append(state)
+                continue
+            ingress = container.get("session_ingress_state")
+            if ingress is not None and not isinstance(ingress, SessionIngressState):
+                raise TypeError("session_ingress_state must be a validated SessionIngressState")
+            if isinstance(ingress, SessionIngressState):
+                states.append(ingress.session_constraints)
+        if not states:
+            return None
+        if len({state.canonical_hash for state in states}) != 1:
+            raise ValueError("conflicting session constraint states in task context")
+        return states[0]
+
+    def _planning_surface_for_prompt(
+        self,
+        task_description: str,
+        goal: str,
+        *,
+        context: TaskExecutionContext | None = None,
+        retry_reason: str = "",
+        signal: ProblemSignalMetadata | None = None,
+        plan_data: dict[str, Any] | None = None,
+    ) -> str:
+        history = self._execution_history_summary(context)
+        formatter = getattr(self.runtime, "_format_planning_surface", None)
+        tools = self.runtime.tool_registry.list_all() if getattr(self.runtime, "tool_registry", None) else []
+        if callable(formatter):
+            return formatter(
+                tools,
+                task_description=task_description,
+                goal=goal,
+                history_text=history,
+                retry_reason=retry_reason,
+                signal=signal,
+                plan_data=plan_data,
+                capability_card_providers=list(getattr(self.runtime, "planning_surface_providers", []) or []),
+            )
+        tool_io = getattr(self.runtime, "tool_io", None)
+        if tool_io and hasattr(tool_io, "format_planning_surface"):
+            return tool_io.format_planning_surface(
+                tools,
+                task_description=task_description,
+                goal=goal,
+                history_text=history,
+                retry_reason=retry_reason,
+                signal=signal,
+                plan_data=plan_data,
+                capability_card_providers=list(getattr(self.runtime, "planning_surface_providers", []) or []),
+            )
+        tools_description = self.runtime._format_tools_for_llm(tools)
+        return f"Legacy planning surface fallback:\n{tools_description}"
 
     def _execution_history_summary(self, context: TaskExecutionContext | None) -> str:
         if context is None:
@@ -380,21 +590,95 @@ Important:
         history = context.execution_history or context.shared_state.get("previous_task_results") or []
         if not history:
             return "No previous task results."
-        compact: list[dict[str, Any]] = []
-        for item in history[-5:]:
-            if not isinstance(item, dict):
-                compact.append({"summary": str(item)[:500]})
-                continue
-            compact.append(
+        normalized = [item if isinstance(item, dict) else {"result_summary": str(item)} for item in history]
+        status_counts: dict[str, int] = {}
+        for item in normalized:
+            status = str(item.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        latest = normalized[-1]
+        latest_change = {
+            "task_id": self._bounded_history_text(latest.get("task_id"), 100),
+            "description": self._bounded_history_text(latest.get("description"), 180),
+            "status": self._bounded_history_text(latest.get("status"), 40),
+            "failure_type": self._bounded_history_text(latest.get("failure_type"), 100),
+            "error_message": self._bounded_history_text(latest.get("error"), 260),
+            "result_summary": self._bounded_history_text(latest.get("result_summary"), 320),
+        }
+        latest_change = {key: value for key, value in latest_change.items() if value}
+        view: dict[str, Any] = {
+            "status_counts": status_counts,
+            "recent_status": [
                 {
-                    "task_id": item.get("task_id"),
-                    "description": item.get("description"),
-                    "status": item.get("status"),
-                    "error": item.get("error"),
-                    "result_summary": str(item.get("result_summary") or "")[:500],
+                    "task_id": self._bounded_history_text(item.get("task_id"), 100),
+                    "status": self._bounded_history_text(item.get("status"), 40),
                 }
-            )
-        return json.dumps(compact, ensure_ascii=False, indent=2)
+                for item in normalized[-_EXECUTION_HISTORY_RECENT_STATUS_LIMIT:]
+            ],
+            "latest_change": latest_change,
+            "evidence_paths": self._recent_history_evidence_paths(normalized),
+        }
+        return self._fit_execution_history_view(view)
+
+    def _fit_execution_history_view(self, view: dict[str, Any]) -> str:
+        def render() -> str:
+            return json.dumps(view, ensure_ascii=False, separators=(",", ":"))
+
+        while len(render()) > _EXECUTION_HISTORY_PROMPT_MAX_CHARS and len(view["evidence_paths"]) > 1:
+            view["evidence_paths"].pop()
+        while len(render()) > _EXECUTION_HISTORY_PROMPT_MAX_CHARS and len(view["recent_status"]) > 1:
+            view["recent_status"].pop(0)
+        for key, minimum in (("result_summary", 80), ("error_message", 80), ("description", 80)):
+            while len(render()) > _EXECUTION_HISTORY_PROMPT_MAX_CHARS and key in view["latest_change"]:
+                value = str(view["latest_change"][key])
+                if len(value) <= minimum:
+                    view["latest_change"].pop(key)
+                    break
+                view["latest_change"][key] = self._bounded_history_text(value, max(minimum, len(value) // 2))
+        while len(render()) > _EXECUTION_HISTORY_PROMPT_MAX_CHARS and view["evidence_paths"]:
+            view["evidence_paths"].pop()
+        return render()
+
+    def _recent_history_evidence_paths(self, history: list[dict[str, Any]]) -> list[str]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in reversed(history):
+            observed = item.get("observed_paths") or []
+            if not isinstance(observed, list):
+                continue
+            for raw_path in reversed(observed):
+                path = self._bounded_history_text(raw_path, 260)
+                if not path or path in seen:
+                    continue
+                seen.add(path)
+                paths.append(path)
+                if len(paths) >= _EXECUTION_HISTORY_EVIDENCE_PATH_LIMIT:
+                    return paths
+        return paths
+
+    def _bounded_history_text(self, value: Any, max_chars: int) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        else:
+            text = str(value)
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 1)].rstrip() + "…"
+
+    def _project_context_summary(self, context: TaskExecutionContext | None) -> str:
+        defaults = self._context_default_attributes(context)
+        project_path = str(defaults.get("project_path") or "").strip()
+        cwd = str(defaults.get("cwd") or "").strip()
+        lines: list[str] = []
+        if project_path:
+            lines.append(f"- Project root: {project_path}")
+        if cwd and cwd != project_path:
+            lines.append(f"- Working directory: {cwd}")
+        if not lines:
+            return ""
+        return "\n".join(lines)
 
     def _parse_decision_needs(self, llm_response: Any) -> list[dict[str, Any]]:
         try:
@@ -407,6 +691,59 @@ Important:
             raise ValueError(f"Failed to parse LLM response as JSON: {exc}") from exc
         tool_requests = self._route_decision_needs(plan_data)
         if not tool_requests:
+            raw_needs = plan_data.get("decision_needs", []) if isinstance(plan_data, dict) else []
+            active_task = getattr(self, "_active_task", None)
+            task_kind = str(getattr(active_task, "kind", "") or "").strip().lower()
+            contract_filtered_kinds = {
+                "inspect",
+                "inspection",
+                "analysis",
+                "investigate",
+                "codebase_understanding",
+                "validate",
+                "validation",
+                "verify",
+                "verification",
+                "implement",
+                "implementation",
+                "modify",
+                "edit",
+                "write",
+            }
+            if (
+                isinstance(raw_needs, list)
+                and raw_needs
+                and task_kind in contract_filtered_kinds
+            ):
+                validation_command = str(
+                    getattr(active_task, "validation_command", "") or ""
+                ).strip()
+                reason = "Model-proposed decision needs exceeded the current subtask contract."
+                if task_kind in {"validate", "validation", "verify", "verification"}:
+                    proposed_types = {
+                        str(item.get("need_type") or "").lower().replace("-", "_")
+                        for item in raw_needs
+                        if isinstance(item, dict)
+                    }
+                    if proposed_types & FILE_MUTATION_NEED_TYPES:
+                        reason = "Subtask write scope forbids mutation for validation tasks."
+                    elif not validation_command:
+                        reason = "Validation subtask is missing its required validation_command."
+                    elif "command_check" in proposed_types:
+                        reason = "Model did not preserve the required validation command."
+                    else:
+                        reason = "No observed validation command matched the task contract."
+                raise DecisionNeedResolutionError(
+                    reason,
+                    {
+                        "failed_tool": "tool_planning_executor",
+                        "failure_stage": "Tool Planning",
+                        "task_kind": task_kind,
+                        "dropped_decision_need_count": len(raw_needs),
+                    },
+                )
+            if self._empty_decision_needs_can_synthesize(plan_data):
+                return []
             fallback_requests = self._fallback_tool_requests(plan_data=plan_data)
             if fallback_requests:
                 return fallback_requests
@@ -489,7 +826,7 @@ Important:
             evidence.append("old_tool_calls_protocol_present")
             category = "tool_contract"
         return ProblemSignalMetadata(
-            source="tool_planning",
+            signal_source="tool_planning",
             category=category,
             message="LLM returned no routable decision_needs for an actionable task.",
             evidence=evidence,
@@ -603,13 +940,16 @@ Important:
         prompt = self._empty_plan_retry_prompt(plan_data, signal, difficulty, resolution)
         try:
             response = self.runtime.llm_client.complete(
-                LLMRequest(
+                build_context_llm_request(
+                    self.runtime.llm_client,
+                    purpose=ContextRequestPurpose.TOOL_PLAN_RETRY,
                     messages=[LLMMessage(role="user", content=prompt)],
                     response_format="json_object",
                     temperature=0.0,
                     max_tokens=2000,
                     timeout_seconds=30.0,
                     transport_retries=0,
+                    reasoning_policy=self._reasoning_policy_for_task(),
                 )
             )
             retry_data = (
@@ -658,11 +998,24 @@ Important:
     ) -> str:
         task_description = str(getattr(self, "_active_task_description", "") or "")
         goal = str(getattr(self, "_active_goal", "") or "")
+        planning_surface = self._planning_surface_for_prompt(
+            task_description,
+            goal,
+            context=getattr(self, "_active_context", None),
+            retry_reason="empty_or_unroutable_decision_needs",
+            signal=signal,
+            plan_data=plan_data,
+        )
+        constraint_state = self._session_constraints_from_context(getattr(self, "_active_context", None))
+        constraint_prompt = session_constraint_prompt_text(constraint_state) if constraint_state else ""
+        constraint_section = f"{constraint_prompt}\n\n" if constraint_prompt else ""
         return (
             "The previous tool-planning response was empty or unroutable. "
             "Return JSON only with a non-empty decision_needs array.\n\n"
             f"Task: {task_description}\n"
             f"Goal: {goal}\n"
+            f"{constraint_section}"
+            f"Planning Surface:\n{planning_surface}\n\n"
             f"Problem signal: {json.dumps(signal.to_json_dict(), ensure_ascii=False)}\n"
             f"Difficulty: {json.dumps(difficulty.to_json_dict(), ensure_ascii=False)}\n"
             f"Resolution strategy: {resolution.strategy}\n"
@@ -676,7 +1029,7 @@ Important:
 
     def _fallback_decision_plan(self, plan_data: dict[str, Any]) -> dict[str, Any] | None:
         """Build a conservative tool plan when the LLM plan is actionable but unroutable."""
-        if not isinstance(plan_data, dict) or not self._should_generate_fallback_plan(plan_data):
+        if not isinstance(plan_data, dict):
             return None
 
         task_description = str(getattr(self, "_active_task_description", "") or "").strip()
@@ -684,6 +1037,58 @@ Important:
         project_path = self._infer_project_path(task_description, goal)
         target_file = self._infer_target_file(task_description, goal, project_path)
         needs: list[dict[str, Any]] = []
+        active_task = getattr(self, "_active_task", None)
+        task_kind = str(getattr(active_task, "kind", "") or "").strip().lower()
+
+        if task_kind in {"inspect", "inspection", "analysis", "investigate", "codebase_understanding"}:
+            read_paths: list[Path] = []
+            for raw_path in getattr(active_task, "read_files", []) or []:
+                candidate = Path(str(raw_path)).expanduser()
+                if not candidate.is_absolute() and project_path is not None:
+                    candidate = project_path / candidate
+                candidate = candidate.resolve(strict=False)
+                if candidate not in read_paths:
+                    read_paths.append(candidate)
+            if not read_paths and target_file is not None:
+                read_paths.append(target_file.resolve(strict=False))
+            for read_path in read_paths:
+                needs.append(
+                    {
+                        "need_type": "file_read",
+                        "question": f"Inspect {read_path} without modifying it",
+                        "target_path": str(read_path),
+                    }
+                )
+            if not needs and project_path is not None:
+                needs.append(
+                    {
+                        "need_type": "project_structure",
+                        "question": f"Inspect project structure under {project_path}",
+                        "target_path": str(project_path),
+                    }
+                )
+            return {"decision_needs": needs, "goal": goal} if needs else None
+
+        if task_kind in {"validate", "validation", "verify", "test"}:
+            validation_command = str(getattr(active_task, "validation_command", "") or "").strip()
+            if not validation_command:
+                return None
+            needs.append(
+                {
+                    "need_type": "command_check",
+                    "question": f"Run the task's required validation: {validation_command}",
+                    "command": validation_command,
+                    "attributes": {
+                        "mode": "automatic",
+                        "test_command": validation_command,
+                        "timeout": 30,
+                    },
+                }
+            )
+            return {"decision_needs": needs, "goal": goal}
+
+        if not self._should_generate_fallback_plan(plan_data):
+            return None
 
         if self._looks_like_validation_task(task_description):
             if project_path is None:
@@ -849,8 +1254,18 @@ Important:
         )
 
     def _looks_like_validation_task(self, task_description: str) -> bool:
+        active_task = getattr(self, "_active_task", None)
+        if str(getattr(active_task, "kind", "") or "").lower() in {
+            "validate",
+            "validation",
+            "verify",
+            "test",
+        }:
+            return True
+        if str(getattr(active_task, "validation_command", "") or "").strip():
+            return True
         lowered = task_description.lower().lstrip()
-        return lowered.startswith(("check", "test", "validate", "verify")) or task_description.lstrip().startswith(
+        return lowered.startswith(("check", "run", "test", "validate", "verify")) or task_description.lstrip().startswith(
             ("检查", "测试", "验证")
         )
 
@@ -892,25 +1307,171 @@ Important:
         }
 
     def _infer_project_path(self, task_description: str, goal: str) -> Path | None:
-        for path in self._extract_paths(f"{task_description}\n{goal}"):
-            candidate = path.parent if path.suffix else path
-            if candidate.exists() or path.is_absolute():
-                return candidate.expanduser()
-
-        context = getattr(self, "_active_context", None)
-        if context is not None:
-            for container in (getattr(context, "parent_context", {}), getattr(context, "shared_state", {})):
-                if isinstance(container, dict):
-                    for key in ("project_path", "cwd", "target_dir", "output_dir"):
-                        raw = container.get(key)
-                        if raw:
-                            return Path(str(raw)).expanduser()
+        context_path = self._context_project_path()
+        if context_path is not None:
+            return context_path
 
         environments = getattr(self.runtime, "_project_environments", {}) or {}
         for raw_project in environments:
             if raw_project:
                 return Path(str(raw_project)).expanduser()
+
+        for path in self._extract_paths(f"{task_description}\n{goal}"):
+            candidate = path.parent if path.suffix else path
+            if candidate.exists():
+                return candidate.expanduser()
         return None
+
+    def _context_project_path(self) -> Path | None:
+        context = getattr(self, "_active_context", None)
+        if context is None:
+            return None
+        for container in (getattr(context, "parent_context", {}), getattr(context, "shared_state", {})):
+            if not isinstance(container, dict):
+                continue
+            for key in ("project_path", "cwd", "target_dir", "output_dir"):
+                raw = container.get(key)
+                if raw:
+                    return Path(str(raw)).expanduser()
+        return None
+
+    def _reset_subtask_local_no_progress_block(self, task: Task) -> None:
+        controller = getattr(self.runtime, "runtime_controller", None)
+        state = getattr(controller, "state", None)
+        if not isinstance(state, RuntimeStateMetadata):
+            return
+        if (
+            state.phase != AgentPhase.BLOCKED
+            or state.completion_reason != "no new runtime facts after repeated tool results"
+        ):
+            return
+        task_kind = str(task.kind or "").strip().lower()
+        state.phase = (
+            AgentPhase.VERIFY
+            if task_kind in {"validate", "validation", "verify", "test"}
+            else AgentPhase.DIAGNOSE
+            if task_kind in {"inspect", "inspection", "analysis", "investigate"}
+            else AgentPhase.EXECUTE
+        )
+        state.completion_reason = ""
+        state.no_progress_rounds = 0
+
+    def _context_default_attributes(self, context: TaskExecutionContext | None = None) -> dict[str, Any]:
+        active_context = context or getattr(self, "_active_context", None)
+        if active_context is None:
+            return {}
+        defaults: dict[str, Any] = {}
+        project_root = ""
+        for container in (getattr(active_context, "parent_context", {}), getattr(active_context, "shared_state", {})):
+            if not isinstance(container, dict):
+                continue
+            raw_root = container.get("project_path") or container.get("cwd") or container.get("target_dir") or container.get("output_dir")
+            if raw_root and not project_root:
+                project_root = str(Path(str(raw_root)).expanduser().resolve(strict=False))
+            raw_cwd = container.get("cwd")
+            if raw_cwd and "cwd" not in defaults:
+                defaults["cwd"] = str(Path(str(raw_cwd)).expanduser().resolve(strict=False))
+            for key in ("run_command", "test_command", "validation_command"):
+                raw = container.get(key)
+                if raw and key not in defaults:
+                    defaults[key] = str(raw).strip()
+        if project_root:
+            defaults.setdefault("project_path", project_root)
+            cwd = str(defaults.get("cwd") or "").strip()
+            try:
+                Path(cwd).resolve(strict=False).relative_to(Path(project_root).resolve(strict=False))
+            except (OSError, ValueError):
+                defaults["cwd"] = project_root
+            else:
+                defaults.setdefault("cwd", project_root)
+        return defaults
+
+    def _planning_runtime_state(self, plan_data: dict[str, Any]) -> tuple[Any | None, ToolRouter, RuntimeStateMetadata]:
+        controller = getattr(self.runtime, "runtime_controller", None)
+        router = getattr(controller, "router", None)
+        state = getattr(controller, "state", None)
+        if router is None:
+            router = ToolRouter(getattr(self.runtime, "tool_registry", None))
+        if state is None:
+            state = RuntimeStateMetadata(
+                goal=str(
+                    plan_data.get("goal")
+                    or getattr(self, "_active_goal", "")
+                    or getattr(self, "_active_task_description", "")
+                    or "tool planning"
+                )
+            )
+            if controller is not None:
+                controller.state = state
+        self._seed_runtime_state_from_context(state)
+        if str(getattr(state.execution_mode_source, "value", state.execution_mode_source)) == "default":
+            apply_read_only_runtime_mode(
+                state,
+                str(getattr(self, "_active_goal", "") or state.goal),
+                tags=[],
+                task_type="",
+            )
+        return controller, router, state
+
+    def _seed_runtime_state_from_context(self, state: RuntimeStateMetadata) -> None:
+        defaults = self._context_default_attributes()
+        project_path = str(defaults.get("project_path") or "").strip()
+        cwd = str(defaults.get("cwd") or "").strip()
+        if project_path:
+            state.add_fact(f"Project path: {project_path}")
+            state.add_candidate_file(project_path, "project_path inherited from task context")
+        if cwd and cwd != project_path:
+            state.add_fact(f"Working directory: {cwd}")
+
+    def _empty_decision_needs_can_synthesize(self, plan_data: dict[str, Any]) -> bool:
+        if not isinstance(plan_data, dict):
+            return False
+        if "tool_calls" in plan_data:
+            return False
+        raw_needs = plan_data.get("decision_needs", [])
+        if raw_needs != []:
+            return False
+        _controller, _router, state = self._planning_runtime_state(plan_data)
+        if "runtime_mode:read_only_analysis" not in state.assumptions:
+            return False
+        if not self._state_has_read_only_synthesis_evidence(state):
+            return False
+        state.phase = AgentPhase.SUMMARIZE
+        state.completion_reason = "read-only analysis has enough evidence to synthesize"
+        self._log(
+            "decision_need_empty_plan_synthesized",
+            input_summary={
+                "task_id": getattr(self, "_active_task_id", "unknown"),
+                "decision_need_count": 0,
+            },
+            output_summary={"phase": str(state.phase), "completion_reason": state.completion_reason},
+            success=True,
+            level="INFO",
+        )
+        return True
+
+    def _state_has_read_only_synthesis_evidence(self, state: RuntimeStateMetadata) -> bool:
+        for fact in state.known_facts:
+            normalized = str(fact or "").strip()
+            if not normalized:
+                continue
+            if normalized.startswith("Project path:"):
+                continue
+            if normalized.startswith("Working directory:"):
+                continue
+            if normalized == "Task classified as read-only analysis; gather evidence before any mutation.":
+                continue
+            return True
+        if state.selected_files or state.path_resolutions or state.resolved_questions:
+            return True
+        for _path, evidence_list in state.candidate_files.items():
+            if any("project_path" not in str(evidence or "") for evidence in evidence_list):
+                return True
+        for event in state.tool_history:
+            event_type = str(event.get("event_type") or "")
+            if event_type and event_type not in {"runtime_guard"}:
+                return True
+        return False
 
     def _infer_target_file(self, task_description: str, goal: str, project_path: Path | None) -> Path | None:
         text = f"{task_description}\n{goal}"
@@ -994,15 +1555,41 @@ Important:
         raw_needs = plan_data.get("decision_needs", [])
         if not raw_needs:
             return []
-        controller = getattr(self.runtime, "runtime_controller", None)
-        router = getattr(controller, "router", None)
-        state = getattr(controller, "state", None)
-        if router is None:
-            router = ToolRouter(getattr(self.runtime, "tool_registry", None))
-        if state is None:
-            state = RuntimeStateMetadata(goal=str(plan_data.get("goal") or "tool planning"))
-            if controller is not None:
-                controller.state = state
+        task = getattr(self, "_active_task", None)
+        task_kind = str(getattr(task, "kind", "") or "").strip().lower()
+        if task_kind in {"inspect", "inspection", "analysis", "investigate", "codebase_understanding"}:
+            allowed_needs: list[Any] = []
+            dropped_need_types: list[str] = []
+            for raw_need in raw_needs:
+                need_type = (
+                    str(raw_need.get("need_type") or "").lower().replace("-", "_")
+                    if isinstance(raw_need, dict)
+                    else "invalid"
+                )
+                if need_type in INSPECTION_NEED_TYPES:
+                    allowed_needs.append(raw_need)
+                else:
+                    dropped_need_types.append(need_type)
+            if dropped_need_types:
+                self._log(
+                    "decision_need_dropped_for_subtask_purpose",
+                    input_summary={
+                        "task_id": getattr(task, "id", "unknown"),
+                        "task_kind": task_kind,
+                        "dropped_need_types": dropped_need_types,
+                    },
+                    output_summary={"retained_need_count": len(allowed_needs)},
+                    success=False,
+                    error="Inspect subtask proposed needs outside its read-only purpose.",
+                    level="WARNING",
+                )
+            raw_needs = allowed_needs
+            if not raw_needs:
+                return []
+        raw_needs = self._filter_needs_for_task_contract(raw_needs, task, task_kind)
+        if not raw_needs:
+            return []
+        _controller, router, state = self._planning_runtime_state(plan_data)
 
         tool_requests: list[dict[str, Any]] = []
         for index, raw_need in enumerate(raw_needs):
@@ -1013,6 +1600,7 @@ Important:
                 need = DecisionNeedMetadata.model_validate(normalized_need)
             except ValidationError as exc:
                 raise self._decision_need_validation_failure(raw_need, normalized_need, index, exc) from exc
+            self._enforce_subtask_write_scope(need)
             if normalized_fields:
                 self._log(
                     "decision_need_normalized",
@@ -1026,6 +1614,33 @@ Important:
                     level="DEBUG",
                 )
             selections = router.route(state, need)
+            if state.guard_history and not state.guard_history[-1].approved:
+                guard = state.guard_history[-1]
+                if guard.attributes.get("question") == need.question:
+                    self._record_guard_decision_event(guard)
+                    details = {
+                        "failed_tool": str(guard.attributes.get("tool_name") or "tool_router"),
+                        "failure_stage": "Tool Routing Guard",
+                        "need_type": need.need_type,
+                        "guard_decision": guard.to_json_dict(),
+                        "required_need_blocked": True,
+                    }
+                    self._log(
+                        "decision_need_blocked",
+                        input_summary={
+                            "task_id": getattr(self, "_active_task_id", "unknown"),
+                            "need_type": need.need_type,
+                            "tool_name": guard.attributes.get("tool_name"),
+                        },
+                        output_summary={"guard_decision": guard.to_json_dict()},
+                        success=False,
+                        error=guard.reason,
+                        level="ERROR",
+                    )
+                    raise DecisionNeedResolutionError(
+                        f"Required decision need was blocked: {guard.reason}",
+                        details,
+                    )
             for selection in selections:
                 tool_requests.append(
                     {
@@ -1035,7 +1650,268 @@ Important:
                         "timeout_override": selection.timeout_override,
                     }
                 )
+            if self._should_synthesize_patch_writer(raw_needs, index, need):
+                writer_need = DecisionNeedMetadata(
+                    need_type="file_write",
+                    question=f"Apply generated symbol replacement to {need.target_path}",
+                    phase=need.phase,
+                    target_path=need.target_path,
+                    operation_kind=need.operation_kind or "modify_symbol",
+                    target_scope=need.target_scope,
+                    symbol_name=need.symbol_name,
+                    symbol_type=need.symbol_type,
+                    insertion_hint=need.insertion_hint,
+                    patch_mode=need.patch_mode,
+                    decision_to_unlock=need.decision_to_unlock,
+                    expected_state_change=need.expected_state_change,
+                    cost_hint=need.cost_hint,
+                    risk_level=need.risk_level,
+                    attributes=dict(need.attributes),
+                )
+                writer_selections = router.route(state, writer_need)
+                if state.guard_history and not state.guard_history[-1].approved:
+                    guard = state.guard_history[-1]
+                    if guard.attributes.get("question") == writer_need.question:
+                        self._record_guard_decision_event(guard)
+                        raise DecisionNeedResolutionError(
+                            f"Required synthesized file write was blocked: {guard.reason}",
+                            {
+                                "failed_tool": str(guard.attributes.get("tool_name") or "file_patch_writer"),
+                                "failure_stage": "Tool Routing Guard",
+                                "need_type": writer_need.need_type,
+                                "guard_decision": guard.to_json_dict(),
+                                "required_need_blocked": True,
+                                "synthesized_from": need.need_type,
+                            },
+                        )
+                if not writer_selections:
+                    raise DecisionNeedResolutionError(
+                        "Code symbol modification could not be paired with a durable file write.",
+                        {
+                            "failed_tool": "file_patch_writer",
+                            "failure_stage": "Tool Routing",
+                            "need_type": writer_need.need_type,
+                            "synthesized_from": need.need_type,
+                        },
+                    )
+                self._log(
+                    "decision_need_write_synthesized",
+                    input_summary={
+                        "task_id": getattr(self, "_active_task_id", "unknown"),
+                        "source_need_type": need.need_type,
+                        "target_path": need.target_path,
+                    },
+                    output_summary={"tool_name": "file_patch_writer"},
+                    success=True,
+                    level="INFO",
+                )
+                for selection in writer_selections:
+                    tool_requests.append(
+                        {
+                            "tool_name": selection.tool_name,
+                            "reason": writer_need.question,
+                            "input_metadata": selection.input_metadata.to_params(),
+                            "timeout_override": selection.timeout_override,
+                        }
+                    )
         return tool_requests
+
+    def _filter_needs_for_task_contract(
+        self,
+        raw_needs: list[Any],
+        task: Task | None,
+        task_kind: str,
+    ) -> list[Any]:
+        if task is None:
+            return raw_needs
+        expected_validation = str(getattr(task, "validation_command", "") or "").strip()
+        expected_argv = self._normalized_command_argv(expected_validation) if expected_validation else None
+        filtered: list[Any] = []
+        dropped: list[str] = []
+        validation_task = task_kind in {"validate", "validation", "verify", "verification"}
+        implementation_task = task_kind in {"implement", "implementation", "modify", "edit", "write"}
+        for raw_need in raw_needs:
+            if not isinstance(raw_need, dict):
+                filtered.append(raw_need)
+                continue
+            need_type = str(raw_need.get("need_type") or "").lower().replace("-", "_")
+            command = str(raw_need.get("command") or "").strip()
+            keep = True
+            if validation_task:
+                keep = (
+                    need_type == "command_check"
+                    and expected_argv is not None
+                    and self._normalized_command_argv(command) == expected_argv
+                )
+            elif implementation_task and not expected_validation and need_type == "command_check":
+                keep = False
+            if keep:
+                filtered.append(raw_need)
+            else:
+                dropped.append(need_type or "invalid")
+        if dropped:
+            self._log(
+                "decision_need_dropped_for_subtask_contract",
+                input_summary={
+                    "task_id": getattr(task, "id", "unknown"),
+                    "task_kind": task_kind,
+                    "validation_command": expected_validation,
+                    "dropped_need_types": dropped,
+                },
+                output_summary={"retained_need_count": len(filtered)},
+                success=False,
+                error="Decision needs exceeded the current subtask contract.",
+                level="WARNING",
+            )
+        return filtered
+
+    def _record_guard_decision_event(self, decision: Any) -> None:
+        diagnostics = getattr(self.runtime, "runtime_diagnostics_hooks", None)
+        if diagnostics and hasattr(diagnostics, "on_guard_decision"):
+            diagnostics.on_guard_decision(
+                task_id=str(getattr(self, "_active_task_id", "") or ""),
+                session_id=self._session_id(),
+                decision=decision,
+            )
+
+    @staticmethod
+    def _should_synthesize_patch_writer(
+        raw_needs: list[Any],
+        current_index: int,
+        need: DecisionNeedMetadata,
+    ) -> bool:
+        need_type = need.need_type.lower().replace("-", "_")
+        if need_type not in {"code_symbol_modify", "code_patch", "modify_symbol"}:
+            return False
+        target = str(need.target_path or need.attributes.get("file_path") or "").strip()
+        if not target:
+            return False
+        for index, raw in enumerate(raw_needs):
+            if index == current_index or not isinstance(raw, dict):
+                continue
+            candidate_type = str(raw.get("need_type") or "").lower().replace("-", "_")
+            if candidate_type not in {"file_write", "write_file"}:
+                continue
+            attrs = raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {}
+            candidate_target = str(raw.get("target_path") or attrs.get("file_path") or "").strip()
+            if candidate_target == target:
+                return False
+        return True
+
+    def _enforce_subtask_write_scope(self, need: DecisionNeedMetadata) -> None:
+        task = getattr(self, "_active_task", None)
+        if task is None:
+            return
+        need_type = need.need_type.lower().replace("-", "_")
+        if need_type not in FILE_MUTATION_NEED_TYPES:
+            return
+        task_kind = str(getattr(task, "kind", "") or "").lower()
+        planned_writes = [str(path) for path in getattr(task, "write_files", []) or [] if str(path).strip()]
+        target = str(need.target_path or need.attributes.get("file_path") or "").strip()
+        reason = ""
+        if task_kind in {"inspect", "inspection", "validate", "validation", "verify", "test"}:
+            reason = f"Subtask write scope forbids mutation for task kind '{task_kind}'."
+        elif task_kind in {"implement", "repair"} and not planned_writes:
+            reason = f"Subtask write scope is required for mutation task kind '{task_kind}'."
+        elif planned_writes and target:
+            project_root = self._context_project_path()
+
+            def normalize_scoped_path(raw_path: str) -> str:
+                candidate = Path(raw_path).expanduser()
+                if not candidate.is_absolute() and project_root is not None:
+                    candidate = project_root / candidate
+                return str(candidate.resolve(strict=False))
+
+            normalized_target = normalize_scoped_path(target)
+            normalized_allowed = {normalize_scoped_path(path) for path in planned_writes}
+            if normalized_target not in normalized_allowed:
+                reason = f"Subtask write scope does not include target file: {target}"
+        if not reason:
+            return
+        self._log(
+            "decision_need_write_scope_blocked",
+            input_summary={
+                "task_id": getattr(task, "id", "unknown"),
+                "task_kind": task_kind,
+                "need_type": need.need_type,
+                "target_path": target,
+                "planned_write_files": planned_writes,
+            },
+            success=False,
+            error=reason,
+            level="ERROR",
+        )
+        raise DecisionNeedResolutionError(
+            reason,
+            {
+                "failed_tool": "tool_planning_executor",
+                "failure_stage": "Subtask Write Scope",
+                "need_type": need.need_type,
+                "target_path": target,
+                "planned_write_files": planned_writes,
+            },
+        )
+
+    @staticmethod
+    def _observed_modified_files(tool_results: list[dict[str, Any]]) -> list[str]:
+        observed: list[str] = []
+        for item in tool_results:
+            if not item.get("success") or item.get("tool") not in {
+                "file_writer",
+                "file_patch_writer",
+                "file_delete_tool",
+            }:
+                continue
+            input_metadata = item.get("input_metadata") or {}
+            file_path = str(input_metadata.get("file_path") or "").strip()
+            if file_path and file_path not in observed:
+                observed.append(file_path)
+        return observed
+
+    @staticmethod
+    def _normalized_command_argv(command: str) -> tuple[str, ...] | None:
+        try:
+            return tuple(shlex.split(str(command or "").strip()))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _completion_evidence_error(
+        task: Task,
+        tool_results: list[dict[str, Any]],
+        *,
+        observed_modified_files: list[str],
+    ) -> str | None:
+        if task.write_files and not observed_modified_files:
+            return "Task planned file writes but has no observed file mutation evidence."
+        task_kind = str(task.kind or "").lower()
+        requires_validation = bool(task.validation_command) or task_kind in {
+            "validate",
+            "validation",
+            "verify",
+            "test",
+        }
+        expected_command = str(task.validation_command or "").strip()
+        if requires_validation and not expected_command:
+            return "Validation task is missing its required validation_command contract."
+        if expected_command:
+            expected_argv = ToolPlanningTaskExecutor._normalized_command_argv(expected_command)
+            matched = False
+            for item in tool_results:
+                if not item.get("success") or item.get("tool") not in {"command_executor", "code_executor"}:
+                    continue
+                input_metadata = item.get("input_metadata") or {}
+                actual_command = str(input_metadata.get("command") or "").strip()
+                requested_command = str(input_metadata.get("requested_command") or actual_command).strip()
+                if expected_argv is not None and ToolPlanningTaskExecutor._normalized_command_argv(requested_command) == expected_argv:
+                    matched = True
+                    break
+            if not matched:
+                return (
+                    "Validation task has no observed validation command evidence matching "
+                    f"required validation command: {expected_command}"
+                )
+        return None
 
     def _normalize_raw_decision_need(self, raw_need: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         normalized = dict(raw_need)
@@ -1060,13 +1936,38 @@ Important:
             if key in NEED_ATTRIBUTE_FIELDS or key in tool_input_fields:
                 attributes.setdefault(key, normalized.pop(key))
                 moved_fields.append(key)
+        inherited_fields: list[str] = []
+        for key, value in self._context_default_attributes().items():
+            if value is None or value == "" or key in attributes:
+                continue
+            attributes[key] = value
+            inherited_fields.append(key)
         if moved_fields or attributes:
             normalized["attributes"] = attributes
         normalized_fields.extend(f"{key}:moved_to_attributes" for key in moved_fields)
+        normalized_fields.extend(f"{key}:inherited_from_context" for key in inherited_fields)
         if not str(normalized.get("question") or "").strip():
             normalized["question"] = self._default_need_question(normalized)
             normalized_fields.append("question:defaulted")
         return normalized, normalized_fields
+
+    def _read_only_notice(
+        self,
+        task_description: str,
+        goal: str,
+        context: TaskExecutionContext | None = None,
+    ) -> str:
+        task = context.task if context is not None else getattr(self, "_active_task", None)
+        tags = list(getattr(task, "tags", []) or [])
+        task_type = str(getattr(task, "kind", "") or "")
+        if not is_read_only_analysis_goal(f"{task_description}\n{goal}", tags=tags, task_type=task_type):
+            return ""
+        return (
+            "Read-only task mode:\n"
+            "- Analysis only.\n"
+            "- Do not emit file_write, file_delete, code generation, bug_fix, repair, or mutating command needs.\n"
+            "- Prefer file_read, project_structure, and safe validation evidence."
+        )
 
     def _default_need_question(self, normalized_need: dict[str, Any]) -> str:
         need_type = str(normalized_need.get("need_type") or "tool_need")

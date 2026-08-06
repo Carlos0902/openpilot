@@ -28,3 +28,13 @@ __pycache__/
 *.out
 *.synctex.gz
 *.toc
+.venv/
+*.pyc
+.ruff_cache/
+
+# Research experiments are archived on the `codex/collaboration` branch rather
+# than merged into main. They have no product dependency: nothing under Code/
+# imports them, and packaging only collects Code/src. Retrieve them with:
+#   git checkout origin/codex/collaboration -- experiments/
+# Remove this rule if experiments should become part of the main tree again.
+/experiments/

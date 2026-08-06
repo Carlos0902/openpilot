@@ -3,24 +3,45 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import time
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 import httpx
 from openai import APITimeoutError, OpenAI, OpenAIError
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.config import LLMSettings
+from core.reasoning import render_reasoning_transport, resolve_reasoning_policy
 from core.exceptions import (
+    ContextAssemblyBudgetError,
+    ContextAssemblyGovernanceError,
     ErrorCategory,
     InvalidLLMResponseError,
     LLMProviderError,
     LLMTimeoutError,
     classify_error,
 )
+from metadata import ContextAssemblyStatus, ContextSelectionMetadata, ReasoningPolicy
 from utils.json_utils import safe_parse_json
+
+
+def normalized_provider_endpoint(base_url: str) -> str:
+    """Return a credential-free endpoint identity while preserving meaningful ports."""
+
+    parsed = urlsplit(str(base_url or ""))
+    if not parsed.scheme or not parsed.hostname:
+        return ""
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    rendered_host = f"[{host}]" if ":" in host else host
+    port = parsed.port
+    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    authority = rendered_host if port is None or default_port else f"{rendered_host}:{port}"
+    return f"{scheme}://{authority}{parsed.path}"
 
 
 class LLMMessage(BaseModel):
@@ -40,6 +61,8 @@ class LLMRequest(BaseModel):
     timeout_seconds: float | None = Field(default=None, gt=0)
     transport_retries: int | None = Field(default=None, ge=0)
     trace_info: dict[str, Any] = Field(default_factory=dict)
+    context_selection: ContextSelectionMetadata | None = None
+    reasoning_policy: ReasoningPolicy = Field(default_factory=ReasoningPolicy)
 
 
 class LLMResponse(BaseModel):
@@ -80,9 +103,26 @@ class LLMClient:
 
     def _make_cache_key(self, request: LLMRequest) -> str:
         """Generate a cache key from the request."""
-        messages_str = json.dumps([m.model_dump() for m in request.messages], sort_keys=True)
         temp = request.temperature if request.temperature is not None else self.settings.temperature
-        return f"{self.settings.model}:{request.response_format}:{temp}:{request.max_tokens}:{messages_str}"
+        resolved = resolve_reasoning_policy(request.reasoning_policy, self.settings)
+        provider_endpoint = normalized_provider_endpoint(
+            str(getattr(self.settings, "base_url", "") or "")
+        )
+        payload = {
+            "hash_version": "provider_bound_v2",
+            "provider": str(getattr(self.settings, "provider", "") or ""),
+            "provider_endpoint": provider_endpoint,
+            "model": str(getattr(self.settings, "model", "") or ""),
+            "transport_family": resolved.transport_family,
+            "reasoning": resolved.model_dump(mode="json"),
+            "profile_version": resolved.profile_version,
+            "response_format": request.response_format,
+            "temperature": temp,
+            "max_tokens": request.max_tokens,
+            "messages": [message.model_dump(mode="json") for message in request.messages],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"v2:sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
     def complete(
         self,
@@ -106,6 +146,21 @@ class LLMClient:
             LLMTimeoutError: If request times out
             LLMProviderError: If provider returns an error
         """
+        if (
+            request.context_selection is not None
+            and request.context_selection.assembly_status
+            != ContextAssemblyStatus.READY
+        ):
+            if (
+                request.context_selection.assembly_status
+                == ContextAssemblyStatus.GOVERNANCE_BLOCKED
+            ):
+                raise ContextAssemblyGovernanceError(
+                    request.context_selection.governance_blocked_candidate_ids
+                )
+            raise ContextAssemblyBudgetError(
+                request.context_selection.omitted_required_candidate_ids
+            )
         # Check cache first
         if use_cache and self._cache is not None:
             cache_key = self._make_cache_key(request)
@@ -124,6 +179,7 @@ class LLMClient:
 
         self.settings.require_ready()
         client = self._make_openai_client()
+        resolved_reasoning = resolve_reasoning_policy(request.reasoning_policy, self.settings)
 
         last_error = None
         repair_messages = list(request.messages)
@@ -141,6 +197,7 @@ class LLMClient:
                 payload["max_tokens"] = request.max_tokens
             if request.response_format == "json_object":
                 payload["response_format"] = {"type": "json_object"}
+            payload.update(render_reasoning_transport(resolved_reasoning))
 
             self._emit_stream_event(
                 stream_callback,
@@ -305,6 +362,8 @@ class LLMClient:
             f"LLM returned invalid JSON (attempt {attempt}/{max_retries}; "
             f"parsed_type={invalid_type or 'None'}; preview={preview!r})",
             response_text=content,
+            usage=self._usage_metadata(response),
+            finish_reason=getattr(choice, "finish_reason", None),
         )
         collapsed = " ".join(content.split())
         provider_details = self._response_metadata(

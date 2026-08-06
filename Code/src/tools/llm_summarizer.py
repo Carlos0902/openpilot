@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from metadata import (
+    ContextRequestPurpose,
+    ToolContractMetadata,
+    ToolInputMetadata,
+    ToolResultMetadata,
+    metadata_tool_result,
+)
 
 from core.llm import LLMClient, LLMMessage, LLMRequest
+from memory.context_assembly import build_context_llm_request
 from core.tool_contracts import (
     PermissionLevel,
     ToolCapability,
@@ -121,7 +128,9 @@ def llm_summarizer_executor(input_metadata: ToolInputMetadata) -> ToolResultMeta
 
 def _complete_summary(client: Any, *, prompt: str, max_tokens: int) -> Any:
     return client.complete(
-        LLMRequest(
+        build_context_llm_request(
+            client,
+            purpose=ContextRequestPurpose.TEXT_SUMMARIZATION,
             messages=[LLMMessage(role="user", content=prompt)],
             response_format="text",
             max_tokens=max_tokens,
