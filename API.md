@@ -762,6 +762,11 @@ payload and separate summary-token evidence; it is accepted only when its
 source fingerprint, usage/finish evidence, and recent-suffix fit are validated.
 The default remains deterministic observation masking, and invalid or
 over-budget generated summaries fall back to that current view.
+The provider factory is controlled by `OPENPILOT_ROLLING_SUMMARY_ENABLED`
+(default `false`) and bounded by `OPENPILOT_ROLLING_SUMMARY_TOKEN_LIMIT`
+(default `256`, maximum `4096`). Enabling it does not grant tool, file, or
+mutation authority; it only supplies a derived candidate to the existing
+provider-free adapter and deterministic fallback boundary.
 Recoverable tool-planning prompts apply the same boundary ephemerally to explicit
 large observation fields while retaining paths, commands, operation kind, symbol,
 mode, errors, and the original typed metadata unchanged.

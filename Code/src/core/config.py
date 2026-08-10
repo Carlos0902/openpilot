@@ -125,6 +125,16 @@ class LLMSettings(BaseSettings):
         ge=0,
         alias="OPENPILOT_CONTEXT_RESERVED_PROMPT_TOKENS",
     )
+    rolling_summary_enabled: bool = Field(
+        default=False,
+        alias="OPENPILOT_ROLLING_SUMMARY_ENABLED",
+    )
+    rolling_summary_token_limit: int = Field(
+        default=256,
+        gt=0,
+        le=4096,
+        alias="OPENPILOT_ROLLING_SUMMARY_TOKEN_LIMIT",
+    )
     provider_tool_execution_enabled: bool = Field(
         default=False,
         alias="OPENPILOT_PROVIDER_TOOL_EXECUTION_ENABLED",

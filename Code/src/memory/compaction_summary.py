@@ -7,6 +7,7 @@ existing atomic compaction path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -30,6 +31,25 @@ _SUMMARY_FIELDS = frozenset(
         "next_action",
     }
 )
+
+
+def source_candidate_fingerprint(candidates: Sequence[Any]) -> str:
+    """Return the stable digest shared by deterministic and provider summaries."""
+
+    source_payload = [
+        {
+            "candidate_id": str(getattr(candidate, "candidate_id", "")),
+            "content": str(getattr(candidate, "content", "")),
+        }
+        for candidate in candidates
+    ]
+    encoded = json.dumps(
+        source_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def validate_summary_payload(
@@ -127,5 +147,6 @@ __all__ = [
     "CompactionSummaryValidationError",
     "calculate_summary_budget",
     "render_summary_payload",
+    "source_candidate_fingerprint",
     "validate_summary_payload",
 ]
