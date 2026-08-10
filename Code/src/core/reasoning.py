@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.config import LLMSettings
+from core.reasoning_adapters import (
+    get_reasoning_transport_adapter,
+    observe_reasoning_response,
+)
 from metadata import (
     ReasoningCapabilityProfileId,
     ReasoningDecisionComplexity,
@@ -31,6 +35,7 @@ class ReasoningCapabilityProfile:
     )
     supports_disabled: bool = False
     supports_enabled: bool = False
+    supports_token_budget: bool = False
     supported_efforts: tuple[ReasoningEffort, ...] = ()
     default_effort: ReasoningEffort | None = None
 
@@ -60,6 +65,14 @@ REASONING_CAPABILITY_PROFILES: dict[str, ReasoningCapabilityProfile] = {
         ),
         default_effort=ReasoningEffort.MEDIUM,
     ),
+    ReasoningCapabilityProfileId.OPENAI_CHAT_NO_REASONING_KNOWN.value: ReasoningCapabilityProfile(
+        profile_id=ReasoningCapabilityProfileId.OPENAI_CHAT_NO_REASONING_KNOWN,
+        version="v1",
+        supports_disabled=True,
+        supports_enabled=False,
+        supported_efforts=(),
+        default_effort=None,
+    ),
     ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN.value: ReasoningCapabilityProfile(
         profile_id=ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN,
         version="v1",
@@ -67,6 +80,36 @@ REASONING_CAPABILITY_PROFILES: dict[str, ReasoningCapabilityProfile] = {
         supports_enabled=True,
         supported_efforts=(ReasoningEffort.HIGH, ReasoningEffort.MAX),
         default_effort=ReasoningEffort.HIGH,
+    ),
+    ReasoningCapabilityProfileId.ANTHROPIC_MESSAGES_KNOWN.value: ReasoningCapabilityProfile(
+        profile_id=ReasoningCapabilityProfileId.ANTHROPIC_MESSAGES_KNOWN,
+        version="v1",
+        transport_family=ReasoningTransportFamily.ANTHROPIC_MESSAGES,
+        supports_disabled=True,
+        supports_enabled=True,
+        supports_token_budget=True,
+        supported_efforts=(
+            ReasoningEffort.LOW,
+            ReasoningEffort.MEDIUM,
+            ReasoningEffort.HIGH,
+            ReasoningEffort.MAX,
+        ),
+        default_effort=ReasoningEffort.MEDIUM,
+    ),
+    ReasoningCapabilityProfileId.GEMINI_GENERATE_CONTENT_KNOWN.value: ReasoningCapabilityProfile(
+        profile_id=ReasoningCapabilityProfileId.GEMINI_GENERATE_CONTENT_KNOWN,
+        version="v1",
+        transport_family=ReasoningTransportFamily.GOOGLE_GENERATE_CONTENT,
+        supports_disabled=True,
+        supports_enabled=True,
+        supports_token_budget=True,
+        supported_efforts=(
+            ReasoningEffort.MINIMAL,
+            ReasoningEffort.LOW,
+            ReasoningEffort.MEDIUM,
+            ReasoningEffort.HIGH,
+        ),
+        default_effort=ReasoningEffort.MEDIUM,
     ),
 }
 
@@ -98,7 +141,8 @@ def reasoning_policy_for_decision(
     Capability resolution remains in :func:`resolve_reasoning_policy`; this
     helper never inspects a model name or emits provider transport fields.
     Standard and complex decisions begin at provider default until an enabled
-    policy is independently justified.
+    policy is independently justified.  The caller must pass complexity as a
+    typed value; this helper never inspects task prose or provider identity.
     """
 
     if complexity == ReasoningDecisionComplexity.ROUTINE:
@@ -132,15 +176,24 @@ def select_reasoning_capability_profile(settings: LLMSettings) -> ReasoningCapab
 def resolve_reasoning_policy(
     policy: ReasoningPolicy,
     settings: LLMSettings,
+    *,
+    structured_output: bool = False,
 ) -> ResolvedReasoningPolicy:
     profile = select_reasoning_capability_profile(settings)
-    if policy.token_budget is not None:
+    if policy.token_budget is not None and not profile.supports_token_budget:
         return _unsupported(
             policy,
             profile,
             "explicit reasoning token budget is unsupported",
         )
     if policy.mode == ReasoningMode.PROVIDER_DEFAULT:
+        if structured_output and profile.supports_disabled:
+            return _resolved(
+                policy,
+                profile,
+                mode=ReasoningMode.DISABLED,
+                resolution=ReasoningResolution.MAPPED,
+            )
         return _resolved(
             policy,
             profile,
@@ -166,6 +219,7 @@ def resolve_reasoning_policy(
             profile,
             mode=ReasoningMode.ENABLED,
             effort=profile.default_effort,
+            token_budget=policy.token_budget,
             resolution=ReasoningResolution.MAPPED,
         )
     effective_effort = requested_effort or profile.default_effort
@@ -202,25 +256,7 @@ def resolve_reasoning_policy(
 
 
 def render_reasoning_transport(resolved: ResolvedReasoningPolicy) -> dict[str, object]:
-    if resolved.effective_mode == ReasoningMode.PROVIDER_DEFAULT:
-        return {}
-    if resolved.profile_id == ReasoningCapabilityProfileId.OPENAI_CHAT_KNOWN:
-        if resolved.effective_mode == ReasoningMode.DISABLED:
-            return {"reasoning_effort": "none"}
-        if resolved.effective_effort is not None:
-            return {"reasoning_effort": resolved.effective_effort.value}
-        return {}
-    if resolved.profile_id == ReasoningCapabilityProfileId.DEEPSEEK_CHAT_KNOWN:
-        thinking_type = (
-            "disabled" if resolved.effective_mode == ReasoningMode.DISABLED else "enabled"
-        )
-        rendered: dict[str, object] = {
-            "extra_body": {"thinking": {"type": thinking_type}}
-        }
-        if resolved.effective_mode == ReasoningMode.ENABLED and resolved.effective_effort is not None:
-            rendered["reasoning_effort"] = resolved.effective_effort.value
-        return rendered
-    return {}
+    return get_reasoning_transport_adapter(resolved.profile_id).render(resolved)
 
 
 def _resolved(
