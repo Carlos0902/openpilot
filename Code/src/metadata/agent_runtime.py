@@ -7,7 +7,7 @@ import json
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 from metadata.base import JsonValue, MetadataBase, MetadataKind, json_safe
 from metadata.project import TaskGraphNodeMetadata
@@ -46,6 +46,56 @@ class RuntimeExecutionModeSource(str, Enum):
     ROOT_GOAL = "root_goal"
     DEFAULT = "default"
     LEGACY_ASSUMPTION = "legacy_assumption"
+
+
+class ToolEventCompletionOutcome(str, Enum):
+    """Typed response outcome that may inform the next completion budget."""
+
+    NORMAL = "normal"
+    TOOL_PROGRESS = "tool_progress"
+    EMPTY_RESPONSE = "empty_response"
+    TRUNCATED = "truncated"
+    NO_PROGRESS = "no_progress"
+
+
+class ProviderBudgetDiagnostic(BaseModel):
+    """Strict per-attempt budget evidence emitted by the provider tool runner."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    round_index: int = Field(ge=1)
+    requested_limit: int = Field(ge=1)
+    reserved_tokens: int = Field(ge=1)
+    actual_completion_tokens: int | None = Field(default=None, ge=0)
+    usage_known: bool
+    budget_tokens_used_before: int = Field(ge=0)
+    budget_tokens_used_after: int = Field(ge=0)
+    budget_tokens_remaining_before: int = Field(ge=0)
+    budget_tokens_remaining_after: int = Field(ge=0)
+    recovery_bonus_before: int = Field(ge=0)
+    recovery_bonus_after: int = Field(ge=0)
+    finish_reason: str | None = None
+    outcome: ToolEventCompletionOutcome | None = None
+    provider_cap_hit: bool
+    outcome_feedback_enabled: bool
+    provider_attempt_failed: bool = False
+    error_type: str | None = None
+
+    @model_validator(mode="after")
+    def _facts_are_consistent(self) -> "ProviderBudgetDiagnostic":
+        if self.requested_limit != self.reserved_tokens:
+            raise ValueError("requested and reserved completion tokens must match")
+        if self.usage_known != (self.actual_completion_tokens is not None):
+            raise ValueError("usage-known state must match actual completion token presence")
+        if (
+            self.actual_completion_tokens is not None
+            and self.actual_completion_tokens > self.reserved_tokens
+        ):
+            raise ValueError("actual completion usage cannot exceed the reserved amount")
+        if self.provider_attempt_failed:
+            if not self.error_type:
+                raise ValueError("failed provider attempts require an error type")
+        return self
 
 
 class SessionConstraintCategory(str, Enum):
@@ -343,7 +393,26 @@ class SessionConstraintState(BaseModel):
 
     @property
     def canonical_hash(self) -> str:
+        """Hash the complete persisted snapshot, including the ingress cursor."""
+
         payload = self.model_dump(mode="json")
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @property
+    def authority_hash(self) -> str:
+        """Hash constraint authority independently of the conversation cursor.
+
+        ``processed_through_turn`` advances for ordinary user/assistant turns and
+        is already covered by the session-turn ledger.  It must not change the
+        identity of the active constraint projection or make a downstream
+        context view stale when no constraint fact changed.  Keep the complete
+        ``canonical_hash`` for persisted snapshot/replay evidence; this derived
+        hash is the stable source identity for model-facing constraints.
+        """
+
+        payload = self.model_dump(mode="json")
+        payload.pop("processed_through_turn", None)
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -859,6 +928,8 @@ class RuntimeBudgetMetadata(MetadataBase):
     replan_rounds_used: int = 0
     tool_event_completion_tokens_used: int = Field(default=0, ge=0)
     tool_event_completion_recovery_bonus: int = Field(default=0, ge=0)
+    tool_event_completion_outcome_feedback_enabled: bool = False
+    tool_event_completion_last_outcome: ToolEventCompletionOutcome | None = None
     enhancement_completion_policy: EnhancementCompletionBudgetPolicy = Field(
         default_factory=EnhancementCompletionBudgetPolicy
     )
@@ -1001,6 +1072,26 @@ class RuntimeBudgetMetadata(MetadataBase):
             self.tool_event_completion_recovery_bonus,
             max(0, int(tokens)),
         )
+
+    def observe_tool_event_outcome(self, outcome: ToolEventCompletionOutcome) -> None:
+        """Record one typed outcome and optionally preserve a recovery reserve.
+
+        The feedback lane is explicitly opt-in so historical budget behavior and
+        experiment baselines remain unchanged until a task selects it. Empty or
+        truncated responses receive one bounded recovery step; ordinary progress
+        and no-progress outcomes never create unbounded budget.
+        """
+
+        self.tool_event_completion_last_outcome = outcome
+        if not self.tool_event_completion_outcome_feedback_enabled:
+            return
+        if outcome in {
+            ToolEventCompletionOutcome.EMPTY_RESPONSE,
+            ToolEventCompletionOutcome.TRUNCATED,
+        }:
+            self.grant_tool_event_completion_recovery(
+                self.tool_event_completion_recovery_step
+            )
 
     def reconcile_tool_event_completion(self, *, reserved: int, actual: int) -> None:
         self.tool_event_completion_tokens_used = max(
@@ -1150,6 +1241,224 @@ class ContextCompactionSummary(BaseModel):
         return self
 
 
+class ContextCompactionProviderStatus(str, Enum):
+    """Whether a provider-derived compact projection passed its adapter boundary."""
+
+    NOT_ATTEMPTED = "not_attempted"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class ContextCompactionSelectionStatus(str, Enum):
+    """Whether the builder selected one compact projection for the Prompt."""
+
+    SELECTED = "selected"
+    NOT_SELECTED = "not_selected"
+    NOT_EVALUATED = "not_evaluated"
+
+
+class ContextCompactionSelectionOutcome(str, Enum):
+    """Body-free explanation of the final compact trial outcome."""
+
+    NOT_APPLICABLE = "not_applicable"
+    GENERATED_SELECTED = "generated_selected"
+    GENERATED_FIT_REJECTED = "generated_fit_rejected"
+    GENERATED_RECENT_SUFFIX_DISPLACED = "generated_recent_suffix_displaced"
+    GENERATED_OBSERVED_ONLY = "generated_observed_only"
+    DETERMINISTIC_FALLBACK = "deterministic_fallback"
+    DETERMINISTIC_BOUND = "deterministic_bound"
+    SINK_FAILED = "sink_failed"
+
+
+class ContextCompactionFallbackReason(str, Enum):
+    """Typed reason a provider-derived compact view did not become authority."""
+
+    BUDGET_ZERO = "budget_zero"
+    REQUEST_OR_PROVIDER_FAILURE = "request_or_provider_failure"
+    PROVIDER_OUTPUT_TRUNCATED = "provider_output_truncated"
+    INVALID_ADAPTER_RESULT = "invalid_adapter_result"
+    SOURCE_FINGERPRINT_MISMATCH = "source_fingerprint_mismatch"
+    SUMMARY_NOT_FIT_ATOMICALLY = "summary_not_fit_atomically"
+    RECENT_SUFFIX_DISPLACED = "recent_suffix_displaced"
+    DETERMINISTIC_FALLBACK = "deterministic_fallback"
+    ARTIFACT_SINK_FAILURE = "artifact_sink_failure"
+
+
+class ContextCompactionAttempt(BaseModel):
+    """Body-free evidence for one compact attempt and its builder outcome."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        use_enum_values=True,
+        validate_assignment=True,
+    )
+
+    attempt_ordinal: StrictInt = Field(ge=1)
+    source_candidate_ids: list[str] = Field(min_length=1)
+    source_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_chars: StrictInt = Field(default=0, ge=0)
+    algorithm: Literal[
+        "deterministic_dialog_extract_v1",
+        "deterministic_observation_mask_v1",
+        "llm_rolling_summary_v1",
+    ]
+    provider_status: ContextCompactionProviderStatus = (
+        ContextCompactionProviderStatus.NOT_ATTEMPTED
+    )
+    selection_status: ContextCompactionSelectionStatus = (
+        ContextCompactionSelectionStatus.NOT_EVALUATED
+    )
+    fallback_reason: ContextCompactionFallbackReason | None = None
+    summary_token_limit: StrictInt | None = Field(default=None, ge=1)
+    summary_token_count: StrictInt | None = Field(default=None, ge=0)
+    usage_complete: StrictBool | None = None
+    finish_reason: str | None = Field(default=None, min_length=1, max_length=64)
+    provider_prompt_tokens: StrictInt | None = Field(default=None, ge=0)
+    provider_completion_tokens: StrictInt | None = Field(default=None, ge=0)
+    provider_total_tokens: StrictInt | None = Field(default=None, ge=0)
+    adapter_fallback_reason: str | None = Field(default=None, min_length=1, max_length=64)
+    generated_candidate_id: str | None = Field(default=None, min_length=1)
+    generated_summary_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    generated_summary_chars: StrictInt | None = Field(default=None, ge=1)
+    trial_assembly_status: ContextAssemblyStatus | None = None
+    trial_candidate_decision: ContextCandidateDecision | None = None
+    displaced_candidate_ids: list[str] = Field(default_factory=list)
+    selection_outcome: ContextCompactionSelectionOutcome = (
+        ContextCompactionSelectionOutcome.NOT_APPLICABLE
+    )
+    artifact_sink_status: Literal[
+        "not_attempted", "persisted", "failed", "observed_only"
+    ] = "not_attempted"
+    artifact_binding: bool = False
+    used_in_prompt: bool = False
+
+    @model_validator(mode="after")
+    def _outcome_is_consistent(self) -> "ContextCompactionAttempt":
+        if len(self.source_candidate_ids) != len(set(self.source_candidate_ids)):
+            raise ValueError("compaction attempt source candidate IDs must be unique")
+        if len(self.displaced_candidate_ids) != len(set(self.displaced_candidate_ids)):
+            raise ValueError("displaced candidate IDs must be unique")
+        if self.algorithm != "llm_rolling_summary_v1" and self.provider_status == (
+            ContextCompactionProviderStatus.ACCEPTED
+        ):
+            raise ValueError("deterministic compaction cannot be provider accepted")
+        if self.algorithm != "llm_rolling_summary_v1" and any(
+            value is not None
+            for value in (self.summary_token_limit, self.summary_token_count)
+        ):
+            raise ValueError("summary token evidence requires an LLM compaction attempt")
+        if self.summary_token_count is not None and self.summary_token_limit is not None:
+            if self.summary_token_count > self.summary_token_limit:
+                raise ValueError("summary token count exceeds its limit")
+        provider_tokens = (
+            self.provider_prompt_tokens,
+            self.provider_completion_tokens,
+            self.provider_total_tokens,
+        )
+        has_provider_tokens = any(value is not None for value in provider_tokens)
+        has_complete_provider_tokens = all(value is not None for value in provider_tokens)
+        if self.provider_status == ContextCompactionProviderStatus.NOT_ATTEMPTED:
+            if self.finish_reason is not None or self.usage_complete is not None or has_provider_tokens:
+                raise ValueError("unattempted compaction cannot carry provider evidence")
+        else:
+            if self.usage_complete is True and not has_complete_provider_tokens:
+                raise ValueError("usage_complete=true requires all provider token fields")
+            if self.provider_status == ContextCompactionProviderStatus.ACCEPTED:
+                if self.finish_reason is None:
+                    raise ValueError("accepted provider compaction attempts require a finish reason")
+                if not has_complete_provider_tokens or self.usage_complete is not True:
+                    raise ValueError("accepted provider compaction attempts require complete usage")
+        if self.selection_status == ContextCompactionSelectionStatus.NOT_SELECTED:
+            if (
+                self.fallback_reason is None
+                and self.selection_outcome
+                != ContextCompactionSelectionOutcome.GENERATED_OBSERVED_ONLY
+            ):
+                raise ValueError("not_selected compaction attempt requires a fallback")
+            if self.artifact_sink_status == "persisted":
+                raise ValueError("not_selected compaction cannot persist an artifact")
+            if self.used_in_prompt or self.artifact_binding:
+                raise ValueError("not_selected compaction cannot enter the prompt or bind an artifact")
+        if self.selection_status == ContextCompactionSelectionStatus.NOT_EVALUATED:
+            if self.artifact_sink_status != "not_attempted" or self.artifact_binding or self.used_in_prompt:
+                raise ValueError("not_evaluated compaction cannot carry sink or prompt evidence")
+        if self.selection_status == ContextCompactionSelectionStatus.SELECTED:
+            if self.fallback_reason == ContextCompactionFallbackReason.ARTIFACT_SINK_FAILURE:
+                raise ValueError("sink failure cannot select a compaction")
+            if self.artifact_sink_status == "failed":
+                raise ValueError("failed artifact sink cannot select a compaction")
+            if self.artifact_sink_status != "persisted" or not self.artifact_binding or not self.used_in_prompt:
+                raise ValueError("selected compaction requires persisted prompt-bound artifact evidence")
+        if self.artifact_sink_status == "failed" and (
+            self.fallback_reason != ContextCompactionFallbackReason.ARTIFACT_SINK_FAILURE
+            or self.selection_status != ContextCompactionSelectionStatus.NOT_SELECTED
+        ):
+            raise ValueError("failed artifact sink requires an unselected sink-failure outcome")
+        if self.artifact_sink_status == "observed_only":
+            if self.selection_outcome != ContextCompactionSelectionOutcome.GENERATED_OBSERVED_ONLY:
+                raise ValueError("observed-only sink status requires observed-only outcome")
+            if self.artifact_binding or self.used_in_prompt:
+                raise ValueError("observed-only compaction cannot bind or enter the prompt")
+        if self.used_in_prompt and not self.artifact_binding:
+            raise ValueError("prompt-used compaction requires an artifact binding")
+        if self.artifact_binding and self.artifact_sink_status != "persisted":
+            raise ValueError("artifact binding requires a persisted sink")
+        if self.selection_outcome == ContextCompactionSelectionOutcome.GENERATED_SELECTED:
+            if self.algorithm != "llm_rolling_summary_v1" or self.selection_status != (
+                ContextCompactionSelectionStatus.SELECTED
+            ):
+                raise ValueError("generated-selected outcome requires a selected LLM attempt")
+            if self.provider_status != ContextCompactionProviderStatus.ACCEPTED:
+                raise ValueError("generated-selected outcome requires provider acceptance")
+            if not self.used_in_prompt or not self.artifact_binding:
+                raise ValueError("generated-selected outcome requires prompt/artifact evidence")
+            if not self.generated_candidate_id or not self.generated_summary_fingerprint:
+                raise ValueError("generated-selected outcome requires generated summary evidence")
+        if self.selection_outcome == ContextCompactionSelectionOutcome.GENERATED_OBSERVED_ONLY:
+            if self.algorithm != "llm_rolling_summary_v1" or self.artifact_sink_status != "observed_only":
+                raise ValueError("observed-only outcome requires a generated summary observation")
+            if self.provider_status != ContextCompactionProviderStatus.ACCEPTED:
+                raise ValueError("observed-only outcome requires provider acceptance")
+            if not self.generated_candidate_id or not self.generated_summary_fingerprint:
+                raise ValueError("observed-only outcome requires generated summary evidence")
+        if self.selection_outcome in {
+            ContextCompactionSelectionOutcome.GENERATED_FIT_REJECTED,
+            ContextCompactionSelectionOutcome.GENERATED_RECENT_SUFFIX_DISPLACED,
+        }:
+            if self.algorithm != "llm_rolling_summary_v1":
+                raise ValueError("generated rejection outcomes require an LLM compaction attempt")
+            if self.provider_status != ContextCompactionProviderStatus.ACCEPTED:
+                raise ValueError("generated rejection outcomes require provider acceptance")
+        if self.selection_outcome == ContextCompactionSelectionOutcome.GENERATED_RECENT_SUFFIX_DISPLACED:
+            if not self.displaced_candidate_ids:
+                raise ValueError("recent-suffix displacement requires displaced candidate IDs")
+        elif self.displaced_candidate_ids:
+            raise ValueError("displaced candidate IDs require a recent-suffix outcome")
+        if self.selection_outcome in {
+            ContextCompactionSelectionOutcome.DETERMINISTIC_BOUND,
+            ContextCompactionSelectionOutcome.DETERMINISTIC_FALLBACK,
+        } and self.algorithm == "llm_rolling_summary_v1":
+            raise ValueError("deterministic outcomes require a deterministic compaction attempt")
+        if self.selection_outcome == ContextCompactionSelectionOutcome.SINK_FAILED:
+            if self.selection_status != ContextCompactionSelectionStatus.NOT_SELECTED:
+                raise ValueError("sink-failed outcome must be unselected")
+            if self.artifact_sink_status != "failed":
+                raise ValueError("sink-failed outcome requires a failed sink")
+        if any(
+            value is not None
+            for value in (
+                self.generated_candidate_id,
+                self.generated_summary_fingerprint,
+                self.generated_summary_chars,
+            )
+        ) and self.algorithm != "llm_rolling_summary_v1":
+            raise ValueError("generated summary evidence requires an LLM compaction attempt")
+        return self
+
+
 class ContextCompactionRecord(BaseModel):
     """Source-linked deterministic compact projection persisted by a run."""
 
@@ -1204,6 +1513,133 @@ class ContextCompactionRecord(BaseModel):
             )
         ):
             raise ValueError("deterministic compaction cannot carry llm summary evidence")
+        return self
+
+
+class ContextCompactionReuseAdmissionStatus(str, Enum):
+    """Shadow admission state for a reusable compact projection."""
+
+    ADMITTED = "admitted"
+    REJECTED = "rejected"
+
+
+class ContextCompactionReuseShadowFailureReason(str, Enum):
+    """Typed reason a default-off reusable-compaction shadow could not report."""
+
+    PROVIDER_EXCEPTION = "provider_exception"
+    PROVIDER_EMPTY = "provider_empty"
+    INVALID_PROVIDER_RESULT = "invalid_provider_result"
+
+
+class ContextCompactionReuseShadowFailure(BaseModel):
+    """Body-free diagnostic for a shadow-provider fallback."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        use_enum_values=True,
+        validate_assignment=True,
+    )
+
+    failure_id: str = Field(min_length=1)
+    reason: ContextCompactionReuseShadowFailureReason
+    exception_type: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$",
+    )
+    strict_sources: StrictBool = False
+    fallback_applied: StrictBool = True
+
+    @model_validator(mode="after")
+    def _failure_evidence_is_bounded(self) -> "ContextCompactionReuseShadowFailure":
+        if self.reason == ContextCompactionReuseShadowFailureReason.PROVIDER_EMPTY:
+            if self.exception_type is not None:
+                raise ValueError("empty shadow provider result cannot carry exception type")
+        elif self.reason in {
+            ContextCompactionReuseShadowFailureReason.PROVIDER_EXCEPTION,
+            ContextCompactionReuseShadowFailureReason.INVALID_PROVIDER_RESULT,
+        } and self.exception_type is None:
+            raise ValueError("provider failure evidence requires exception type")
+        if self.strict_sources:
+            raise ValueError("strict shadow failures must be raised, not returned as fallback evidence")
+        if not self.fallback_applied:
+            raise ValueError("shadow failure evidence must record fallback_applied")
+        return self
+
+
+class ContextCompactionReuseRejectionReason(str, Enum):
+    """Typed fail-closed reasons for reusable compact projections."""
+
+    SOURCE_CANDIDATE_IDS_MISMATCH = "source_candidate_ids_mismatch"
+    SOURCE_FINGERPRINT_MISMATCH = "source_fingerprint_mismatch"
+    SOURCE_BINDING_HASH_MISMATCH = "source_binding_hash_mismatch"
+    REQUIRED_CANDIDATE_IDS_MISMATCH = "required_candidate_ids_mismatch"
+    RECENT_SUFFIX_IDS_MISMATCH = "recent_suffix_ids_mismatch"
+    SESSION_CONSTRAINTS_HASH_MISMATCH = "session_constraints_hash_mismatch"
+    ARTIFACT_KIND_MISMATCH = "artifact_kind_mismatch"
+    ARTIFACT_INTEGRITY_MISMATCH = "artifact_integrity_mismatch"
+    ARTIFACT_CONTRACT_INVALID = "artifact_contract_invalid"
+    TRIAL_PROJECTION_NOT_READY = "trial_projection_not_ready"
+    TRIAL_SUMMARY_NOT_SELECTED = "trial_summary_not_selected"
+    TRIAL_REQUIRED_CANDIDATE_OMITTED = "trial_required_candidate_omitted"
+    TRIAL_RECENT_SUFFIX_OMITTED = "trial_recent_suffix_omitted"
+
+
+class ContextCompactionReuseAdmission(BaseModel):
+    """Body-free shadow evidence for considering a reusable summary artifact.
+
+    The current contract is deliberately shadow-only.  It may prove that an
+    artifact would have passed source/admission checks, but it cannot authorize
+    prompt use.  A future prompt-using contract must add a separate reviewed
+    transition rather than flipping ``used_in_prompt`` here.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        use_enum_values=True,
+        validate_assignment=True,
+    )
+
+    admission_id: str = Field(min_length=1)
+    status: ContextCompactionReuseAdmissionStatus
+    rejection_reason: ContextCompactionReuseRejectionReason | None = None
+    source_candidate_ids: list[str] = Field(min_length=1)
+    source_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_binding_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    required_candidate_ids: list[str] = Field(default_factory=list)
+    recent_suffix_ids: list[str] = Field(default_factory=list)
+    session_constraints_hash: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    artifact_id: str = Field(min_length=1)
+    artifact_kind: str = Field(min_length=1)
+    artifact_integrity_checksum: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generated_summary_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    used_in_prompt: StrictBool = False
+
+    @model_validator(mode="after")
+    def _shadow_admission_is_consistent(self) -> "ContextCompactionReuseAdmission":
+        for label, values in (
+            ("source candidate IDs", self.source_candidate_ids),
+            ("required candidate IDs", self.required_candidate_ids),
+            ("recent suffix IDs", self.recent_suffix_ids),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"reuse admission {label} must be unique")
+        if self.status == ContextCompactionReuseAdmissionStatus.ADMITTED:
+            if self.rejection_reason is not None:
+                raise ValueError("admitted reuse admission cannot carry a rejection reason")
+            if self.artifact_kind != "context_compaction":
+                raise ValueError("admitted reuse admission requires context_compaction artifact kind")
+            if self.generated_summary_fingerprint is None:
+                raise ValueError("admitted reuse admission requires summary fingerprint")
+        elif self.rejection_reason is None:
+            raise ValueError("rejected reuse admission requires a rejection reason")
+        if self.used_in_prompt:
+            raise ValueError("reuse admission is shadow-only and cannot enter the prompt")
         return self
 
 
@@ -1278,7 +1714,7 @@ class ContextCandidate(BaseModel):
     kind: ContextCandidateKind
     source_id: str | None = None
     content: str
-    role: Literal["system", "user", "assistant"] = "user"
+    role: Literal["system", "user", "assistant", "tool"] = "user"
     retention: ContextCandidateRetention = ContextCandidateRetention.PREFERRED
     priority: int = Field(default=50, ge=0, le=100)
     source_order: int = Field(default=0, ge=0)
@@ -1427,6 +1863,11 @@ class ContextSelectionMetadata(MetadataBase):
     latest_dialog_timestamp: str | None = None
     assembly_status: ContextAssemblyStatus = ContextAssemblyStatus.READY
     candidate_decisions: list[ContextCandidateDecision] = Field(default_factory=list)
+    compaction_attempts: list[ContextCompactionAttempt] = Field(default_factory=list)
+    compaction_reuse_admissions: list[ContextCompactionReuseAdmission] = Field(default_factory=list)
+    compaction_reuse_shadow_failures: list[ContextCompactionReuseShadowFailure] = Field(
+        default_factory=list
+    )
     omitted_required_candidate_ids: list[str] = Field(default_factory=list)
     governance_blocked_candidate_ids: list[str] = Field(default_factory=list)
 
@@ -1460,6 +1901,12 @@ class ContextSelectionMetadata(MetadataBase):
         decision_ids = [decision.candidate_id for decision in self.candidate_decisions]
         if len(decision_ids) != len(set(decision_ids)):
             raise ValueError("candidate decision IDs must be unique")
+        admission_ids = [admission.admission_id for admission in self.compaction_reuse_admissions]
+        if len(admission_ids) != len(set(admission_ids)):
+            raise ValueError("compaction reuse admission IDs must be unique")
+        failure_ids = [failure.failure_id for failure in self.compaction_reuse_shadow_failures]
+        if len(failure_ids) != len(set(failure_ids)):
+            raise ValueError("compaction reuse shadow failure IDs must be unique")
         if self.assembly_status == ContextAssemblyStatus.READY and (
             self.omitted_required_candidate_ids or self.governance_blocked_candidate_ids
         ):
@@ -1951,11 +2398,20 @@ class ContextCompactionBinding(BaseModel):
 
     record: ContextCompactionRecord
     artifact: DurableArtifactReference
+    source_binding_hash: str = ""
 
     @model_validator(mode="after")
     def _artifact_is_context_compaction(self) -> "ContextCompactionBinding":
         if self.artifact.kind != "context_compaction":
             raise ValueError("artifact kind must be context_compaction")
+        if self.source_binding_hash:
+            digest = self.source_binding_hash.removeprefix("sha256:")
+            if (
+                not self.source_binding_hash.startswith("sha256:")
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError("source_binding_hash must be empty or a sha256 digest")
         return self
 
 
@@ -2129,6 +2585,11 @@ class RuntimeCheckpointMetadata(MetadataBase):
             and self.session_ingress_state.session_constraints != self.runtime_state.session_constraints
         ):
             raise ValueError("checkpoint ingress constraints must match runtime execution constraints")
+        if (
+            self.session_ingress_state is not None
+            and self.session_ingress_state.identity.run_id != self.session_id
+        ):
+            raise ValueError("checkpoint session identity differs from ingress run identity")
         return self
 
 

@@ -205,7 +205,7 @@ def build_session_constraint_candidate(
     active = state.active_entries
     if not active:
         return None
-    state_hash = state.canonical_hash
+    state_hash = state.authority_hash
     projection = session_constraint_projection(state)
     content = "Active Session Constraints:\n" + json.dumps(
         projection,
@@ -233,7 +233,11 @@ def session_constraint_projection(state: SessionConstraintState) -> dict[str, An
     """Return the bounded source-linked projection used by compatibility views."""
 
     active = state.active_entries
-    state_hash = state.canonical_hash
+    # The model-facing projection must remain stable while ordinary ingress
+    # turns advance the full snapshot cursor.  ``canonical_hash`` remains the
+    # complete checkpoint/replay snapshot identity; ``authority_hash`` is the
+    # bounded active-constraint source identity used here.
+    state_hash = state.authority_hash
     return {
         "session_id": state.session_id,
         "revision": state.revision,

@@ -37,7 +37,11 @@ def _request(
         previous_summary_fingerprint="sha256:" + "b" * 64,
         provider_payload=_payload() if payload is None else payload,
         attempt=RollingSummaryAttemptEvidence(
-            usage={"completion_tokens": 20} if usage is None else usage,
+            usage=(
+                {"prompt_tokens": 40, "completion_tokens": 20, "total_tokens": 60}
+                if usage is None
+                else usage
+            ),
             usage_observed=usage_observed,
             finish_reason=finish_reason,
         ),

@@ -145,7 +145,11 @@ def test_runtime_checkpoint_round_trips_conversation_ingress_state() -> None:
         session_constraints=runtime_state.session_constraints,
     )
     value = checkpoint().model_copy(
-        update={"runtime_state": runtime_state, "session_ingress_state": ingress}
+        update={
+            "runtime_state": runtime_state,
+            "session_ingress_state": ingress,
+            "session_id": "run-1",
+        }
     )
 
     restored = RuntimeCheckpointMetadata.model_validate(value.to_json_dict())
@@ -176,6 +180,28 @@ def test_runtime_checkpoint_rejects_divergent_ingress_constraints() -> None:
     )
 
     with pytest.raises(ValueError, match="ingress constraints"):
+        RuntimeCheckpointMetadata.model_validate(value.to_json_dict())
+
+
+def test_runtime_checkpoint_rejects_ingress_session_identity_drift() -> None:
+    runtime_state = RuntimeStateMetadata(
+        goal="Repair calculator",
+        session_constraints=SessionConstraintState(session_id="conversation-1"),
+    )
+    ingress = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="different-run",
+            turn_index=0,
+            project_root="/workspace/project",
+        ),
+        session_constraints=runtime_state.session_constraints,
+    )
+    value = checkpoint().model_copy(
+        update={"runtime_state": runtime_state, "session_ingress_state": ingress}
+    )
+
+    with pytest.raises(ValueError, match="session identity"):
         RuntimeCheckpointMetadata.model_validate(value.to_json_dict())
 
 

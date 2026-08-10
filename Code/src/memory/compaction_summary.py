@@ -8,6 +8,7 @@ existing atomic compaction path.
 from __future__ import annotations
 
 import json
+import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -30,6 +31,72 @@ _SUMMARY_FIELDS = frozenset(
         "next_action",
     }
 )
+
+
+def source_candidate_fingerprint(candidates: Sequence[Any]) -> str:
+    """Return the stable digest shared by deterministic and LLM summaries."""
+
+    source_payload = [
+        {
+            "candidate_id": str(getattr(candidate, "candidate_id", "")),
+            "content": str(getattr(candidate, "content", "")),
+        }
+        for candidate in candidates
+    ]
+    encoded = json.dumps(
+        source_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _field_value(candidate: Any, key: str, default: Any = None) -> Any:
+    if isinstance(candidate, Mapping):
+        return candidate.get(key, default)
+    return getattr(candidate, key, default)
+
+
+def _normalized_value(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+def source_candidate_binding_hash(candidates: Sequence[Any]) -> str:
+    """Return a body-free digest for the exact source projection view.
+
+    Unlike ``source_candidate_fingerprint``, this hash excludes source bodies and
+    binds the candidate identity/ordering/control fields plus the content hash
+    used by reusable-compaction admission.
+    """
+
+    source_payload = []
+    for candidate in candidates:
+        content = str(_field_value(candidate, "content", ""))
+        source_payload.append(
+            {
+                "candidate_id": str(_field_value(candidate, "candidate_id", "")),
+                "kind": _normalized_value(_field_value(candidate, "kind")),
+                "source_id": _field_value(candidate, "source_id"),
+                "role": _field_value(candidate, "role"),
+                "retention": _normalized_value(_field_value(candidate, "retention")),
+                "trust": _normalized_value(_field_value(candidate, "trust")),
+                "freshness": _normalized_value(_field_value(candidate, "freshness")),
+                "truncation": _normalized_value(_field_value(candidate, "truncation")),
+                "source_order": _field_value(candidate, "source_order"),
+                "content_sha256": "sha256:" + hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    encoded = json.dumps(
+        source_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def validate_summary_payload(
@@ -127,5 +194,7 @@ __all__ = [
     "CompactionSummaryValidationError",
     "calculate_summary_budget",
     "render_summary_payload",
+    "source_candidate_binding_hash",
+    "source_candidate_fingerprint",
     "validate_summary_payload",
 ]

@@ -3,11 +3,18 @@ from __future__ import annotations
 import pytest
 
 from core.exceptions import ContextAssemblyGovernanceError
-from core.llm import LLMMessage
+from core.llm import (
+    LLMMessage,
+    LLMToolCall,
+    LLMToolDefinition,
+    LLMToolFunction,
+    LLMToolFunctionCall,
+)
 from memory.context_assembly import (
     CONTEXT_REQUEST_MIGRATION_REGISTRY,
     ContextAssembler,
     ContextRequestBuilder,
+    build_context_candidate_request,
 )
 from metadata import (
     ContextAssemblyPolicy,
@@ -87,6 +94,57 @@ def test_context_assembler_applies_exact_token_budget_and_emits_existing_metadat
     assert selection["model"] == "test-model"
     assert selection["final_prompt_tokens"] == ExactCounter.count_text(result["prompt_text"])
     assert result["dialog_context"][-1]["timestamp"] == "2"
+
+
+def test_candidate_request_keeps_required_projection_and_accounts_for_tool_schema(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "memory.context_assembly.request_builder.ProviderTokenCounter.from_settings",
+        lambda _settings: ExactCounter(),
+    )
+
+    class Settings:
+        context_max_prompt_tokens = 800
+        context_reserved_prompt_tokens = 32
+
+    class Client:
+        settings = Settings()
+
+    request = build_context_candidate_request(
+        Client(),
+        candidates=[
+            ContextCandidate(
+                candidate_id="task:required",
+                kind=ContextCandidateKind.TASK,
+                content="Inspect the declared file and answer from evidence.",
+                retention=ContextCandidateRetention.REQUIRED,
+                truncation=ContextCandidateTruncation.FORBIDDEN,
+                trust=ContextCandidateTrust.AUTHORITATIVE,
+            ),
+            ContextCandidate(
+                candidate_id="dialog:optional",
+                kind=ContextCandidateKind.DIALOG,
+                content="historical noise " * 100,
+                retention=ContextCandidateRetention.OPTIONAL,
+                truncation=ContextCandidateTruncation.HEAD,
+                trust=ContextCandidateTrust.OBSERVED,
+            ),
+        ],
+        purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
+        tools=[
+            LLMToolDefinition(
+                function=LLMToolFunction(
+                    name="file_reader",
+                    description="Read one file",
+                    parameters={"type": "object", "properties": {"file_path": {"type": "string"}}},
+                )
+            )
+        ],
+    )
+
+    assert request.tools and request.tools[0].function.name == "file_reader"
+    assert request.context_selection.request_purpose == ContextRequestPurpose.TOOL_EVENT_DECISION
+    assert any("Inspect the declared file" in message.content for message in request.messages)
+    assert request.trace_info["provider_tool_schema_tokens"] > 0
 
 
 def test_context_assembler_is_deterministic_and_does_not_mutate_sources() -> None:
@@ -420,6 +478,178 @@ def test_typed_context_assembler_deduplicates_normalized_exact_content() -> None
     decisions = {item.candidate_id: item for item in result.selection.candidate_decisions}
     assert decisions["memory-low"].reason == "duplicate"
     assert decisions["memory-low"].governed_by_candidate_id == "memory-high"
+
+
+def test_typed_context_assembler_preserves_duplicate_tool_results_by_wire_identity() -> None:
+    assembler = ContextAssembler(renderer=render)
+    candidates = [
+        ContextCandidate(
+            candidate_id="tool-result-1",
+            kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+            content='{"success":false,"error_type":"ProviderToolDuplicateAttempt"}',
+            role="tool",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=0,
+        ),
+        ContextCandidate(
+            candidate_id="tool-result-2",
+            kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+            content='{"success":false,"error_type":"ProviderToolDuplicateAttempt"}',
+            role="tool",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=1,
+        ),
+    ]
+
+    result = assembler.assemble_candidates(
+        candidates,
+        policy=ContextAssemblyPolicy(max_prompt_chars=1_000),
+    )
+
+    assert [item.candidate_id for item in result.selected_candidates] == [
+        "tool-result-1",
+        "tool-result-2",
+    ]
+    assert result.selection.assembly_status == ContextAssemblyStatus.READY
+
+
+def test_typed_context_assembler_preserves_duplicate_empty_assistant_tool_turns() -> None:
+    assembler = ContextAssembler(renderer=render)
+    candidates = [
+        ContextCandidate(
+            candidate_id="assistant-turn-1",
+            kind=ContextCandidateKind.PREVIOUS_OUTPUT,
+            content="[empty provider tool-call turn]",
+            role="assistant",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=0,
+        ),
+        ContextCandidate(
+            candidate_id="tool-result-1",
+            kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+            content="first result",
+            role="tool",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=1,
+        ),
+        ContextCandidate(
+            candidate_id="assistant-turn-2",
+            kind=ContextCandidateKind.PREVIOUS_OUTPUT,
+            content="[empty provider tool-call turn]",
+            role="assistant",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=2,
+        ),
+        ContextCandidate(
+            candidate_id="tool-result-2",
+            kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+            content="second result",
+            role="tool",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=3,
+        ),
+    ]
+
+    result = assembler.assemble_candidates(
+        candidates,
+        policy=ContextAssemblyPolicy(max_prompt_chars=1_000),
+    )
+
+    assert [item.candidate_id for item in result.selected_candidates] == [
+        "assistant-turn-1",
+        "tool-result-1",
+        "assistant-turn-2",
+        "tool-result-2",
+    ]
+
+
+def test_context_request_builder_keeps_duplicate_assistant_tool_wire_sequence() -> None:
+    candidates = [
+        ContextCandidate(
+            candidate_id="assistant-turn-1",
+            kind=ContextCandidateKind.PREVIOUS_OUTPUT,
+            content="[empty provider tool-call turn]",
+            role="assistant",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=0,
+        ),
+        ContextCandidate(
+            candidate_id="tool-result-1",
+            kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+            content="first result",
+            role="tool",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=1,
+        ),
+        ContextCandidate(
+            candidate_id="assistant-turn-2",
+            kind=ContextCandidateKind.PREVIOUS_OUTPUT,
+            content="[empty provider tool-call turn]",
+            role="assistant",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=2,
+        ),
+        ContextCandidate(
+            candidate_id="tool-result-2",
+            kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+            content="second result",
+            role="tool",
+            retention=ContextCandidateRetention.REQUIRED,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            source_order=3,
+        ),
+    ]
+    structured = [
+        LLMMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                LLMToolCall(
+                    id="call-1",
+                    function=LLMToolFunctionCall(name="file_reader", arguments="{}"),
+                )
+            ],
+        ),
+        LLMMessage(role="tool", content="first result", tool_call_id="call-1"),
+        LLMMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                LLMToolCall(
+                    id="call-2",
+                    function=LLMToolFunctionCall(name="file_reader", arguments="{}"),
+                )
+            ],
+        ),
+        LLMMessage(role="tool", content="second result", tool_call_id="call-2"),
+    ]
+    request = ContextRequestBuilder(
+        ContextAssembler(renderer=lambda _payload: "", token_counter=ExactCounter())
+    ).build(
+        candidates,
+        policy=ContextAssemblyPolicy(
+            purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
+            max_prompt_chars=1_000,
+            max_prompt_tokens=900,
+        ),
+        structured_messages=structured,
+    ).require_request()
+
+    assert [(message.role, message.tool_call_id) for message in request.messages] == [
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("assistant", None),
+        ("tool", "call-2"),
+    ]
 
 
 def test_typed_context_assembler_omits_explicit_stale_evidence() -> None:
