@@ -47,7 +47,7 @@
 
 ## 2. MVP Python Interfaces
 
-The first implementation lives under `Code/` as a Python package and CLI. It plans tasks only; it does not execute tools yet.
+The first implementation lives under `Code/` as a Python package and CLI. It plans tasks and can execute explicitly admitted typed tool calls; provider-native execution remains opt-in and default-off.
 
 ### LLM Configuration
 
@@ -61,11 +61,17 @@ OpenAI-compatible providers are configured with environment variables:
 | `OPENPILOT_LLM_MODEL` | No | `gpt-4o-mini` | Chat completion model name. |
 | `OPENPILOT_LLM_TIMEOUT_SECONDS` | No | `60` | Provider timeout. |
 | `OPENPILOT_LLM_TEMPERATURE` | No | `0.2` | Default sampling temperature. |
-| `OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE` | No | unset (generic no-control) | Optional typed opt-in to the versioned `v1` profile `generic-openai-compatible`, `openai-chat-known`, or `deepseek-chat-known`; endpoint and model names never select a profile. |
+| `OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE` | No | unset (generic no-control) | Optional typed opt-in to a versioned `v1` profile: `generic-openai-compatible`, `openai-chat-known`, `deepseek-chat-known`, `anthropic-messages-known`, or `gemini-generate-content-known`; endpoint and model names never select a profile. |
 | `OPENPILOT_TOOL_EVENT_REASONING_MODE` | No | `disabled` | Economical policy for typed routine tool decisions; accepts only `provider_default` or `disabled`. |
-| `OPENPILOT_LLM_TOKENIZER_PATH` | No | Local DeepSeek cache | Optional explicit provider tokenizer JSON path. |
+| `OPENPILOT_LLM_TOKENIZER_PATH` | No | Local DeepSeek cache | Optional explicit provider tokenizer JSON path; known OpenAI profiles use local `tiktoken` model encodings when available. |
 | `OPENPILOT_CONTEXT_MAX_PROMPT_TOKENS` | No | `4096` | Exact token budget for the memory-context slice when a provider tokenizer is available. |
 | `OPENPILOT_CONTEXT_RESERVED_PROMPT_TOKENS` | No | `128` | Explicit framing/safety reserve deducted from assembled request content budget. |
+| `OPENPILOT_PROVIDER_TOOL_EXECUTION_ENABLED` | No | `false` | Explicit opt-in for the provider-native real-task entry point; default JSON planning is unchanged. |
+| `OPENPILOT_PROVIDER_TOOL_INITIAL_CONTEXT_PROJECTION_ENABLED` | No | `false` | Explicit read-only canary flag required when an owner supplies typed segmented/compact initial-context candidates; disabled callers fail closed before transport. |
+| `OPENPILOT_PROVIDER_TOOL_INITIAL_CONTEXT_MUTATION_ENABLED` | No | `false` | Separate default-off mutation projection flag; required with `allow_mutations` and confirmation when typed initial-context candidates are supplied to a mutation task. It never enables read-only projection. |
+| `OPENPILOT_PROVIDER_TOOL_COMPLETION_OUTCOME_FEEDBACK_ENABLED` | No | `false` | Typed experiment flag that lets the provider tool runner use the prior completion outcome for bounded budget recovery; it is copied into `RuntimeBudgetMetadata` and never inferred from a model name. |
+| `OPENPILOT_PROVIDER_TOOL_EXECUTION_MAX_ROUNDS` | No | `3` | Upper bound for provider tool-call rounds when the opt-in entry point is used. |
+| `OPENPILOT_PROVIDER_TOOL_EXECUTION_BUDGET_PROFILE` | No | `canary` | Typed budget lane: `canary` keeps bounded smoke-test limits; `real_read_only` enables 12,288 prompt tokens, 4,096 per-call completion ceiling, 24,000 total completion tokens, 8 rounds, 40 calls, and 60 file reads with zero edits/creates for explicit non-mutating provider tasks; `real_mutation` has the same context ceilings but admits only one edit, zero creates, and one verification for explicitly confirmed provider-native mutation tasks. |
 | `OPENPILOT_EMBEDDING_PROVIDER` | No | `openai-compatible` | Embedding provider label. |
 | `OPENPILOT_EMBEDDING_BASE_URL` | No | Inherits `OPENPILOT_LLM_BASE_URL` | OpenAI-compatible embedding endpoint. |
 | `OPENPILOT_EMBEDDING_API_KEY` | No | Inherits `OPENPILOT_LLM_API_KEY` | Embedding API key. |
@@ -83,7 +89,16 @@ because the CLI was launched from `Code/` instead of the repository root.
 
 `LLMRequest`:
 
-- `messages`: list of `{role, content}` chat messages.
+- `messages`: list of `{role, content}` chat messages. Assistant tool turns may also
+  carry `reasoning_content` and `tool_calls`; tool results use `role=tool` and
+  `tool_call_id`.
+- `tools`: optional strict function definitions. DeepSeek tool continuations must
+  use `LLMToolCall`/`LLMToolResult` round-trip values so assistant
+  `reasoning_content` and `tool_call_id` fields are preserved.
+- `tool_choice`: optional provider-neutral tool-choice control (`auto`, `none`,
+  or `required`). It is omitted by default. Provider-native tool runners use
+  `required` only while a non-finalization tool action is expected; finalization
+  requests omit it so a no-tool final answer can complete normally.
 - `response_format`: `text` or `json_object`.
 - `temperature`: optional per-request override.
 - `max_tokens`: optional token limit.
@@ -93,19 +108,156 @@ because the CLI was launched from `Code/` instead of the repository root.
 `ReasoningPolicy` separates `mode`, optional `effort`, optional reasoning-token
 budget, and unsupported-capability behavior from provider transport fields.
 `core/reasoning.py` resolves it through a versioned typed capability profile and
-produces `ResolvedReasoningPolicy`; only the LLM transport renders OpenAI- or
-DeepSeek-compatible request fields. Official provider endpoints may select a
-known profile automatically. Unknown/custom endpoints use the conservative
-generic profile unless explicitly configured, and unsupported requests either
-reject or resolve to provider default according to the typed policy. Model-name
-substring matching is not a capability source.
+produces `ResolvedReasoningPolicy`; `core/reasoning_adapters.py` then renders
+provider-specific request fields and normalizes reasoning usage. Profiles for
+OpenAI Chat Completions, DeepSeek Chat Completions, Anthropic Messages, and
+Gemini GenerateContent are selected only through the typed settings value;
+endpoint/model strings are never capability evidence. Unknown/custom
+endpoints use the conservative generic profile unless explicitly configured.
+OpenAI-compatible profiles use the existing OpenAI client. Anthropic and
+Gemini profiles use the native `httpx` route, which currently supports
+non-streaming text/JSON requests only; unsupported tools or streaming calls
+fail closed. Unsupported requests either reject or resolve to provider default
+according to the typed policy. `ReasoningUsageObservation.reasoning_tokens=None`
+means the provider did not expose a trustworthy count; it must not be converted
+to zero.
+For `response_format=json_object`, a known capability profile that supports an
+explicit disabled mode maps `provider_default` to a disabled transport mode so
+provider reasoning cannot consume the entire visible JSON completion ceiling.
+Profiles without a proven disabled transport keep `provider_default` omitted;
+they do not guess a provider field. Explicit enabled reasoning remains a
+separate policy choice and must be evaluated with its own completion reserve.
+
+DeepSeek tool-call thinking requests require the complete assistant
+`reasoning_content` and `tool_calls` to be followed by matching `role=tool`
+messages. `append_deepseek_tool_round_trip()` enforces call-ID uniqueness,
+ordering, and non-empty reasoning evidence before constructing the next request;
+the execution loop uses the provider-neutral `append_tool_round_trip()` contract
+for OpenAI-compatible lanes and enables the DeepSeek reasoning requirement only
+when the resolved profile requires it. The OpenAI no-reasoning profile omits
+`reasoning_effort` and DeepSeek `extra_body.thinking` fields entirely.
+`LLMClient` also reassembles OpenAI-compatible streaming tool-call fragments
+before returning the same normalized response. The adapter does not execute
+tools or replace the project `ToolCallMetadata` lifecycle; native Anthropic and
+Gemini transports fail closed until their own tool wire contracts are added.
+If a provider-native call is later admitted to runtime execution, it must pass
+`core.provider_tool_admission` first: registry/executor existence, typed input
+requirements, permission confirmation, and `RuntimeBudgetMetadata` are checked
+before a `ToolSelection` is produced. An explicit caller may then pass the
+admissions to `ToolEventLoopRunner.run_provider_tool_calls()`. That bridge
+reuses the normal pending/running/completed/error events, checkpoint prepare and
+observation, `ToolExecutor`, `StateUpdater`, verification, and diagnostics; it
+does not enable provider-native execution in the JSON planner by default.
+The project-owned `call_id` remains authoritative while `provider_call_id` is
+copied only for wire correlation.
+
+`ProviderToolRoundTripRunner` is the bounded explicit orchestration path. It
+uses the context assembler for every provider request, reserves exact provider
+tool-schema tokens when the configured tokenizer is available, admits calls,
+executes them through `ToolEventLoopRunner`, and appends compact typed
+`role=tool` results for the next DeepSeek turn. Tool-call assistant messages and
+tool results are required, non-truncatable context candidates so provider
+reasoning/tool state cannot be silently compacted away. A real-task caller must
+also provide an explicit tool allowlist; mutation tools require code-level
+mutation opt-in at both the task entry and round-trip boundary, plus
+`user_confirmed=True`. While the runner is waiting for a provider tool action,
+the request carries `tool_choice=required`; explicit finalization requests omit
+tool choice and expose no tools. A recoverable execution error may
+continue only when the failed tool is read-only and no checkpoint or
+indeterminate-side-effect boundary was crossed; mutation, command, and
+checkpoint failures remain terminal and are still returned as typed tool
+results for evidence. Provider-facing results use a bounded projection with
+artifact hash/source lineage and a short preview; generated code artifacts also
+carry a checksum-verified `artifact_ref`. A subsequent
+`file_patch_writer(operation_kind=add_symbol)` may pass that reference instead
+of copying the preview into `generated_unit`; the provider round-trip runtime
+resolves and verifies the full in-memory artifact without widening the task's
+write scope. Missing, stale, or mismatched references fail closed. Completed
+historical tool rounds are compacted while the active continuation IDs remain
+intact. The
+per-round provider call fan-out is also bounded by remaining prompt headroom.
+For a mutation-capable route, once all declared reads are complete and before a
+writer succeeds, the provider tool surface is narrowed to the generator/writer
+handoff; `command_executor` is not an exploratory read action in that phase.
+After the scoped writer succeeds, only `command_executor` is exposed for the
+exact typed validation command. The provider must pass that command without a
+`cd` prefix or shell wrapper; `cwd` is a separate typed field, and chaining,
+redirection, pipes, and substitutions are rejected. Read-only routes without
+mutation tools retain their ordinary command surface. Round-trip evidence also carries bounded
+`handoff_diagnostics` with artifact checksum/source/provider lineage without
+replaying generated code.
+After a successful mutation, the runtime replaces the old wire history with a
+narrow typed continuation containing the bounded mutation receipt and the exact
+`Task.validation_command`; the internal `generated_unit` is not replayed. If
+that required continuation cannot fit, the runner returns the typed
+`ProviderToolPostMutationContextBudgetFailure` and never treats the mutation as
+task completion.
+
+Provider tool schemas are derived from registered `ToolContractMetadata`,
+including operation-conditional requirements. In particular,
+`file_patch_writer` exposes `operation_kind=modify_symbol`, `symbol_name`, and
+the `replacement_text`/`patch` alternatives; for `operation_kind=add_symbol`,
+it accepts either `generated_unit` or the provider-only `artifact_ref`.
+Provider admission applies the same defaults and conditions before execution.
+A call that omits those fields is a typed `MissingRequiredInput` block, never
+an executor-side fallback; an invalid artifact reference is a typed handoff
+failure, never a regenerated or whole-file fallback.
+The explicit read-only inspect/analysis entry point additionally keeps a
+cross-round ledger of normalized tool/path signatures: a repeated signature is
+returned as `ProviderToolDuplicateAttempt` without executing the tool, and
+consecutive rounds with no successful evidence stop with
+`ProviderToolNoProgress`. When `Task.read_files` is present for those task
+kinds, the same list is an admission-time canonicalized read scope; an outside
+path is a recoverable `ProviderToolScopeViolation`. Explicit provider-native
+mutation tasks additionally require non-empty `Task.read_files` and
+`Task.write_files`, use the `real_mutation` budget profile, and recheck both
+scopes plus the exact `Task.validation_command` at the event-loop boundary.
+`Task.support_context_files` is a separate model-facing context surface: the
+provider entry projects each listed file as required body-free
+`ContextCandidate` metadata containing path/hash/role information, but the
+field is not read authority, not write authority, not validation evidence, and
+does not participate in writer-routing read completion. A provider `file_reader`
+call to a support-only path is still rejected unless that path is also explicitly
+listed in `Task.read_files`. Mutation tasks using this projection must pass the
+same explicit mutation initial-context opt-in as other typed prompt candidates.
+The legacy JSON planner does not inherit the provider-native mutation policy.
+If every scoped file has a complete typed
+artifact and a subsequent round contains only duplicate reads of those files,
+the read-only route makes at most one no-tools finalization request. A
+non-empty final response completes the task; an empty response or a tool call
+   despite the no-tools request fails closed with a typed finalization error.
+For an explicitly confirmed mutation route, the same duplicate-only condition
+may cause one bounded provider-facing guidance message asking the model to use
+the declared typed writer; this message does not execute a tool, widen scope,
+or bypass admission. Further duplicate-only mutation rounds still terminate as
+`ProviderToolNoProgress`.
+Complete artifacts with bounded provider projections may admit a new bounded
+page variant; each source has a deterministic page cap. Finalization uses a
+bounded excerpt of the complete artifact rather than replaying the full tool
+history. Provider reasoning controls remain opt-in through the versioned
+capability profile; the route does not infer them from a model or endpoint name.
+An owner may provide `initial_context_candidates` to project segmented task,
+constraint, dialogue, and artifact candidates on the first request. The same
+typed projection is reassembled on later tool rounds while active assistant
+tool-call and `role=tool` messages remain intact; omitted optional history may
+not be promoted to required merely because a new round is appended. The
+default path without this argument is unchanged.
+If a finalization response ends at the completion limit with all reported
+completion tokens attributed to reasoning and no visible content, the typed
+stop is `ProviderToolFinalizationReasoningExhausted`.
+`ProviderToolRoundTripRunner` defaults `allow_mutations=False`; mutation
+exposure without that opt-in or user confirmation fails closed with
+`ProviderToolMutationOptInRequired` or
+`ProviderToolMutationConfirmationRequired`. A task caller that requests more
+rounds than its typed profile permits fails with
+`ProviderToolMaxRoundsExceedsBudget`.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally
 separate from enhancement completion complexity: the former selects
 provider-neutral reasoning intent, while the latter reserves completion
 tokens. Capability resolution and provider-specific rendering remain confined
-to `core/reasoning.py` and the LLM transport.
+to the reasoning resolver/adapter layer and the LLM transport.
 
 The tool planner selects the economical setting only for typed routine work:
 bounded inspection with explicit reads, exact validation with its declared
@@ -123,6 +275,23 @@ refunds the reservation, while an unknown transport failure conservatively keeps
 it. A `length` / `max_tokens` finish grants one bounded, one-shot recovery bonus
 to the next controller call instead of permanently raising the ceiling. JSON
 repair is limited to one provider attempt for this purpose.
+
+The outcome-sensitive feedback lane is opt-in through the typed
+`RuntimeBudgetMetadata.tool_event_completion_outcome_feedback_enabled` field.
+When enabled, the runtime records a `ToolEventCompletionOutcome` snapshot and
+only `empty_response` or `truncated` may grant the existing bounded recovery
+step; `tool_progress`, `normal`, and `no_progress` never expand the budget.
+Missing historical fields default to disabled/no outcome, so replay and
+checkpoint migration preserve the previous static+dynamic behavior.
+
+Provider-native task results expose a bounded `budget_diagnostics` projection.
+Each entry is validated by the typed `ProviderBudgetDiagnostic` contract and
+contains requested/reserved/actual-or-unknown completion usage, before/after
+budget counters, finish reason, typed outcome, cap-hit, feedback-route flag,
+and (for a failed transport attempt) only the typed error class. The result
+also echoes the requested reasoning complexity/mode, execution mode, budget
+profile, and a credential-free `budget_contract_sha256`; it never stores the
+prompt, tool-result body, provider secret, or raw exception text.
 
 Post-core enhancement calls use a second, independent completion pool owned by
 the same `RuntimeBudgetMetadata`; it is not shared with the controller decision
@@ -331,7 +500,10 @@ With a locally available provider tokenizer, the production memory context build
 `OPENPILOT_CONTEXT_MAX_PROMPT_TOKENS` (4,096 by default; tool callers reuse
 `max_tokens`) together with the 16,000-character safety ceiling. Without a
 tokenizer it explicitly falls back to the existing character boundary; it never
-labels `chars/4` as an exact token count. Candidate selection uses typed
+labels `chars/4` as an exact token count. The OpenAI tokenizer path is enabled
+only for the explicit `openai-chat-known` profile and a model recognized by
+`tiktoken`; unknown models remain unavailable rather than guessing an encoding.
+Candidate selection uses typed
 retention, priority, and source-order policy; rendering remains system prompt,
 recent dialog as a contiguous suffix, related files, related memories, then
 environment evidence. Candidate decisions are authoritative. Section-level
@@ -374,7 +546,9 @@ non-required prefix, and adopts the summary only if it fits completely and
 is persisted as a checksum `context_compaction` artifact. Each compacted source
 decision links to the artifact candidate; `ContextCompactionRecord` binds the
 source fingerprint/IDs, algorithm, summary, and before/after size, while
-`ContextCompactionBinding` binds that record to `DurableArtifactReference`.
+`ContextCompactionBinding` binds that record to `DurableArtifactReference` and,
+for newly produced bindings, the body-free source-binding hash used by reusable
+compaction admission. Historical bindings may omit that hash and remain readable.
 `RuntimePromptContextSnapshot` carries the bindings and recovery validates every
 referenced artifact. Source changes produce a new fingerprint; missing/corrupt
 compaction artifacts fail closed. The exact `prompt_context` artifact remains the
@@ -386,8 +560,85 @@ selected completely, assembly atomically falls back to the source candidates.
 The opt-in `llm_rolling_summary_v1` projection uses a strict nested summary
 payload and separate summary-token evidence; it is accepted only when its
 source fingerprint, usage/finish evidence, and recent-suffix fit are validated.
+Its static summary cap is additionally bounded per request by the remaining exact
+prompt budget after used prompt tokens, required-context reserve, the recent
+dialog suffix, and a response-schema reserve. If that dynamic slot is zero, the
+summary provider is not called and deterministic observation masking remains the
+selected source view.
 The default remains deterministic observation masking, and invalid or
 over-budget generated summaries fall back to that current view.
+Each builder pass also exposes body-free `ContextCompactionAttempt` values inside
+`ContextSelectionMetadata.compaction_attempts`. These owned nested values record the
+source IDs/fingerprint, attempt ordinal, provider status, builder selection status,
+typed fallback reason, bounded token/finish evidence, and artifact-sink status.
+`provider_status=accepted` is deliberately independent from
+`selection_status=selected`: a provider-accepted summary may still be rejected by
+the atomic prompt or recent-suffix gate. The attempts carry no prompt, source,
+summary, credential, or artifact body and do not change the compact authority.
+Optional selection outcomes further distinguish a generated summary that was
+observed but not artifact-bound (`generated_observed_only`), a summary that
+displaced recent dialog (`generated_recent_suffix_displaced`), and a sink
+failure. These diagnostics are excluded from request identity and omitted from
+older receipts without affecting replay compatibility.
+`ContextSelectionMetadata.compaction_reuse_admissions` may additionally carry
+body-free shadow evidence for considering an already generated compaction
+artifact. It records the source IDs/fingerprint, source binding hash,
+required/recent guard IDs, session-constraint hash, artifact identity/checksum,
+typed admission status, and typed rejection reason. This value is shadow-only:
+`used_in_prompt` must be `false`, and an admitted shadow record does not create
+a compaction binding or govern source omissions.
+When a `MemoryContextBuilder` is explicitly configured with a reusable
+compaction shadow provider, the provider receives only body-free digests and
+hashes (candidate IDs/kinds/content hashes, prompt hash, request hash, and
+session hashes). It may append `compaction_reuse_admissions`, but it cannot add
+candidates, change request identity, alter prompt text, create artifact
+bindings, or authorize prompt use. Provider failures fail closed; strict source
+mode reports them as `context_compaction_reuse` source errors.
+The same selection snapshot may carry optional
+`compaction_reuse_shadow_failures` values. These typed diagnostics distinguish a
+provider exception, an empty result, and an invalid provider result using only a
+bounded exception type; they never serialize exception messages, prompt bodies,
+or credentials. Non-strict mode records the diagnostic while preserving the
+existing assembly; strict mode still raises `context_compaction_reuse`.
+The memory-layer artifact source adapter can build such a shadow provider from
+explicit body-free reusable compaction candidates or from existing
+`ContextCompactionBinding` values by retaining only artifact identity/checksum,
+source binding hashes, guard IDs, and the generated-summary fingerprint. It
+does not retain or read the summary body. Checkpoint discovery over
+`RuntimePromptContextSnapshot.compaction_bindings` is also shadow-only. New
+bindings carry the body-free source-binding hash directly; an external
+source-binding hash index is accepted only as a historical compatibility input
+for older bindings that lack the field. If a persisted hash and external hash
+disagree, discovery rejects as `artifact_contract_invalid`; historical bindings
+without either hash are rejected rather than admitted from a hash recomputed on
+the current prompt payload.
+Before a reusable compaction artifact can be considered for any future prompt-use
+transition, the runtime-only preflight helper must pass source binding,
+artifact integrity, required/recent retention, deterministic semantic-fact
+coverage, and trial assembly checks. That preflight is body-free in receipts and
+does not change the real prompt; `ContextCompactionReuseAdmission` remains
+shadow-only and cannot be flipped to `used_in_prompt=true`.
+The follow-on runtime-only simulation helper may compare raw assembly with an
+in-memory reusable projection. It records only hashes, character counts and
+candidate IDs, requires exact governed source replacement plus required/recent
+retention and positive prompt-character reduction, and still does not mutate
+production prompts or authorize `used_in_prompt=true`. When an explicit token
+counter and token budget are supplied, the simulation may additionally record
+raw/reusable prompt token counts and token deltas. Those values are accounting
+evidence for the canary path only; they are not provider usage or billing
+evidence unless produced by a real provider run.
+
+The provider summary factory is runtime-gated by the typed settings
+`OPENPILOT_ROLLING_SUMMARY_ENABLED` (default `false`) and
+`OPENPILOT_ROLLING_SUMMARY_TOKEN_LIMIT` (default `256`, maximum `4096`). When
+enabled, `IntelligentAutopilot` injects the existing `RollingSummaryAdapter`
+and a provider-neutral JSON request factory. The factory uses the
+`memory_compression` purpose, `json_object` output, no tools, temperature `0`,
+and typed disabled reasoning. It is a derived projection only: the adapter
+still validates source IDs, source fingerprint, usage, finish reason, schema,
+and summary budget, while the context builder keeps the deterministic source
+view on every failure. The flag does not authorize file writes, commands, or
+changes to required constraints.
 Recoverable tool-planning prompts apply the same boundary ephemerally to explicit
 large observation fields while retaining paths, commands, operation kind, symbol,
 mode, errors, and the original typed metadata unchanged.
@@ -433,6 +684,9 @@ effects only. A write/implement task without observed mutation evidence, or a
 validation task without a successful argv-equivalent execution of its declared
 `validation_command`, cannot be marked completed. A successful substitute such
 as `compileall` therefore cannot satisfy a requested `pytest` task.
+`Task.support_context_files` is likewise separate from both planned and observed
+file state: it may make support identities visible to the model, but it cannot
+authorize or prove reads, writes, validations, or completion.
 
 `RuntimeStateMetadata.session_constraints` is the bounded, conversation-scoped
 ledger for explicit user constraints that must survive dialog compaction. It
@@ -454,15 +708,21 @@ project root; `SessionTurn` carries one source turn; and `SessionIngressState`
 holds pending proposals until explicit confirmation. Interactive CLI ingress
 now owns this state, standard/enhanced planner and decomposer prompts receive
 the active projection, and `RuntimeCheckpointMetadata.session_ingress_state`
-round-trips the bounded turn/proposal snapshot. Resume rejects a supplied
-ingress state whose identity or constraint snapshot differs from the
-checkpoint. The main tool-event loop fails closed before Provider transport if
+round-trips the bounded turn/proposal snapshot. When the snapshot is present,
+its `ConversationIdentity.run_id` must equal checkpoint `session_id`; the
+checkpoint's top-level `run_id` remains the diagnostic/checkpoint-store routing
+identity. Resume rejects a supplied ingress state whose identity or constraint
+snapshot differs from the checkpoint. The main tool-event loop fails closed before Provider transport if
 the complete active constraint projection was removed by prompt budgeting.
 The interactive ingress routes `/constraints`, `/confirm`, `/reject`, and
 `/revoke` through one reducer; newer same-key pending proposals supersede older
 ones, and typed `SessionConstraintLimits` bound proposal/entry counts and
 serialized values. Active entries retain the confirmation turn and revoked
 tombstones retain the revocation turn; quota violations fail closed.
+The ledger's `canonical_hash` covers the complete persisted snapshot, including
+the ingress cursor; the derived `authority_hash` excludes `processed_through_turn`
+and is the stable source identity of the model-facing required constraint
+projection, so ordinary dialog noise does not stale an unchanged constraint.
 This establishes offline production wiring; it does not authorize a
 full-conversation Provider canary or claim a Token/quality gain.
 
@@ -490,7 +750,9 @@ state is not fed into another automatic repair iteration.
 Fast and module-owned project-improvement tool paths serialize the same existing
 `ToolCallMetadata`, `ToolContextMetadata`, `ToolErrorMetadata`, and
 `ToolExecutionEnvelopeMetadata` used by runtime diagnostics. Each logical
-invocation has a unique call ID and one durable start/terminal pair; internal
+invocation has a unique project-owned call ID and one durable start/terminal pair;
+provider-native calls may additionally carry a typed `provider_call_id`, which is
+wire correlation only and never replaces the project call ID. Internal
 retries do not inflate logical call counts. Diagnostic-hook failure is isolated
 from execution. Registry-backed file, README, and bounded bug-fix mutations also
 derive targets from one shared mutation descriptor, require explicit
@@ -908,6 +1170,22 @@ planning. A typical completion-report summary chain is:
    metadata and generates the summary.
 
 Built-in local tools:
+
+- `file_reader`
+  - Capability: `file_read`
+  - Permission: `low`
+  - Inputs: `file_path`, optional `read_mode`, `max_lines`, and `offset`
+  - `full` mode returns the complete artifact by default; when an explicit
+    `max_lines` or `offset` is supplied it honors that bounded window.
+  - `adaptive` follows the file-type strategy by default (code/config files
+    remain full reads), but an explicit `max_lines` or `offset` always forces a
+    bounded window and reports `truncated`/line metadata consistently.
+  - `range` and `offset` are accepted aliases for bounded window reads.
+  - Explicit bounded reads return a typed `read_window` value containing the
+    effective `read_mode`, `offset`, and `max_lines`; `truncated` remains true
+    when the window does not cover the entire source. Provider round-trip
+    completion may treat this result as sufficient only when the task carries
+    a matching typed `FileReadWindowSpec`.
 
 - `directory_lister`
   - Capability: `file_read`

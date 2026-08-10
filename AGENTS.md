@@ -66,6 +66,20 @@ update this file together with `API.md`.
   root task's write, command, and network authority and must expose its side
   effects; a project-scoped Python validation must fail closed until a ready
   environment is attached, never silently fall back to the host interpreter.
+- Provider-native mutation routing must remain phase-specific: after declared
+  reads and before a scoped writer succeeds, do not expose `command_executor`
+  as an exploratory action; after the writer, expose it only for the exact
+  typed validation command. Read-only command routes remain unchanged.
+- Typed initial-context projection is read-only by default. A mutation task may
+  supply projected candidates only with the separate default-off mutation
+  projection opt-in, explicit `allow_mutations`, user confirmation, and the
+  `real_mutation` budget profile; the read-only projection flag must never
+  authorize writes.
+- `Task.support_context_files` is model-facing context only. It may be projected
+  as body-free required `ContextCandidate` metadata, but it never grants read or
+  write authority, never satisfies validation/completion, and never participates
+  in writer-routing read completion. Use `Task.read_files` only for required
+  read-before-write evidence and read admission scope.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
