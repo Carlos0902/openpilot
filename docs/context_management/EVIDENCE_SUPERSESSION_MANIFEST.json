@@ -1,0 +1,24 @@
+{
+  "schema": "context-evidence-supersession-v1",
+  "policy": "Receipts under experiment runs are immutable historical artifacts. This manifest identifies which receipt is authoritative for the current checkout.",
+  "entries": [
+    {
+      "phase": "H8-R2BC",
+      "historical_receipt": "experiments/full_architecture_context_observation/runs/phase_h8r2bc_artifact_source_adapter_20260809_v1/aggregate/receipt.json",
+      "historical_aggregate_hash": "sha256:0f2581c2dabe3587dc989300c23a613b86786400ec224fe7e48e57a1e36f2d71",
+      "status": "superseded",
+      "superseded_by": "experiments/full_architecture_context_observation/runs/phase_h8r2bc_artifact_source_adapter_20260810_v2/aggregate/receipt.json",
+      "current_aggregate_hash": "sha256:1ec7205d4ffe9c88b7681142f700580f0333c512e25e1e9e0cd0f4d62ec977b5",
+      "reason": "The historical fixture used an ID-only source fingerprint; the current builder requires the content-aware authoritative fingerprint."
+    },
+    {
+      "phase": "H8-R2BD",
+      "historical_receipt": "experiments/full_architecture_context_observation/runs/phase_h8r2bd_checkpoint_discovery_shadow_20260809_v1/aggregate/receipt.json",
+      "historical_aggregate_hash": "sha256:bd61428de82251e618b816a57b55eb5a7bed4952d1b3b9c6fad936d335817f24",
+      "status": "superseded",
+      "superseded_by": "experiments/full_architecture_context_observation/runs/phase_h8r2bd_checkpoint_discovery_shadow_20260810_v2/aggregate/receipt.json",
+      "current_aggregate_hash": "sha256:97fc3093e55a81e8b23af90fba0f8e9d09ca8c56867a87b3cbae163645dff503",
+      "reason": "The historical fixture used an ID-only source fingerprint; the current builder requires the content-aware authoritative fingerprint."
+    }
+  ]
+}
