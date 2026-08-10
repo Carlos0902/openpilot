@@ -7,8 +7,8 @@ existing atomic compaction path.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -34,7 +34,7 @@ _SUMMARY_FIELDS = frozenset(
 
 
 def source_candidate_fingerprint(candidates: Sequence[Any]) -> str:
-    """Return the stable digest shared by deterministic and LLM summaries."""
+    """Return the stable digest shared by deterministic and provider summaries."""
 
     source_payload = [
         {

@@ -2144,6 +2144,30 @@ PYTHONPATH=Code/src pytest -q Code/tests
   attempt 的完整 usage/finish telemetry 纳入长期 trajectory；增量 previous
   summary 的生产调用和 checkpoint/replay 端到端 fixture 仍需在后续阶段补齐。
 
+### Provider rolling summary factory: bounded opt-in runtime wiring
+
+- 观察到的问题：将 provider rolling-summary factory 直接叠加到 governed
+  decomposition 基线时，factory 引用了尚未存在的 `source_candidate_fingerprint`，
+  导致模块导入失败；聚合分支中该符号被另一条上下文契约提交隐式提供，无法作为独立
+  PR 的有效依赖。
+- 复现：在 #101（`2c14a0e`）基线上只应用 rolling-summary factory 提交，运行
+  factory/context 测试，收集 `ImportError: cannot import name
+  'source_candidate_fingerprint'`；随后在同一切片中补齐最小来源指纹 helper、配置开关
+  和 autopilot 注入，并验证默认关闭路径不创建 provider factory。
+- 实现修复：新增 provider-neutral `rolling_summary_factory` 的默认关闭运行时接线，
+  以 `OPENPILOT_ROLLING_SUMMARY_ENABLED=false` 和有界的
+  `OPENPILOT_ROLLING_SUMMARY_TOKEN_LIMIT`（默认 256、上限 4096）控制；新增稳定的
+  source fingerprint helper。启用时只注入已有 provider-free adapter 的派生候选，
+  不增加工具、文件或 mutation 权限；无效/超预算/无证据输出仍由现有 deterministic
+  fallback 处理。
+- 验证证据：rolling-summary factory、settings、adapter、summary contract、memory
+  context 和 context assembly 定向集合 **116 passed**；`python -m compileall -q
+  Code/src` 与 `git diff --check` 通过。切片相对 #101 为 **684 行新增、1 行删除**，
+  未超过 3000 行大型 PR 阈值。
+- 剩余限制：真实 provider canary、长期 trajectory telemetry、增量 previous-summary
+  复用和端到端 checkpoint/replay 仍拆到后续 stacked PR；默认生产行为保持 deterministic
+  observation masking。
+
 ### Context Phase 10：Stage 3 session constraint boundary
 
 - 阶段计划：先写 `docs/context_management/PHASE_10_STAGE_3_SESSION_CONSTRAINT_PLAN.md`，
