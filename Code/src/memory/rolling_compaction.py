@@ -61,6 +61,27 @@ class RollingSummaryAttemptEvidence:
     finish_reason: str | None
 
 
+def provider_attempt_evidence_complete(
+    attempt: RollingSummaryAttemptEvidence | None,
+) -> bool:
+    """Return whether a provider attempt has trustworthy completion evidence."""
+
+    if attempt is None or not attempt.usage_observed or not attempt.usage:
+        return False
+    usage = attempt.usage
+    if not isinstance(usage, Mapping):
+        return False
+    if any(
+        not isinstance(usage.get(key), int)
+        or isinstance(usage.get(key), bool)
+        or usage.get(key) < 0
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+    ):
+        return False
+    finish_reason = str(attempt.finish_reason or "").strip().lower()
+    return finish_reason in _COMPLETED_FINISH_REASONS
+
+
 @dataclass(frozen=True)
 class RollingSummaryRequest:
     """Immutable input snapshot for one rolling-summary validation pass."""
@@ -172,6 +193,23 @@ class RollingSummaryAdapter:
                 RollingSummaryFallbackReason.UNKNOWN_USAGE,
                 source_ids,
                 "provider usage was not observed; zero cannot be assumed",
+            )
+        if not isinstance(attempt.usage, Mapping):
+            return self._fallback(
+                RollingSummaryFallbackReason.UNKNOWN_USAGE,
+                source_ids,
+                "provider usage was not a structured object",
+            )
+        if any(
+            not isinstance(attempt.usage.get(key), int)
+            or isinstance(attempt.usage.get(key), bool)
+            or attempt.usage.get(key) < 0
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        ):
+            return self._fallback(
+                RollingSummaryFallbackReason.UNKNOWN_USAGE,
+                source_ids,
+                "provider usage was incomplete or invalid",
             )
         finish_reason = (attempt.finish_reason or "").strip().lower()
         if not finish_reason:
@@ -324,4 +362,5 @@ __all__ = [
     "RollingSummaryRequest",
     "RollingSummaryResult",
     "build_rolling_summary_record",
+    "provider_attempt_evidence_complete",
 ]

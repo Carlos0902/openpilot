@@ -101,6 +101,7 @@ class TaskGraphNodeMetadata(MetadataBase):
     required_inputs: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
     read_files: list[str] = Field(default_factory=list)
+    support_context_files: list[str] = Field(default_factory=list)
     write_files: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     can_run_parallel: bool = True

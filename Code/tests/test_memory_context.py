@@ -663,6 +663,7 @@ def test_memory_context_builder_compacts_omitted_dialog_with_artifact_binding(tm
 
     assert len(persisted) == 1
     assert len(context["context_compactions"]) == 1
+    assert context["context_compactions"][0]["source_binding_hash"].startswith("sha256:")
     assert "## Earlier Dialog Summary" in context["prompt_text"]
     selected_indexes = [
         int(item["content"].split("-", 2)[1]) for item in context["dialog_context"]
@@ -877,6 +878,38 @@ def test_memory_context_segmented_compaction_preserves_signals_and_masks_long_ob
     assert record.compacted_chars < record.original_chars
 
 
+def test_memory_context_segmented_compaction_preserves_structured_markers() -> None:
+    candidates = [
+        ContextCandidate(
+            candidate_id=f"dialog:marker-{index}",
+            kind=ContextCandidateKind.DIALOG,
+            role="assistant",
+            content=(
+                f"ASSISTANT: Decision {index}: {marker}. "
+                + (f"low-value-marker-{index} " * 160)
+            ),
+            source_order=index,
+        )
+        for index, marker in enumerate(
+            [
+                "scoped_target=calculator.py",
+                "forbidden_target=README.md",
+                "api_rule=preserve_api",
+                "validation_command=pytest_q",
+            ]
+        )
+    ]
+
+    record = MemoryContextBuilder._dialog_compaction_record(candidates)
+
+    assert "scoped_target=calculator.py" in record.summary
+    assert "forbidden_target=README.md" in record.summary
+    assert "api_rule=preserve_api" in record.summary
+    assert "validation_command=pytest_q" in record.summary
+    assert "low-value-marker" not in record.summary
+    assert record.compacted_chars < record.original_chars
+
+
 def _rolling_request_for_candidates(
     candidates: tuple[ContextCandidate, ...],
     limit: int,
@@ -908,7 +941,7 @@ def _rolling_request_for_candidates(
             "next_action": "continue with the current task",
         },
         attempt=RollingSummaryAttemptEvidence(
-            usage={"completion_tokens": 12},
+            usage={"prompt_tokens": 40, "completion_tokens": 12, "total_tokens": 52},
             usage_observed=True,
             finish_reason="stop",
         ),

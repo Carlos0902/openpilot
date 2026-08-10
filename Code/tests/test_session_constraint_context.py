@@ -89,10 +89,25 @@ def test_active_session_constraints_project_once_as_required_nontruncatable_cand
     assert candidate is not None
     assert candidate.retention == ContextCandidateRetention.REQUIRED
     assert candidate.truncation == ContextCandidateTruncation.FORBIDDEN
-    assert candidate.source_id == state.canonical_hash
+    assert candidate.source_id == state.authority_hash
     assert candidate.compacted_candidate_ids == []
     assert "calculator.py" in candidate.content
     assert "python -m pytest -q" in candidate.content
+
+
+def test_model_facing_constraint_candidate_is_stable_across_ingress_cursor_noise() -> None:
+    state = _state()
+    advanced = state.model_copy(update={"processed_through_turn": 50})
+
+    original = build_session_constraint_candidate(state)
+    after_noise = build_session_constraint_candidate(advanced)
+
+    assert original is not None and after_noise is not None
+    assert state.canonical_hash != advanced.canonical_hash
+    assert state.authority_hash == advanced.authority_hash
+    assert after_noise.candidate_id == original.candidate_id
+    assert after_noise.source_id == original.source_id
+    assert after_noise.content == original.content
 
 
 def test_memory_context_keeps_active_constraints_when_old_dialog_is_omitted() -> None:
@@ -166,7 +181,7 @@ def test_memory_context_projects_ingress_turns_as_source_linked_dialog_without_m
     }
     constraint_decisions = [item for item in decisions if item["kind"] == "constraint"]
     assert len(constraint_decisions) == 1
-    assert constraint_decisions[0]["source_id"] == state.session_constraints.canonical_hash
+    assert constraint_decisions[0]["source_id"] == state.session_constraints.authority_hash
     assert context["dialog_context"][1]["role"] == "assistant"
     after_files = {
         path.name: path.read_bytes()
