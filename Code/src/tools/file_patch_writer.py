@@ -29,8 +29,15 @@ FILE_PATCH_WRITER_DEFINITION = ToolDefinition(
         required_input_fields=["file_path"],
         input_defaults={"encoding": "utf-8", "operation_kind": "modify_symbol"},
         conditional_requirements=[
-            {"when": {"operation_kind": "add_symbol"}, "required": ["generated_unit"]},
-            {"when": {"operation_kind": "modify_symbol"}, "required_any_of": [["replacement_text"], ["patch"]]},
+            {
+                "when": {"operation_kind": "add_symbol"},
+                "required_any_of": [["generated_unit"], ["artifact_ref"]],
+            },
+            {
+                "when": {"operation_kind": "modify_symbol"},
+                "required": ["symbol_name"],
+                "required_any_of": [["replacement_text"], ["patch"]],
+            },
         ],
     ),
     timeout_seconds=30,
@@ -103,10 +110,37 @@ def file_patch_writer_executor(input_metadata: ToolInputMetadata) -> ToolResultM
     file_path.write_text(updated, encoding=encoding)
     index_update: dict[str, Any] = {}
     warnings: list[str] = []
-    try:
-        index_update = refresh_after_file_change(file_path)
-    except Exception as exc:
-        warnings.append(f"File index refresh failed: {exc}")
+    post_processing_scope = params.get("_post_processing_write_scope")
+    if isinstance(post_processing_scope, (list, tuple, set)):
+        manager = ProjectIndexManager.for_path(file_path)
+        derived_targets = {
+            manager.index_file_for(file_path).resolve(),
+            (file_path.parent / ProjectIndexManager.SKETCH_NAME).resolve(),
+        }
+        authorized_targets = {
+            Path(str(item)).expanduser().resolve()
+            for item in post_processing_scope
+            if str(item or "").strip()
+        }
+        if not derived_targets.intersection(authorized_targets):
+            index_update = {
+                "skipped": True,
+                "reason": "post_processing_target_outside_declared_write_scope",
+            }
+            warnings.append(
+                "File index and directory sketch refresh skipped because their derived paths "
+                "are outside the declared write scope."
+            )
+        else:
+            try:
+                index_update = refresh_after_file_change(file_path)
+            except Exception as exc:
+                warnings.append(f"File index refresh failed: {exc}")
+    else:
+        try:
+            index_update = refresh_after_file_change(file_path)
+        except Exception as exc:
+            warnings.append(f"File index refresh failed: {exc}")
 
     return {
         "file_path": str(file_path.absolute()),

@@ -134,7 +134,8 @@ def payload_to_artifact(tool_name: str, payload: Any, input_metadata: Any = None
             lines_read=payload.get("lines_read"),
             total_lines=payload.get("total_lines"),
             truncated=bool(payload.get("truncated", False)),
-            attributes=attr_without("content", "encoding", "size_bytes", "file_type", "lines_read", "total_lines", "truncated"),
+            read_window=payload.get("read_window"),
+            attributes=attr_without("content", "encoding", "size_bytes", "file_type", "lines_read", "total_lines", "truncated", "read_window"),
         )
     if tool_name == "multi_file_reader":
         return FileArtifactMetadata(

@@ -35,6 +35,24 @@ def test_file_reader_allows_in_project_file_as_control(tmp_path: Path) -> None:
     assert "hello" in result.result.content
 
 
+def test_file_reader_defaults_typed_read_mode_to_full(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    target = project_dir / "module.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+
+    input_metadata = ToolInputMetadata.from_mapping(
+        "file_reader",
+        {"file_path": str(target), "project_path": str(project_dir)},
+    )
+
+    result = file_reader_executor(input_metadata)
+
+    assert result.result.read_window is None
+    assert result.result.truncated is False
+    assert result.result.content == "value = 1\n"
+
+
 
 def test_file_reader_should_reject_project_external_file_when_project_path_is_provided(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"

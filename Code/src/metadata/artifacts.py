@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from metadata.base import JsonValue, MetadataBase, MetadataKind
+
+
+class FileReadMode(str, Enum):
+    """Typed file-reader modes used by routing and evidence accounting."""
+
+    FULL = "full"
+    ADAPTIVE = "adaptive"
+    SAMPLE = "sample"
+    TAIL = "tail"
+    RANGE = "range"
+    OFFSET = "offset"
+
+
+class FileReadWindow(BaseModel):
+    """An explicit bounded file-read window carried with one artifact."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
+
+    read_mode: FileReadMode
+    offset: int = Field(default=0, ge=0)
+    max_lines: int = Field(gt=0)
 
 
 class TextArtifactMetadata(MetadataBase):
@@ -43,6 +65,7 @@ class FileArtifactMetadata(TextArtifactMetadata):
     lines_read: int | None = None
     total_lines: int | None = None
     truncated: bool = False
+    read_window: FileReadWindow | None = None
 
 
 class CommandArtifactMetadata(MetadataBase):

@@ -258,6 +258,8 @@ class IntelligentAutopilot:
             from memory.context_builder import MemoryContextBuilder
             from memory.agents.memory_vault_agent import MemoryVaultAgent
             from core.token_counting import ProviderTokenCounter
+            from memory.rolling_compaction import RollingSummaryAdapter
+            from memory.rolling_summary_factory import build_llm_rolling_summary_request_factory
 
             self.memory_vault_agent = MemoryVaultAgent(
                 memory_store=self.memory_store,
@@ -265,12 +267,39 @@ class IntelligentAutopilot:
                 session_id_getter=lambda: self.session_id,
             )
             llm_settings = getattr(self.llm_client, "settings", None)
+            token_counter = ProviderTokenCounter.from_settings(llm_settings)
+            rolling_summary_enabled = bool(
+                getattr(llm_settings, "rolling_summary_enabled", False)
+            )
+            rolling_summary_adapter = (
+                RollingSummaryAdapter(count_tokens=token_counter.count_text)
+                if rolling_summary_enabled
+                else None
+            )
+            rolling_summary_request_factory = (
+                build_llm_rolling_summary_request_factory(
+                    self.llm_client,
+                    context_max_prompt_tokens=int(
+                        getattr(llm_settings, "context_max_prompt_tokens", 4096) or 4096
+                    ),
+                    timeout_seconds=getattr(llm_settings, "timeout_seconds", None),
+                    transport_retries=0,
+                )
+                if rolling_summary_enabled
+                else None
+            )
             self.memory_context_builder = MemoryContextBuilder(
                 memory_store=self.memory_store,
                 memory_vault_agent=self.memory_vault_agent,
-                token_counter=ProviderTokenCounter.from_settings(llm_settings),
+                token_counter=token_counter,
                 max_prompt_tokens=int(
                     getattr(llm_settings, "context_max_prompt_tokens", 4096) or 4096
+                ),
+                rolling_summary_enabled=rolling_summary_enabled,
+                rolling_summary_adapter=rolling_summary_adapter,
+                rolling_summary_request_factory=rolling_summary_request_factory,
+                rolling_summary_token_limit=int(
+                    getattr(llm_settings, "rolling_summary_token_limit", 256) or 256
                 ),
             )
         except Exception as exc:
@@ -3208,6 +3237,7 @@ class IntelligentAutopilot:
                 required_inputs=list(task.required_inputs),
                 expected_outputs=list(task.expected_outputs),
                 read_files=list(task.read_files),
+                support_context_files=list(task.support_context_files),
                 write_files=list(task.write_files),
                 dependencies=list(task.dependencies),
                 can_run_parallel=task.can_run_parallel,

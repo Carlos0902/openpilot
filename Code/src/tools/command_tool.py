@@ -64,7 +64,11 @@ class CommandResult(BaseModel):
 COMMAND_EXECUTOR_DEFINITION = ToolDefinition(
     name="command_executor",
     display_name="Command Executor",
-    description="Execute or dry-run a shell command with risk assessment",
+    description=(
+        "Execute or dry-run a shell command with risk assessment. For typed task validation, "
+        "pass only the exact validation command; provide cwd separately and do not prefix it "
+        "with cd, shell chaining, redirection, pipes, or substitutions."
+    ),
     version="1.0.0",
     capabilities=[ToolCapability.SHELL_EXECUTION],
     permission_level=PermissionLevel.HIGH,

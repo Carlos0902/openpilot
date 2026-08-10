@@ -46,6 +46,7 @@ from metadata import (
 )
 from tools.code_reviewer import code_reviewer_executor as _code_reviewer_executor
 from tools.builtin_tools import register_builtin_tools
+from tools.file_reader import file_reader_executor
 from tools.llm_summarizer import llm_summarizer_executor as _llm_summarizer_executor
 from tools.web_searcher import _build_search_query_variants, _default_http_get, web_searcher_executor as _web_searcher_executor
 from tools.tool_executor import ToolExecutor
@@ -1356,6 +1357,62 @@ def test_file_reader_supports_sample_mode(tmp_path) -> None:
     assert result.output_metadata.result["attributes"]["read_mode"] == "sample"
 
 
+def test_file_reader_honors_explicit_window_in_full_mode(tmp_path) -> None:
+    target = tmp_path / "window.py"
+    target.write_text("line-0\nline-1\nline-2\nline-3\nline-4\n", encoding="utf-8")
+    registry = _registered_registry()
+    executor = ToolExecutor(registry)
+    try:
+        result = executor.execute_single(
+            ToolSelection(
+                step_id="window-file",
+                tool_name="file_reader",
+                reason="capability_match",
+                input_metadata={
+                    "file_path": str(target),
+                    "max_lines": 2,
+                    "offset": 2,
+                },
+            )
+        )
+    finally:
+        executor.shutdown()
+
+    assert result.success
+    assert result.output_metadata.result["content"] == "line-2\nline-3\n"
+    assert result.output_metadata.result["lines_read"] == 2
+    assert result.output_metadata.result["total_lines"] == 5
+    assert result.output_metadata.result["truncated"] is True
+    assert result.output_metadata.result["attributes"]["read_mode"] == "window"
+
+
+def test_file_reader_supports_range_mode(tmp_path) -> None:
+    target = tmp_path / "range.py"
+    target.write_text("line-0\nline-1\nline-2\nline-3\n", encoding="utf-8")
+    result = file_reader_executor(
+        ToolInputMetadata(
+            file_path=str(target),
+            read_mode="range",
+            max_lines=2,
+            offset=1,
+        )
+    )
+
+    assert result.result["content"] == "line-1\nline-2\n"
+    assert result.result["attributes"]["read_mode"] == "range"
+
+    offset_result = file_reader_executor(
+        ToolInputMetadata(
+            file_path=str(target),
+            read_mode="offset",
+            max_lines=1,
+            offset=2,
+        )
+    )
+    assert offset_result.result["content"] == "line-2\n"
+    assert offset_result.result["attributes"]["read_mode"] == "offset"
+
+
 def test_file_reader_supports_tail_mode(tmp_path) -> None:
     target = tmp_path / "tail.log"
     target.write_text("one\ntwo\nthree\n", encoding="utf-8")
@@ -1411,6 +1468,95 @@ def test_file_reader_adaptive_mode_samples_log_files(tmp_path) -> None:
     assert result.output_metadata.result["content"] == "first\nsecond\n"
     assert result.output_metadata.result["truncated"] is True
     assert result.output_metadata.result["attributes"]["read_mode"] == "adaptive"
+
+
+def test_file_reader_adaptive_mode_respects_explicit_window_for_code_files(tmp_path) -> None:
+    target = tmp_path / "adaptive.py"
+    target.write_text("".join(f"line-{index}\n" for index in range(8)), encoding="utf-8")
+
+    result = file_reader_executor(
+        ToolInputMetadata(
+            file_path=str(target),
+            read_mode="adaptive",
+            max_lines=2,
+            offset=3,
+        )
+    )
+
+    assert result.result["content"] == "line-3\nline-4\n"
+    assert result.result["lines_read"] == 2
+    assert result.result["total_lines"] == 8
+    assert result.result["truncated"] is True
+    assert result.result["attributes"]["read_mode"] == "adaptive"
+    assert result.result["read_window"].model_dump(mode="json") == {
+        "read_mode": "adaptive",
+        "offset": 3,
+        "max_lines": 2,
+    }
+
+    with pytest.raises(ValueError, match="offset must be greater than or equal to 0"):
+        file_reader_executor(
+            ToolInputMetadata(
+                file_path=str(target),
+                read_mode="adaptive",
+                offset=-1,
+            )
+        )
+
+
+def test_file_read_window_spec_is_typed_and_round_trips() -> None:
+    from metadata import FileReadWindowSpec
+
+    spec = FileReadWindowSpec(
+        file_path="Code/tests/test_provider_tool_roundtrip.py",
+        read_mode="adaptive",
+        offset=1240,
+        max_lines=120,
+    )
+    restored = FileReadWindowSpec.model_validate_json(spec.model_dump_json())
+    assert restored == spec
+    with pytest.raises(ValueError):
+        FileReadWindowSpec(
+            file_path="Code/tests/test_provider_tool_roundtrip.py",
+            read_mode="adaptive",
+            offset=-1,
+            max_lines=120,
+        )
+
+
+def test_file_reader_adaptive_mode_without_window_stays_full_for_code_and_config(tmp_path) -> None:
+    for filename, content in (
+        ("adaptive.py", "line-0\nline-1\nline-2\n"),
+        ("adaptive.json", '{"name": "openpilot"}\n'),
+    ):
+        target = tmp_path / filename
+        target.write_text(content, encoding="utf-8")
+
+        result = file_reader_executor(
+            ToolInputMetadata(
+                file_path=str(target),
+                read_mode="adaptive",
+            )
+        )
+
+        assert result.result["content"] == content
+        assert result.result["truncated"] is False
+        assert result.result["lines_read"] == result.result["total_lines"]
+
+    config_target = tmp_path / "adaptive-window.json"
+    config_target.write_text('{"line": 0}\n{"line": 1}\n{"line": 2}\n', encoding="utf-8")
+    bounded = file_reader_executor(
+        ToolInputMetadata(
+            file_path=str(config_target),
+            read_mode="adaptive",
+            max_lines=1,
+            offset=1,
+        )
+    )
+    assert bounded.result["content"] == '{"line": 1}\n'
+    assert bounded.result["lines_read"] == 1
+    assert bounded.result["total_lines"] == 3
+    assert bounded.result["truncated"] is True
 
 
 def test_file_reader_returns_placeholder_for_binary_files(tmp_path) -> None:

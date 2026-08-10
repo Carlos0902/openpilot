@@ -8,7 +8,7 @@ from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
-from metadata import TaskResultMetadata
+from metadata import FileReadWindowSpec, TaskResultMetadata
 
 
 class TaskStatus(str, Enum):
@@ -64,6 +64,8 @@ class Task(BaseModel):
     required_inputs: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
     read_files: list[str] = Field(default_factory=list)
+    read_windows: list[FileReadWindowSpec] = Field(default_factory=list)
+    support_context_files: list[str] = Field(default_factory=list)
     write_files: list[str] = Field(default_factory=list)
     can_run_parallel: bool = True
     validation_command: str = ""

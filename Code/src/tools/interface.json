@@ -36,21 +36,21 @@
         {
           "name": "read_mode",
           "type": "string",
-          "description": "Read mode: full, adaptive, sample, or tail",
+          "description": "Read mode: full, adaptive, sample, tail, range, or offset",
           "required": false,
           "default": "full"
         },
         {
           "name": "max_lines",
           "type": "integer",
-          "description": "Maximum number of lines for adaptive, sample, or tail modes",
+          "description": "Maximum number of lines for adaptive, sample, tail, range, or offset modes",
           "required": false,
           "default": null
         },
         {
           "name": "offset",
           "type": "integer",
-          "description": "Line offset for adaptive or sample modes",
+          "description": "Line offset for adaptive, sample, range, or offset modes",
           "required": false,
           "default": 0
         }
@@ -772,7 +772,7 @@
     {
       "tool_name": "command_executor",
       "display_name": "Command Executor",
-      "function": "Execute or dry-run a shell command with risk assessment",
+      "function": "Execute or dry-run a shell command with risk assessment. For typed validation, pass the exact command and provide cwd separately; do not add cd, shell chaining, pipes, redirection, or substitutions.",
       "version": "1.0.0",
       "capabilities": [
         "shell_execution"

@@ -58,11 +58,16 @@ class ReasoningResolution(str, Enum):
 class ReasoningCapabilityProfileId(str, Enum):
     GENERIC_OPENAI_COMPATIBLE = "generic-openai-compatible"
     OPENAI_CHAT_KNOWN = "openai-chat-known"
+    OPENAI_CHAT_NO_REASONING_KNOWN = "openai-chat-no-reasoning-known"
     DEEPSEEK_CHAT_KNOWN = "deepseek-chat-known"
+    ANTHROPIC_MESSAGES_KNOWN = "anthropic-messages-known"
+    GEMINI_GENERATE_CONTENT_KNOWN = "gemini-generate-content-known"
 
 
 class ReasoningTransportFamily(str, Enum):
     OPENAI_CHAT_COMPLETIONS = "openai_chat_completions"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+    GOOGLE_GENERATE_CONTENT = "google_generate_content"
 
 
 class ReasoningPolicy(BaseModel):
@@ -97,6 +102,23 @@ class ResolvedReasoningPolicy(BaseModel):
     profile_id: ReasoningCapabilityProfileId
     profile_version: str
     transport_family: ReasoningTransportFamily
+
+
+class ReasoningUsageObservation(BaseModel):
+    """Provider-normalized reasoning evidence attached to one LLM response.
+
+    ``None`` for ``reasoning_tokens`` means the provider did not expose a
+    trustworthy token count. It is deliberately different from zero so that
+    budget and audit code never turns an absent field into a false measurement.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens_source: str | None = None
+    reasoning_content_present: bool = False
+    visible_content_empty: bool = False
+    finish_reason: str | None = None
 
 
 class LLMRequestMetadata(MetadataBase):
