@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -156,6 +157,20 @@ def _task() -> Task:
     )
 
 
+def _assert_generated_unit_redacted(result, generated_unit: str) -> None:
+    digest = hashlib.sha256(generated_unit.encode("utf-8")).hexdigest()
+    result_input = result.tool_results[0]["input_metadata"]
+    assert result_input["generated_unit"] is None
+    assert result_input["generated_unit_chars"] == len(generated_unit)
+    assert result_input["generated_unit_sha256"] == digest
+    typed_input = result.loop_metadata.tool_invocations[0].input_metadata
+    assert typed_input.generated_unit is None
+    assert typed_input.runtime_handles["_generated_unit_chars"] == len(
+        generated_unit
+    )
+    assert typed_input.runtime_handles["_generated_unit_sha256"] == digest
+
+
 def test_mutation_bridge_executes_prepared_inline_patch() -> None:
     executed = []
 
@@ -166,6 +181,7 @@ def test_mutation_bridge_executes_prepared_inline_patch() -> None:
 
     runtime = _runtime(Executor())
     scope = ["app.py.index.json", "sketch.json"]
+    generated_unit = "def added():\n    return True\n"
     result = ToolEventLoopRunner(_Owner(runtime)).run_provider_mutation_tool_calls(
         _task(),
         [
@@ -173,7 +189,7 @@ def test_mutation_bridge_executes_prepared_inline_patch() -> None:
                 {
                     "file_path": "app.py",
                     "operation_kind": "add_symbol",
-                    "generated_unit": "def added():\n    return True\n",
+                    "generated_unit": generated_unit,
                 }
             )
         ],
@@ -189,6 +205,7 @@ def test_mutation_bridge_executes_prepared_inline_patch() -> None:
     assert result.tool_results[0]["provider_call_id"] == "provider-writer"
     assert runtime.runtime_controller.state.budget.tool_calls_used == 1
     assert runtime.runtime_controller.state.budget.file_edits_used == 1
+    _assert_generated_unit_redacted(result, generated_unit)
 
 
 def test_mutation_bridge_resolves_artifact_before_executor() -> None:
@@ -225,6 +242,7 @@ def test_mutation_bridge_resolves_artifact_before_executor() -> None:
 
     assert result.success is True
     assert executed == [verified]
+    _assert_generated_unit_redacted(result, verified)
 
 
 def test_mutation_bridge_prepare_failure_prevents_execution() -> None:
@@ -236,6 +254,7 @@ def test_mutation_bridge_prepare_failure_prevents_execution() -> None:
             return _result()
 
     runtime = _runtime(Executor(), prepare=lambda *_args: False)
+    generated_unit = "def added():\n    return True\n"
     result = ToolEventLoopRunner(_Owner(runtime)).run_provider_mutation_tool_calls(
         _task(),
         [
@@ -243,7 +262,7 @@ def test_mutation_bridge_prepare_failure_prevents_execution() -> None:
                 {
                     "file_path": "app.py",
                     "operation_kind": "add_symbol",
-                    "generated_unit": "def added():\n    return True\n",
+                    "generated_unit": generated_unit,
                 }
             )
         ],
@@ -254,6 +273,7 @@ def test_mutation_bridge_prepare_failure_prevents_execution() -> None:
     assert result.loop_metadata.final_error.error_type == "CheckpointPrepareFailed"
     assert executed == []
     assert runtime.runtime_controller.state.budget.tool_calls_used == 0
+    _assert_generated_unit_redacted(result, generated_unit)
 
 
 def test_mutation_bridge_observation_failure_does_not_apply_state() -> None:
@@ -268,6 +288,7 @@ def test_mutation_bridge_observation_failure_does_not_apply_state() -> None:
         Executor(),
         observe=lambda *_args: False,
     )
+    generated_unit = "def added():\n    return True\n"
     result = ToolEventLoopRunner(_Owner(runtime)).run_provider_mutation_tool_calls(
         _task(),
         [
@@ -275,7 +296,7 @@ def test_mutation_bridge_observation_failure_does_not_apply_state() -> None:
                 {
                     "file_path": "app.py",
                     "operation_kind": "add_symbol",
-                    "generated_unit": "def added():\n    return True\n",
+                    "generated_unit": generated_unit,
                 }
             )
         ],
@@ -288,6 +309,7 @@ def test_mutation_bridge_observation_failure_does_not_apply_state() -> None:
     )
     assert len(executed) == 1
     assert runtime.runtime_controller.state.budget.tool_calls_used == 0
+    _assert_generated_unit_redacted(result, generated_unit)
 
 
 def test_mutation_bridge_defers_generic_verifier_for_exact_task_command() -> None:
@@ -322,18 +344,18 @@ def test_blocked_mutation_never_executes_or_validates_binding_inputs() -> None:
             raise AssertionError("blocked mutation must not execute")
 
     runtime = _runtime(Executor())
+    generated_unit = "def added():\n    return True\n"
+    admission = _admission(
+        {
+            "file_path": "app.py",
+            "operation_kind": "add_symbol",
+            "generated_unit": generated_unit,
+        },
+        confirmed=False,
+    )
     result = ToolEventLoopRunner(_Owner(runtime)).run_provider_mutation_tool_calls(
         _task(),
-        [
-            _admission(
-                {
-                    "file_path": "app.py",
-                    "operation_kind": "add_symbol",
-                    "generated_unit": "def added():\n    return True\n",
-                },
-                confirmed=False,
-            )
-        ],
+        [admission],
         code_artifact_ledger=object(),
         authorized_post_processing_write_scope=(item for item in ()),
     )
@@ -341,3 +363,5 @@ def test_blocked_mutation_never_executes_or_validates_binding_inputs() -> None:
     assert result.success is False
     assert result.loop_metadata.events[-1].event_type == "error"
     assert runtime.runtime_controller.state.budget.tool_calls_used == 0
+    _assert_generated_unit_redacted(result, generated_unit)
+    assert admission.tool_call.input_metadata.generated_unit == generated_unit
