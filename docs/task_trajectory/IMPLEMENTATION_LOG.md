@@ -2469,3 +2469,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
   malformed shapes, and never cache intermediate tool-call responses.
 - Remaining limitation: streaming tool-call fragments and native-provider
   transport routing remain separate changes.
+
+### Native provider routing in LLMClient
+
+- Observed failure: selecting a native Anthropic or Gemini capability profile
+  still constructed the OpenAI-compatible client, so the registered native
+  transport contracts were unreachable from normal completion calls.
+- Validation evidence: two offline regressions fail on the stacked base for
+  incorrect routing and unsupported streaming admission; focused and full
+  suites pass after the fix.
+- Implemented fix: route non-OpenAI transport families through the explicit
+  native registry and reject native streaming before transport.
+- Remaining limitation: native retry/proxy-fallback evidence, native streaming,
+  and streamed reasoning/tool-call aggregation remain separate changes.

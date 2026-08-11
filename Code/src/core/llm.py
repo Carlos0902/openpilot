@@ -15,6 +15,7 @@ from openai import APITimeoutError, OpenAI, OpenAIError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config import LLMSettings
+from core.native_llm_transport import get_native_transport
 from core.reasoning import (
     UnsupportedReasoningPolicyError,
     render_reasoning_transport,
@@ -29,7 +30,12 @@ from core.exceptions import (
     LLMTimeoutError,
     classify_error,
 )
-from metadata import ContextAssemblyStatus, ContextSelectionMetadata, ReasoningPolicy
+from metadata import (
+    ContextAssemblyStatus,
+    ContextSelectionMetadata,
+    ReasoningPolicy,
+    ReasoningTransportFamily,
+)
 from utils.json_utils import safe_parse_json
 
 
@@ -308,13 +314,23 @@ class LLMClient:
                 )
                 return cached
 
-        self.settings.require_ready()
-        client = self._make_openai_client()
         resolved_reasoning = resolve_reasoning_policy(
             request.reasoning_policy,
             self.settings,
             structured_output=request.response_format == "json_object",
         )
+        native_transport = None
+        if (
+            resolved_reasoning.transport_family
+            != ReasoningTransportFamily.OPENAI_CHAT_COMPLETIONS
+        ):
+            native_transport = get_native_transport(resolved_reasoning.transport_family)
+            if stream_callback is not None:
+                raise UnsupportedReasoningPolicyError(
+                    "native reasoning transports currently support non-streaming calls only"
+                )
+        self.settings.require_ready()
+        client = self._make_openai_client() if native_transport is None else None
 
         last_error = None
         repair_messages = list(request.messages)
@@ -351,7 +367,14 @@ class LLMClient:
                 if request.transport_retries is not None
                 else {}
             )
-            if stream_callback is not None:
+            if native_transport is not None:
+                response = native_transport.send_once(
+                    self.settings,
+                    request.model_copy(update={"messages": repair_messages}),
+                    resolved_reasoning,
+                    trust_env=True,
+                )
+            elif stream_callback is not None:
                 response = self._create_streaming_completion_with_transport_retry(
                     client,
                     payload,
