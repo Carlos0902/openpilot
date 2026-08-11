@@ -104,8 +104,9 @@ Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally
 separate from enhancement completion complexity: the former selects
 provider-neutral reasoning intent, while the latter reserves completion
-tokens. Capability resolution and provider-specific rendering remain confined
-to `core/reasoning.py` and the LLM transport.
+tokens. Capability resolution remains in `core/reasoning.py`; versioned
+provider adapters own transport rendering and normalized reasoning-usage
+observations without inferring capability from model names.
 
 The tool planner selects the economical setting only for typed routine work:
 bounded inspection with explicit reads, exact validation with its declared

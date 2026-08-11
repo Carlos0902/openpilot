@@ -2397,3 +2397,15 @@ PYTHONPATH=Code/src pytest -q Code/tests
   checkpoint validation.
 - Remaining limitation: conversation identity remains separate by design and is
   validated through the existing constraint-ledger relationship.
+
+### Typed provider reasoning adapters
+
+- Observed failure: provider-specific reasoning rendering and usage shapes were
+  embedded in one generic policy module and could not represent Anthropic,
+  Gemini, or explicit no-reasoning OpenAI profiles.
+- Validation evidence: the regression suite fails before the adapter and usage
+  contracts exist and passes for all explicit profiles after implementation.
+- Implemented fix: add versioned profile adapters for rendering and normalized,
+  body-free reasoning observations; capability is never guessed from model text.
+- Remaining limitation: native provider transport and streaming integration are
+  separate changes.

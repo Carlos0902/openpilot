@@ -66,6 +66,8 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   deterministic derived value. `ReasoningCapabilityProfileId` and
   `ReasoningTransportFamily` are typed routing identities, while provider
   payload keys remain transport implementation details.
+  `ReasoningUsageObservation` is a body-free normalized response observation;
+  an absent provider token field remains `None`, never an inferred zero.
 
 - `EnvironmentSyncMetadata` is the sole project-environment lifecycle owner.
   Its typed operation/readiness fields control attachment and setup admission;
