@@ -2857,3 +2857,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: same-response unseen signature duplicates are not yet
   coalesced, and the partition does not create wire tool-result messages,
   collect evidence, execute tools, or control provider rounds.
+
+### Bounded provider evidence runtime state
+
+- Observed failure: the frozen evidence-coverage contract had no bounded runtime
+  owner for completed reads, declared windows, projections, page counts,
+  evidence keys, or duplicate/finalization round observations.
+- Validation evidence: the regression suite fails because the evidence-state
+  module is absent on the stacked base; 21 tests pass after implementation for
+  empty projection, canonical reads/windows, idempotent evidence, page caps,
+  exact path/key/round bounds, invalid observations, atomic overflow, and no
+  project containment and no target-file creation. The complete focused provider
+  set passes 191. The full suite passes 1,299 tests, followed by successful
+  source compilation and diff validation.
+- Implemented fix: add one runtime-only state owner that canonicalizes observed
+  paths, bounds their union and every repeated fact, derives cap paths and
+  bounded projections, and emits the existing frozen
+  `ProviderToolEvidenceCoverage` contract.
+- Metadata impact note:
+  - Fact: accepted provider read/evidence observations for one round trip.
+  - Authoritative producer: the future provider runner after successful typed
+    tool results; consumers: duplicate/finalization policy and result projection.
+  - Lifecycle: runtime-only with derived event evidence. Control impact:
+    progress/recovery observation, but no permission, I/O, or completion grant.
+  - Existing contracts reviewed: `ProviderToolEvidenceCoverage`,
+    `ProviderDeclaredReadWindow`, `ProviderPageReadCount`, `ToolResultMetadata`,
+    `ToolEventMetadata`, and `ToolLoopMetadata`.
+  - Decision: one runtime state owner that projects the existing strict value;
+    no new `MetadataKind` or duplicated persisted evidence source.
+  - Serialization and migration: only the frozen coverage projection serializes;
+    no historical migration because no production state producer exists yet.
+  - Tests and docs: state/boundary/no-I/O tests plus `API.md`, `Code/README.md`,
+    the metadata catalog, and this implementation log.
+- Remaining limitation: no tool-result adapter, evidence extraction, runner
+  policy, persistence, or runtime integration is added here.

@@ -209,6 +209,12 @@ ledger before admission. Unseen calls retain provider order; previously owned
 signatures become fixed typed duplicate blocks and append explicit lineage to
 the ledger. Provider-ID reuse, invalid controls, signature failure, and
 insufficient ledger capacity reject atomically before any partition mutation.
+A runtime evidence state owns at most 64 canonical source paths/windows, 1,024
+evidence keys, 32 duplicate/finalization round observations, and a configured
+page-read cap no greater than 64. It derives the frozen evidence-coverage value;
+duplicate observations are idempotent, over-cap page reads fail closed, and path
+recording remains inside a known project root and never reads or creates the
+target file.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

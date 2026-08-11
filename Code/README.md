@@ -96,3 +96,6 @@ ownership, explicit duplicate lineage, and the existing 1,024-attempt cap.
 Cross-round duplicate partitioning emits ordered new calls plus typed duplicate
 blocks and performs all input, signature, ID, and capacity checks before
 mutating the ledger.
+The evidence state is the runtime owner for completed reads, declared windows,
+bounded projections, page counts, evidence keys, and round observations; it
+projects the existing frozen coverage contract without performing file I/O.

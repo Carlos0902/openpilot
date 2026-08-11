@@ -148,6 +148,10 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   authority into a persisted tree. A future runner produces them; runtime
   integration and trajectory adapters may consume projections, but the values
   do not execute tools or own checkpoints.
+  `ProviderToolEvidenceState` is their runtime-only mutable owner: it keeps
+  bounded private sets/counters and produces `ProviderToolEvidenceCoverage`.
+  It does not persist a second evidence tree, read source files, or grant
+  completion; the future runner remains responsible for accepting observations.
 - `ProviderToolRoundTripResult` is a strict frozen runtime envelope, not a new
   public metadata kind. It nests the existing attempt/evidence values and reuses
   `LLMResponse`, `LLMMessage`, `ToolEventLoopRunResult`,
