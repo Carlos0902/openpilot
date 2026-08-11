@@ -48,6 +48,55 @@ class RuntimeExecutionModeSource(str, Enum):
     LEGACY_ASSUMPTION = "legacy_assumption"
 
 
+class ToolEventCompletionOutcome(str, Enum):
+    """Typed response outcome that may inform the next completion budget."""
+
+    NORMAL = "normal"
+    TOOL_PROGRESS = "tool_progress"
+    EMPTY_RESPONSE = "empty_response"
+    TRUNCATED = "truncated"
+    NO_PROGRESS = "no_progress"
+
+
+class ProviderBudgetDiagnostic(BaseModel):
+    """Strict per-attempt budget evidence emitted by a provider runner."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    round_index: int = Field(ge=1)
+    requested_limit: int = Field(ge=1)
+    reserved_tokens: int = Field(ge=1)
+    actual_completion_tokens: int | None = Field(default=None, ge=0)
+    usage_known: bool
+    budget_tokens_used_before: int = Field(ge=0)
+    budget_tokens_used_after: int = Field(ge=0)
+    budget_tokens_remaining_before: int = Field(ge=0)
+    budget_tokens_remaining_after: int = Field(ge=0)
+    recovery_bonus_before: int = Field(ge=0)
+    recovery_bonus_after: int = Field(ge=0)
+    finish_reason: str | None = Field(default=None, max_length=64)
+    outcome: ToolEventCompletionOutcome | None = None
+    provider_cap_hit: bool
+    outcome_feedback_enabled: bool
+    provider_attempt_failed: bool = False
+    error_type: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _facts_are_consistent(self) -> "ProviderBudgetDiagnostic":
+        if self.requested_limit != self.reserved_tokens:
+            raise ValueError("requested and reserved completion tokens must match")
+        if self.usage_known != (self.actual_completion_tokens is not None):
+            raise ValueError("usage-known state must match actual completion token presence")
+        if (
+            self.actual_completion_tokens is not None
+            and self.actual_completion_tokens > self.reserved_tokens
+        ):
+            raise ValueError("actual completion usage cannot exceed the reserved amount")
+        if self.provider_attempt_failed and not self.error_type:
+            raise ValueError("failed provider attempts require an error type")
+        return self
+
+
 class SessionConstraintCategory(str, Enum):
     """Typed categories that may persist for one runtime conversation."""
 
@@ -859,6 +908,8 @@ class RuntimeBudgetMetadata(MetadataBase):
     replan_rounds_used: int = 0
     tool_event_completion_tokens_used: int = Field(default=0, ge=0)
     tool_event_completion_recovery_bonus: int = Field(default=0, ge=0)
+    tool_event_completion_outcome_feedback_enabled: bool = False
+    tool_event_completion_last_outcome: ToolEventCompletionOutcome | None = None
     enhancement_completion_policy: EnhancementCompletionBudgetPolicy = Field(
         default_factory=EnhancementCompletionBudgetPolicy
     )
@@ -1001,6 +1052,20 @@ class RuntimeBudgetMetadata(MetadataBase):
             self.tool_event_completion_recovery_bonus,
             max(0, int(tokens)),
         )
+
+    def observe_tool_event_outcome(self, outcome: ToolEventCompletionOutcome) -> None:
+        """Record an outcome and grant at most one configured recovery step."""
+
+        self.tool_event_completion_last_outcome = outcome
+        if not self.tool_event_completion_outcome_feedback_enabled:
+            return
+        if outcome in {
+            ToolEventCompletionOutcome.EMPTY_RESPONSE,
+            ToolEventCompletionOutcome.TRUNCATED,
+        }:
+            self.grant_tool_event_completion_recovery(
+                self.tool_event_completion_recovery_step
+            )
 
     def reconcile_tool_event_completion(self, *, reserved: int, actual: int) -> None:
         self.tool_event_completion_tokens_used = max(
