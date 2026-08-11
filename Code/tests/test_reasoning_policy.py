@@ -128,6 +128,43 @@ def test_llm_request_default_policy_is_transport_neutral() -> None:
     assert render_reasoning_transport(resolved) == {}
 
 
+def test_structured_provider_default_maps_to_disabled_for_known_profile() -> None:
+    settings = _settings(
+        OPENPILOT_LLM_BASE_URL="https://api.deepseek.com/v1",
+        OPENPILOT_LLM_MODEL="deepseek-v4-flash",
+        OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="deepseek-chat-known",
+    )
+
+    resolved = resolve_reasoning_policy(
+        ReasoningPolicy(mode=ReasoningMode.PROVIDER_DEFAULT),
+        settings,
+        structured_output=True,
+    )
+
+    assert resolved.effective_mode == ReasoningMode.DISABLED
+    assert resolved.resolution == ReasoningResolution.MAPPED
+    assert render_reasoning_transport(resolved) == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+
+
+def test_structured_provider_default_stays_omitted_without_disable_capability() -> None:
+    settings = _settings(
+        OPENPILOT_LLM_BASE_URL="https://proxy.invalid/v1",
+        OPENPILOT_LLM_MODEL="custom-model",
+        OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="generic-openai-compatible",
+    )
+
+    resolved = resolve_reasoning_policy(
+        ReasoningPolicy(mode=ReasoningMode.PROVIDER_DEFAULT),
+        settings,
+        structured_output=True,
+    )
+
+    assert resolved.effective_mode == ReasoningMode.PROVIDER_DEFAULT
+    assert resolved.resolution == ReasoningResolution.OMITTED
+
+
 def test_unknown_provider_rejects_explicit_reasoning_instead_of_guessing() -> None:
     settings = _settings()
     policy = ReasoningPolicy(mode=ReasoningMode.ENABLED, effort=ReasoningEffort.HIGH)
@@ -331,6 +368,47 @@ def test_llm_client_renders_deepseek_policy_into_transport(monkeypatch) -> None:
 
     client.complete(request)
 
+    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_llm_client_disables_known_profile_default_for_structured_json(monkeypatch) -> None:
+    client = LLMClient(
+        _settings(
+            OPENPILOT_LLM_PROVIDER="deepseek",
+            OPENPILOT_LLM_BASE_URL="https://api.deepseek.com",
+            OPENPILOT_LLM_MODEL="deepseek-v4-flash",
+            OPENPILOT_LLM_REASONING_CAPABILITY_PROFILE="deepseek-chat-known",
+        ),
+        enable_cache=False,
+    )
+    captured = []
+    monkeypatch.setattr(client, "_make_openai_client", lambda: object())
+
+    def fake_complete(_client, payload, **_kwargs):
+        captured.append(payload)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"ok":true}'),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(model_dump=lambda: {"total_tokens": 1}),
+            model="deepseek-v4-flash",
+            id="response-structured-default",
+            created=1,
+        )
+
+    monkeypatch.setattr(client, "_create_completion_with_transport_retry", fake_complete)
+
+    response = client.complete(
+        LLMRequest(
+            messages=[LLMMessage(role="user", content="Return JSON")],
+            response_format="json_object",
+        )
+    )
+
+    assert response.parsed_json == {"ok": True}
     assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
