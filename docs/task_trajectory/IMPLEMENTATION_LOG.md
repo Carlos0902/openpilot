@@ -2351,3 +2351,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
   transport rendering 与 reasoning usage normalization；实验中的 explicit disabled
   不支持时必须 fail closed，不能静默回退 provider default。此次只补充诊断文档，未
   改变生产 reasoning/Compact 默认。
+
+### Typed compaction provenance and reuse admission
+
+- Observed failure: the runtime could not represent the difference between a
+  provider-accepted summary, a builder-selected projection, and a reusable
+  artifact considered only in shadow mode.
+- Validation evidence: the regression commit fails while importing the missing
+  typed contracts; the focused metadata suite passes after the implementation.
+- Implemented fix: add strict, body-free attempt, admission, and shadow-failure
+  values owned by `ContextSelectionMetadata`, plus a backward-compatible source
+  binding hash.
+- Remaining limitation: this change records and validates evidence only. It does
+  not enable reusable summaries in model-facing prompts.
