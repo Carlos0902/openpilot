@@ -3501,3 +3501,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
     diagnostics and no persisted schema changes.
 - Remaining limitation: the provider round-trip dispatcher still does not route
   admitted batches into the read or mutation execution bridge.
+
+### Provider execution bridge dispatch
+
+- Observed failure: callers had separate read and mutation bridge methods but no
+  bounded typed dispatcher. A future round-trip owner would otherwise duplicate
+  mutation detection and risk forwarding ledger/scope inputs to blocked or
+  read-only batches.
+- Validation evidence: the regression suite fails because the dispatch module
+  is absent; eight tests pass after implementation for read routing, mixed
+  mutation routing with exact runtime inputs, unapproved mutation rejection,
+  blocked mutation routing without mutation-input use, and literal boolean
+  controls. The adjacent dispatch/batch set passes 24, and the complete
+  provider-focused set passes 439. The complete repository suite passes 1,535
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: validate the already-admitted batch through the existing
+  identity/cardinality boundary, detect admitted mutation from typed tool
+  identity, and invoke exactly one existing execution bridge. No provider
+  arguments are decoded or re-admitted.
+- Metadata impact note:
+  - Facts: existing admission status, tool identity, lifecycle correlation, and
+    literal mutation allowance only.
+  - Authoritative producers: admission owns tool/status facts; the caller owns
+    mutation allowance and runtime ledger/scope; dispatch only selects a bridge.
+  - Lifecycle and control impact: execution routing. It creates no new authority
+    and cannot bypass either bridge's preflight or checkpoint boundaries.
+  - Existing contracts reviewed: provider execution-batch validation, read and
+    mutation bridge entry points, mutation tool identity, and artifact/scope
+    runtime inputs.
+  - Decision: add a small pure dispatcher rather than teaching a future
+    round-trip loop to duplicate permission-sensitive branching.
+  - Serialization and migration: no metadata or persisted shape changes.
+- Remaining limitation: the LLM/provider round-trip conversation loop still
+  needs to invoke this dispatcher and compose returned tool messages.

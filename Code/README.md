@@ -114,6 +114,11 @@ diagnostics, events, and result maps. Blocked or unprepared calls cannot
 execute, and unobserved results cannot update state. Provider/project identity
 and provider-executed provenance remain attached to success and failure
 evidence; mutation support stays closed in this layer.
+Execution dispatch reuses the bounded batch validator and chooses exactly one
+bridge: read-only when no admitted mutation exists, mutation only with literal
+allowance otherwise. Ledger and derived-scope inputs are forwarded only to the
+mutation bridge; blocked mutations remain on the non-executing read path. The
+dispatcher does not decode or admit provider input.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

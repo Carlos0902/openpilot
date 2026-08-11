@@ -223,6 +223,12 @@ observation failure prevents state application. Successful and failed calls
 retain distinct project/provider IDs, and the enclosing tool-loop result is
 marked provider-executed. Mutation, artifact binding, validation deferral, and
 generated-unit redaction remain outside this bridge.
+A pure execution dispatcher performs the final bridge choice over the same
+bounded typed batch. With no admitted mutation it invokes the read-only bridge;
+with an admitted mutation it requires literal mutation allowance and forwards
+the runtime ledger/scope only to the mutation bridge. Blocked mutation calls do
+not select the mutation path or inspect those unused inputs. Dispatch does not
+decode arguments, admit tools, or execute anything outside the selected bridge.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only
