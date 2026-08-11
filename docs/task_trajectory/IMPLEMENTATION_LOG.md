@@ -3203,3 +3203,40 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the provider round runner does not yet invoke this
   redactor, and execution-time post-processing scope enforcement remains a
   separate slice.
+
+### Patch-writer derived-write scope enforcement
+
+- Observed failure: a provider-authorized patch of one source file still ran
+  index and directory-sketch refreshes as implicit writes. The aggregate draft
+  also treated authorization of either derived target as permission to write
+  both, so a partially authorized scope widened mutation side effects.
+- Validation evidence: the regression tests fail on the stacked base because
+  target-only and one-derived-target scopes still create both sidecars. Nine
+  focused tests pass after implementation for target-only and partial scopes,
+  complete authorization, unscoped local compatibility, the exact 64-path
+  boundary, over-limit rejection, malformed shapes, empty paths, and duplicate
+  paths. The complete provider-focused set passes 389, followed by successful
+  source compilation and diff validation. The complete repository suite passes
+  1,485 in an isolated detached worktree.
+- Implemented fix: after the primary patch succeeds, derive the exact index and
+  sketch paths and require the complete set to be a subset of the explicit
+  provider post-processing scope. Invalid or incomplete scopes return a structured
+  skipped diagnostic and perform neither derived write; absence of the
+  provider-specific scope retains the established local-tool behavior.
+- Metadata impact note:
+  - Fact: whether the derived index/sketch refresh was executed or skipped.
+  - Authoritative producers: the admitted task scope copied by
+    `bind_provider_patch_artifact` and the patch writer's deterministic derived
+    target calculation; consumer: execution-time post-processing only.
+  - Lifecycle and control impact: runtime-only mutation enforcement. The scope
+    remains excluded from serialization and cannot grant primary-file write,
+    admission, confirmation, validation, completion, or artifact authority.
+  - Existing contracts reviewed: `ToolInputMetadata.runtime_handles`,
+    `ProviderToolAdmission`, `ProviderCodeArtifactReference`, and the existing
+    file-index/sketch refresh result shape.
+  - Decision: reuse the already bound runtime scope and existing skipped result
+    diagnostics; add no metadata field, kind, or second scope owner.
+  - Serialization and migration: no persisted contract changes and no
+    historical migration.
+- Remaining limitation: the provider round runner still needs to pass the
+  admitted scope through artifact binding and invoke generated-unit redaction.

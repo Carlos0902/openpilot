@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from memory.project_index import ProjectIndexManager
 from metadata import ToolInputMetadata
 from tools.file_patch_writer import file_patch_writer_executor
@@ -103,3 +105,51 @@ def test_unscoped_local_patch_preserves_existing_index_refresh_behavior(
     assert result.result.attributes["index_update"]["index_file"] == str(
         index_file
     )
+
+
+@pytest.mark.parametrize(
+    ("scope_size", "expected_refresh"),
+    [(64, True), (65, False)],
+)
+def test_provider_post_processing_scope_has_an_exact_path_limit(
+    tmp_path: Path,
+    scope_size: int,
+    expected_refresh: bool,
+) -> None:
+    project = tmp_path / str(scope_size)
+    project.mkdir()
+    target = project / "app.py"
+    target.write_text("def existing():\n    return 1\n", encoding="utf-8")
+    index_file, sketch_file = _targets(target)
+    scope = [str(index_file), str(sketch_file)]
+    scope.extend(
+        str((project / f"extra-{index}").resolve())
+        for index in range(scope_size - 2)
+    )
+
+    result = _patch(target, post_processing_scope=scope)
+
+    assert index_file.exists() is expected_refresh
+    assert sketch_file.exists() is expected_refresh
+    assert result.result.attributes["index_update"].get("skipped", False) is (
+        not expected_refresh
+    )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["not-a-sequence", [""], ["duplicate", "duplicate"]],
+)
+def test_malformed_provider_post_processing_scope_fails_closed(
+    tmp_path: Path,
+    scope: object,
+) -> None:
+    target = tmp_path / "app.py"
+    target.write_text("def existing():\n    return 1\n", encoding="utf-8")
+    index_file, sketch_file = _targets(target)
+
+    result = _patch(target, post_processing_scope=scope)
+
+    assert not index_file.exists()
+    assert not sketch_file.exists()
+    assert result.result.attributes["index_update"]["skipped"] is True

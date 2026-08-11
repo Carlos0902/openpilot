@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from core.provider_tool_admission import MAX_PROVIDER_SCOPE_PATHS
 from memory.project_path_resolver import ensure_resolved_path
 from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
@@ -106,10 +107,27 @@ def file_patch_writer_executor(input_metadata: ToolInputMetadata) -> ToolResultM
     file_path.write_text(updated, encoding=encoding)
     index_update: dict[str, Any] = {}
     warnings: list[str] = []
-    try:
-        index_update = refresh_after_file_change(file_path)
-    except Exception as exc:
-        warnings.append(f"File index refresh failed: {exc}")
+    post_processing_scope = params.get("_post_processing_write_scope")
+    if (
+        "_post_processing_write_scope" in params
+        and not _post_processing_scope_allows_refresh(
+            file_path,
+            post_processing_scope,
+        )
+    ):
+        index_update = {
+            "skipped": True,
+            "reason": "post_processing_targets_outside_declared_write_scope",
+        }
+        warnings.append(
+            "File index and directory sketch refresh skipped because every "
+            "derived target must be inside the declared write scope."
+        )
+    else:
+        try:
+            index_update = refresh_after_file_change(file_path)
+        except Exception as exc:
+            warnings.append(f"File index refresh failed: {exc}")
 
     return {
         "file_path": str(file_path.absolute()),
@@ -120,6 +138,31 @@ def file_patch_writer_executor(input_metadata: ToolInputMetadata) -> ToolResultM
         "index_update": index_update,
         "warnings": warnings,
     }
+
+
+def _post_processing_scope_allows_refresh(
+    file_path: Path,
+    scope: Any,
+) -> bool:
+    if not isinstance(scope, (list, tuple)):
+        return False
+    if len(scope) > MAX_PROVIDER_SCOPE_PATHS:
+        return False
+    authorized_targets: set[Path] = set()
+    for item in scope:
+        if not isinstance(item, str) or not item.strip():
+            return False
+        target = Path(item).expanduser().resolve()
+        if target in authorized_targets:
+            return False
+        authorized_targets.add(target)
+
+    manager = ProjectIndexManager.for_path(file_path)
+    derived_targets = {
+        manager.index_file_for(file_path).resolve(),
+        (file_path.parent / ProjectIndexManager.SKETCH_NAME).resolve(),
+    }
+    return derived_targets.issubset(authorized_targets)
 
 
 def _split_lines(text: str) -> list[str]:

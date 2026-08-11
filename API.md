@@ -262,7 +262,13 @@ provider-supplied `generated_unit` in both the tool-call and selection views.
 Blocked admissions and inline-only writers return unchanged. An optional
 `authorized_post_processing_write_scope` is copied exactly into excluded
 runtime handles after bounded validation; the binder never derives, adds, or
-widens a path and performs no tool execution or file I/O.
+widens a path and performs no tool execution or file I/O. At execution time,
+the patch writer derives its index sidecar and directory-sketch targets and
+refreshes them only when both are present in that explicit scope. A missing
+derived target, malformed scope, duplicate path, or scope above 64 paths skips
+the complete refresh instead of authorizing a partial side effect. Calls
+without the provider-specific runtime scope preserve existing local refresh
+behavior.
 Before provider event-loop evidence is retained, generated-unit redaction
 removes complete code bodies from result-map inputs and every typed event,
 invocation, error, and nested call/error projection. Result maps keep only the
