@@ -107,3 +107,6 @@ with a 32-call and 1,600-character-per-result limit.
 The shared result-payload fitter is the sole character-limit authority. It
 returns valid deterministic JSON, preserves typed completion/error facts, and
 compacts preview/artifact data without mutating the source payload.
+Result artifact projection is separately pure and bounded. It converts text,
+file, and code artifacts into at most 480-character model-facing previews plus
+hash-based project/provider lineage, without storing bodies or performing I/O.

@@ -2948,3 +2948,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: this change does not derive payloads from event-loop
   results, persist artifacts, construct full result batches, or run provider
   rounds.
+
+### Bounded provider result artifact projection
+
+- Observed failure: the aggregate runner projected text, file, and code result
+  artifacts inside one large stateful class, so the reusable payload fitter had
+  no independent bounded producer for previews, evidence labels, or
+  project/provider artifact lineage.
+- Validation evidence: the regression suite fails because the projection module
+  is absent on the stacked base; 22 tests pass after implementation for large
+  text lineage, complete and partial files, declared windows, code handoff,
+  scalar fallback, source immutability, literal controls, bounded identities,
+  exact artifact limits, aggregate file-list characters, and non-finite values.
+  The complete provider-focused set passes 261, and the complete repository
+  suite passes 1,357 in an isolated detached worktree, followed by successful
+  source compilation and diff validation.
+- Implemented fix: add one pure result projector with a 480-character preview,
+  the existing 200,000-character input authority, SHA-256 artifact references,
+  explicit inline/preview/window semantics, bounded scalar and collection
+  fields, and no artifact storage or tool execution.
+- Metadata impact note:
+  - Facts: a model-facing bounded artifact view and body-free lineage reference.
+  - Authoritative producers remain the existing tool-result metadata and future
+    provider runner; this projection is derived and runtime-only.
+  - Control impact: the caller must supply a literal declared-window completion
+    fact; projection does not infer or grant read completion, permission,
+    mutation authority, persistence, or execution.
+  - Existing contracts reviewed: `ToolResultMetadata`, text/file/code artifact
+    metadata, `ProviderToolEvidenceCoverage`, `LLMToolResult`, and the shared
+    payload fitter. No new `MetadataKind` or second persisted fact is added.
+  - Serialization and migration: dictionaries are passed to the existing
+    deterministic JSON fitter; no historical migration is required.
+- Remaining limitation: code artifact bodies are not yet registered for writer
+  resolution, and event-loop results are not yet correlated into a complete
+  `LLMToolResult` batch or provider continuation.

@@ -230,6 +230,13 @@ complete declared-window evidence keeps its semantic completion marker, while
 larger non-text payloads fall back to bounded diagnostics and compact artifact
 references without exposing raw content. Input traversal is itself capped at 16
 levels, 1,024 collection items, and 200,000 aggregate string characters.
+Provider result projection is a separate pure boundary before payload fitting.
+It preserves project/provider lineage in a SHA-256 artifact reference, exposes
+at most 480 characters of artifact text, distinguishes complete inline files,
+partial previews, and complete declared windows, and rejects artifacts or file
+lists above the shared 200,000-character input bound. Code artifacts expose a
+handoff instruction and body-free reference only; projection does not store the
+artifact, execute a tool, grant evidence completion, or perform file I/O.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
