@@ -60,3 +60,5 @@ Normalized responses attach typed reasoning-usage observations without storing
 provider reasoning bodies in diagnostics.
 Provider tool admission outcomes reuse project call, selection, failure, and
 error contracts; wire identity alone never authorizes execution.
+Provider tool schemas are a narrow read-only projection of registered typed
+contracts, not a copy of the broad internal input model.

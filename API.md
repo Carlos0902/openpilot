@@ -146,6 +146,11 @@ Provider-native admission returns one strict `admitted` or `blocked` outcome.
 Admitted outcomes require an existing typed `ToolSelection`; blocked outcomes
 require an existing typed `ToolErrorMetadata`. Contradictory payloads and
 provider/project identity drift reject during validation.
+Provider-visible tool definitions are projected only from registered typed
+contracts. The projection exposes required, alternative-required, conditional,
+and defaulted fields; rejects unknown, duplicate, or untyped tools; forbids
+additional properties; and never exposes runtime-only input metadata fields.
+One request may expose at most 32 tools and 64 declared fields per tool.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

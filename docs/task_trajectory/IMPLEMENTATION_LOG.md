@@ -2591,3 +2591,17 @@ PYTHONPATH=Code/src pytest -q Code/tests
   provider error projection preserves both correlation identities.
 - Remaining limitation: registry, argument, permission, scope, and budget
   admission decisions remain separate changes.
+
+### Provider tool-definition projection
+
+- Observed failure: provider requests lacked a narrow, deterministic schema
+  projection from the registered tool contracts and risked exposing the broad
+  internal input model.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes five field-selection, conditional, type, duplicate, unknown, and
+  untyped-contract checks after implementation; the full suite remains green.
+- Implemented fix: project only contract-declared fields into strict provider
+  function schemas, including required/any-of/conditional/default semantics and
+  a bounded command-mode enum, with explicit 32-tool and 64-field caps.
+- Remaining limitation: schema projection does not admit or execute provider
+  calls; those remain separate boundaries.
