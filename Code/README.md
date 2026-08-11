@@ -49,4 +49,5 @@ the LLM boundary. Tool-call responses retain call identity and reasoning state,
 fail closed on malformed shapes, and bypass the response cache.
 Known native Anthropic and Gemini profiles route through their registered
 single-attempt transports. `LLMClient` owns finite retry and bounded redacted
-attempt evidence, while native streaming remains explicitly unsupported.
+attempt evidence, including one labeled direct attempt after an environment
+proxy failure, while native streaming remains explicitly unsupported.

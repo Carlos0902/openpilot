@@ -130,7 +130,9 @@ are never cached because they require a fresh, ordered tool result continuation.
 Profiles that declare a native Anthropic or Gemini transport are routed through
 the registered native adapter without constructing an OpenAI client. Each HTTP
 attempt remains single-shot; `LLMClient` applies at most five configured retries
-and records bounded, credential-redacted attempt evidence. Native
+and records bounded, credential-redacted attempt evidence. After an
+environment-proxy network failure, one additional direct attempt is permitted
+and labeled separately. Native
 streaming remains rejected until a separate streaming contract exists.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value

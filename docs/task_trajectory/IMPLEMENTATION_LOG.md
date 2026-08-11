@@ -2493,5 +2493,17 @@ PYTHONPATH=Code/src pytest -q Code/tests
   native transports, stop immediately on terminal provider errors, retain
   bounded attempt history, reject overrides above five retries, and redact the
   configured credential from error text.
-- Remaining limitation: environment-proxy fallback and native streaming remain
-  separate changes.
+- Remaining limitation: native streaming remains a separate change.
+
+### Native environment-proxy fallback
+
+- Observed failure: after exhausting native retries on an environment-proxy
+  network failure, `LLMClient` did not attempt the existing direct-connection
+  recovery path used by the OpenAI-compatible transport.
+- Validation evidence: two offline regressions fail on the stacked base for the
+  missing direct success and direct failure evidence; focused and full suites
+  pass after the fix.
+- Implemented fix: permit exactly one `trust_env=False` native attempt after the
+  classified proxy failure and record its distinct reason and outcome.
+- Remaining limitation: native streaming and streamed reasoning/tool-call
+  aggregation remain separate changes.

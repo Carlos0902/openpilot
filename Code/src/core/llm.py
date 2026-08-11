@@ -968,6 +968,48 @@ class LLMClient:
                 time.sleep(min(delay, max_delay))
                 delay = min(delay * 2 if delay else 0, max_delay)
 
+        if last_error is not None and self._should_retry_without_env_proxy(last_error):
+            direct_attempt = attempts + 1
+            try:
+                response = transport.send_once(
+                    self.settings,
+                    request,
+                    resolved_reasoning,
+                    trust_env=False,
+                )
+                history.append(
+                    {
+                        "attempt": direct_attempt,
+                        "status": "success",
+                        "retryable": False,
+                        "trust_env": False,
+                        "reason": "env_proxy_fallback",
+                    }
+                )
+                provider_details = getattr(response, "provider_details", None)
+                if isinstance(provider_details, dict):
+                    provider_details["transport_retry_history"] = list(history)
+                return response
+            except Exception as exc:
+                last_error = exc
+                category = (
+                    exc.category
+                    if isinstance(exc, LLMProviderError)
+                    else self._classify_provider_error(exc)
+                )
+                history.append(
+                    {
+                        "attempt": direct_attempt,
+                        "status": "failed",
+                        "category": category.value,
+                        "retryable": False,
+                        "error_type": type(last_error).__name__,
+                        "error": self._bounded_provider_error_text(last_error),
+                        "trust_env": False,
+                        "reason": "env_proxy_fallback",
+                    }
+                )
+
         if isinstance(last_error, (httpx.TimeoutException, LLMTimeoutError)):
             error = LLMTimeoutError(
                 str(last_error), timeout_seconds=self.settings.timeout_seconds
