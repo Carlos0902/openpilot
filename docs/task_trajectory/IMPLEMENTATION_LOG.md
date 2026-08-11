@@ -2837,3 +2837,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: this change does not partition provider response calls,
   create preblocked tool results, collect evidence, execute tools, or run the
   provider state machine.
+
+### Cross-round provider duplicate partition
+
+- Observed failure: the attempt ledger and canonical signature helper did not
+  yet separate unseen provider calls from signatures attempted in earlier
+  rounds or produce a typed preblocked duplicate result.
+- Validation evidence: the regression suite fails because the partition module
+  is absent on the stacked base; 15 partition tests cover new/duplicate
+  ordering, relative/absolute signature equivalence, lineage recording,
+  provider-ID reuse, 32-call boundaries, atomic ledger capacity, invalid
+  controls, and contradictory result contracts. The complete focused provider
+  set passes 170. The full suite passes 1,278 tests, followed by successful
+  source compilation and diff validation.
+- Implemented fix: add a pure pre-execution partition that validates the full
+  response first, computes all bounded signatures, preflights duplicate ledger
+  capacity, then returns ordered unseen calls and fixed typed duplicate blocks.
+  Existing duplicates append lineage to the ledger; no tool is executed.
+- Remaining limitation: same-response unseen signature duplicates are not yet
+  coalesced, and the partition does not create wire tool-result messages,
+  collect evidence, execute tools, or control provider rounds.

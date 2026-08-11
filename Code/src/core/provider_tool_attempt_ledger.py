@@ -33,6 +33,10 @@ class ProviderToolAttemptLedger:
     def attempts(self) -> tuple[ProviderToolAttempt, ...]:
         return tuple(self._attempts)
 
+    @property
+    def remaining(self) -> int:
+        return self._max_attempts - len(self._attempts)
+
     def __len__(self) -> int:
         return len(self._attempts)
 

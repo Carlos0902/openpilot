@@ -204,6 +204,11 @@ A runtime attempt ledger owns at most 1,024 typed attempts. Provider call IDs
 must remain unique across one round trip; the first attempt owns a normalized
 signature, and later repeats must explicitly reference that first provider call
 as duplicate lineage. Failed first attempts still own replay identity.
+Cross-round duplicate partitioning compares at most 32 calls against that
+ledger before admission. Unseen calls retain provider order; previously owned
+signatures become fixed typed duplicate blocks and append explicit lineage to
+the ledger. Provider-ID reuse, invalid controls, signature failure, and
+insufficient ledger capacity reject atomically before any partition mutation.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

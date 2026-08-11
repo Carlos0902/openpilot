@@ -93,3 +93,6 @@ normalization, and SHA-256 identity so provider call IDs cannot control replay o
 duplicate detection.
 The attempt ledger separately enforces unique provider IDs, first-signature
 ownership, explicit duplicate lineage, and the existing 1,024-attempt cap.
+Cross-round duplicate partitioning emits ordered new calls plus typed duplicate
+blocks and performs all input, signature, ID, and capacity checks before
+mutating the ledger.
