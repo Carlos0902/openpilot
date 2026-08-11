@@ -18,6 +18,7 @@ from core.config import LLMSettings
 from core.native_llm_transport import get_native_transport
 from core.reasoning import (
     UnsupportedReasoningPolicyError,
+    observe_reasoning_response,
     render_reasoning_transport,
     resolve_reasoning_policy,
 )
@@ -33,6 +34,7 @@ from core.exceptions import (
 from metadata import (
     ContextAssemblyStatus,
     ContextSelectionMetadata,
+    ReasoningCapabilityProfileId,
     ReasoningPolicy,
     ReasoningTransportFamily,
 )
@@ -412,6 +414,7 @@ class LLMClient:
                         content=content,
                         content_diagnostics=content_diagnostics,
                         json_repair_attempt=attempt + 1,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     ),
                 )
                 result.provider_details["tool_call_count"] = len(tool_calls)
@@ -433,6 +436,7 @@ class LLMClient:
                         content=content,
                         content_diagnostics=content_diagnostics,
                         json_repair_attempt=attempt + 1,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     )
                     provider_details.update(
                         {
@@ -474,6 +478,7 @@ class LLMClient:
                         choice=choice,
                         content_diagnostics=content_diagnostics,
                         parse_diagnostics=parse_diagnostics,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     )
                     if attempt < max_retries - 1:
                         self._emit_stream_event(
@@ -520,6 +525,7 @@ class LLMClient:
                         content=content,
                         content_diagnostics=content_diagnostics,
                         json_repair_attempt=attempt + 1,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     ),
                 )
 
@@ -547,6 +553,7 @@ class LLMClient:
         choice: Any,
         content_diagnostics: dict[str, Any],
         parse_diagnostics: dict[str, Any],
+        reasoning_profile_id: ReasoningCapabilityProfileId,
     ) -> InvalidLLMResponseError:
         error = InvalidLLMResponseError(
             f"LLM returned invalid JSON (attempt {attempt}/{max_retries}; "
@@ -562,6 +569,7 @@ class LLMClient:
             content=content,
             content_diagnostics=content_diagnostics,
             json_repair_attempt=attempt,
+            reasoning_profile_id=reasoning_profile_id,
         )
         error.context.update(
             {
@@ -1327,6 +1335,7 @@ class LLMClient:
         content: str,
         content_diagnostics: dict[str, Any],
         json_repair_attempt: int,
+        reasoning_profile_id: ReasoningCapabilityProfileId,
     ) -> dict[str, Any]:
         finish_reason = getattr(choice, "finish_reason", None)
         metadata = {
@@ -1337,6 +1346,14 @@ class LLMClient:
             "content_diagnostics": content_diagnostics,
             "empty_length_response": finish_reason == "length" and not content.strip(),
         }
+        observation = observe_reasoning_response(
+            profile_id=reasoning_profile_id,
+            message=getattr(choice, "message", None),
+            usage=self._usage_metadata(response),
+            finish_reason=finish_reason,
+            visible_content=content,
+        )
+        metadata["reasoning_observation"] = observation.model_dump(mode="json")
         provider_details = getattr(response, "provider_details", None)
         if isinstance(provider_details, dict):
             metadata.update(provider_details)

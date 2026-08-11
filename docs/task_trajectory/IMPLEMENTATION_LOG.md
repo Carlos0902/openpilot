@@ -2542,3 +2542,15 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Implemented fix: normalize mapping and object message access through the same
   content and diagnostic boundary.
 - Remaining limitation: provider-specific unknown fields remain diagnostic only.
+
+### Reasoning response observation integration
+
+- Observed failure: typed provider reasoning observations existed at the adapter
+  layer but normal `LLMClient` responses did not attach them to provider evidence.
+- Validation evidence: the offline client regression fails on the stacked base
+  because `reasoning_observation` is absent; focused and full suites pass after
+  integration.
+- Implemented fix: pass the resolved profile identity through response and JSON
+  error metadata assembly and attach the adapter's body-free typed observation.
+- Remaining limitation: unknown provider usage fields remain unknown rather than
+  being inferred.

@@ -56,3 +56,5 @@ without emitting them as visible text.
 Streamed tool-call fragments are aggregated by index and validated before the
 normalized response is returned.
 Provider message mappings and SDK objects share one response normalization path.
+Normalized responses attach typed reasoning-usage observations without storing
+provider reasoning bodies in diagnostics.
