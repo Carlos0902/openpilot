@@ -72,6 +72,10 @@ update this file together with `API.md`.
   byte count, and at most eight line-only changed ranges. Generated bodies,
   replacement text, and malformed or unbounded evidence must never enter the
   receipt.
+- Post-mutation provider context must be rebuilt from the first system and user
+  messages in canonical role order, one observed bounded mutation receipt, and
+  bounded body-free assistant/tool wire evidence only. Never truncate the exact
+  validation command or carry stale tool history into that continuation.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

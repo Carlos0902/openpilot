@@ -237,6 +237,15 @@ reference, bounded bytes written, at most eight line-only changed ranges, and
 the exact validation command. Generated code, replacement text, extra artifact
 fields, malformed line ranges, and unbounded collections fail closed or remain
 outside the projection; the source result is never mutated.
+Post-mutation context construction consumes that projector directly. It retains
+only the first system and user messages in canonical role order, adds one user
+instruction containing the complete JSON receipt, and then appends bounded
+assistant/tool wire evidence. Assistant prose and reasoning are removed; call
+and result IDs must match; tool-result content retains the existing 1,600-char
+bound; any inline `generated_unit` is rejected. Old assistant/tool history,
+duplicate authority messages, absent mutation evidence, role-injecting wire
+messages, oversized collections, and receipt truncation are rejected or omitted
+before the next provider request is assembled.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

@@ -3575,3 +3575,46 @@ PYTHONPATH=Code/src pytest -q Code/tests
     no persisted schema or migration changes.
 - Remaining limitation: the provider conversation loop does not yet append the
   receipt to a post-mutation model request or enforce the exact validation turn.
+
+### Narrow post-mutation provider context
+
+- Observed failure: the aggregate continuation builder truncated serialized
+  mutation receipts to 1,200 characters and accepted an arbitrary message
+  sequence. A long exact validation command could be cut into invalid JSON,
+  while stale tool history, duplicate authority messages, or injected user
+  wire messages or inline generated bodies could re-enter the validation
+  request.
+- Validation evidence: the regression suite first fails because the dedicated
+  context module is absent. Ten focused context tests pass after
+  implementation, together with all 17 mutation-receipt regressions, covering
+  canonical system/user ordering, stale-history removal, exact long-command
+  preservation, deep-copy isolation, observed mutation requirements, body-free
+  aligned wire evidence, and invalid or oversized message/wire rejection. The
+  adjacent receipt/wire/mutation/dispatch set passes 55 and the complete
+  provider-focused set passes 466. The complete repository suite passes 1,562
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: derive the receipt directly from the bounded projector,
+  retain one system and one user message in canonical role order, append one
+  complete receipt instruction, and allow only bounded assistant/tool wire
+  evidence with matching call IDs. Assistant prose/reasoning is removed and
+  inline generated bodies fail closed. The builder truncates no authoritative
+  value.
+- Metadata impact note:
+  - Facts: existing conversation roles, observed mutation receipt, exact
+    task-owned validation command, and provider wire messages.
+  - Authoritative producers: ingress owns the original messages; the tool loop
+    owns mutation evidence; the task owns validation command; wire composition
+    owns assistant/tool correlation.
+  - Lifecycle and control impact: one model-facing continuation projection. It
+    performs no execution, admission, permission change, state update, file I/O,
+    or persistence.
+  - Existing contracts reviewed: `LLMMessage`, provider message limits,
+    `ToolEventLoopRunResult`, the bounded mutation receipt projector, public
+    metadata inventory, and metadata development conventions.
+  - Decision: add a derived context view in `core` rather than a new metadata
+    contract or another conversation owner.
+  - Serialization and migration: JSON is ephemeral request content; no
+    persisted shape or migration changes.
+- Remaining limitation: the multi-round conversation runner still needs to
+  select this context after mutation and admit the exact validation call.

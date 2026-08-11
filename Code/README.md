@@ -125,6 +125,14 @@ exact bounded validation command and validated artifact lineage, caps changed
 ranges at eight line-only entries, and rejects malformed or oversized identity,
 range, byte-count, command, or collection values. It performs no execution,
 state update, or source-result mutation.
+The post-mutation context builder consumes the verified receipt and rebuilds a
+narrow continuation from the first system/user messages in canonical order,
+one complete receipt instruction, and assistant/tool wire evidence only. It
+drops stale history and duplicate authority messages, deep-copies retained
+messages, strips assistant prose/reasoning, requires exact wire-call identity,
+rejects inline generated bodies, preserves the validation command without
+truncation, and fails closed on absent mutation evidence or unbounded/invalid
+message collections.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.
