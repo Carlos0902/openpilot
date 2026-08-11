@@ -1209,7 +1209,11 @@ class LLMClient:
         return False
 
     def _extract_message_content(self, message: Any) -> tuple[str, dict[str, Any]]:
-        raw_content = getattr(message, "content", None)
+        raw_content = (
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
         diagnostics = {
             "content_type": type(raw_content).__name__,
             "content_part_count": len(raw_content) if isinstance(raw_content, list) else None,
@@ -1224,7 +1228,11 @@ class LLMClient:
             return str(raw_content), diagnostics
 
         for field_name in ("text", "message", "output_text"):
-            value = getattr(message, field_name, None)
+            value = (
+                message.get(field_name)
+                if isinstance(message, dict)
+                else getattr(message, field_name, None)
+            )
             if isinstance(value, str):
                 diagnostics["fallback_content_field"] = field_name
                 return value, diagnostics
@@ -1300,6 +1308,8 @@ class LLMClient:
         return ""
 
     def _message_field_names(self, message: Any) -> list[str]:
+        if isinstance(message, dict):
+            return sorted(str(key) for key in message)
         if hasattr(message, "model_dump"):
             try:
                 return sorted(str(key) for key in message.model_dump().keys())

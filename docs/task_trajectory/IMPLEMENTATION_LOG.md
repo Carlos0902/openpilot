@@ -2530,3 +2530,15 @@ PYTHONPATH=Code/src pytest -q Code/tests
   name and argument text, finalize calls in index order, and validate the
   existing typed call contract before returning the response.
 - Remaining limitation: native streaming remains a separate change.
+
+### Provider mapping response normalization
+
+- Observed failure: provider adapters returning plain mapping messages lost
+  visible content, fallback text, and field-name diagnostics because extraction
+  assumed SDK object attributes.
+- Validation evidence: two offline regressions fail on the stacked base for
+  mapping content and fallback fields; focused and full suites pass after the
+  fix.
+- Implemented fix: normalize mapping and object message access through the same
+  content and diagnostic boundary.
+- Remaining limitation: provider-specific unknown fields remain diagnostic only.

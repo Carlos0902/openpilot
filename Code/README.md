@@ -55,3 +55,4 @@ OpenAI-compatible streams retain reasoning fragments as separate response state
 without emitting them as visible text.
 Streamed tool-call fragments are aggregated by index and validated before the
 normalized response is returned.
+Provider message mappings and SDK objects share one response normalization path.

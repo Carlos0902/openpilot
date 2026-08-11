@@ -139,6 +139,8 @@ from visible text; reasoning fragments never become user-visible deltas.
 Streaming tool-call fragments are joined by their provider index, validated into
 the typed call contract, and finalized in index order. Malformed containers,
 negative indexes, or incomplete final shapes fail closed.
+Provider responses may expose messages as SDK objects or plain mappings; both
+forms use the same content, fallback-field, and diagnostic normalization.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally
