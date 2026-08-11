@@ -253,6 +253,14 @@ as admission, and rejects repeated exact execution. A successful observation
 requires literal successful tool evidence, literal successful command-result
 evidence, and integer exit code zero; malformed or contradictory outcome fields
 fail closed instead of producing simultaneous success/failure flags.
+Single-round preflight is a separate pure boundary over static inputs. Before
+any tool runs, it requires a non-empty response of at most 32 unique calls,
+correlates admitted and duplicate-blocked calls to exact response tool identity,
+checks current-round and declared-window IDs, requires literal mutation mode,
+validates the provider result budget and artifact-ledger type, and returns an
+immutable input bundle with deep-copied response and admission values. It
+performs no admission, dispatch, execution, result projection, wire composition,
+state update, or file I/O.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

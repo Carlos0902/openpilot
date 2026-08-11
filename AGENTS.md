@@ -80,6 +80,11 @@ update this file together with `API.md`.
   and failure booleans. The task-owned command may match by normalized argv only,
   must execute at most once, and requires literal result success plus an integer
   zero exit code before the observation can become successful.
+- One admitted provider round must preflight response/admission/duplicate/window
+  identity, literal mutation mode, result budget, round identity, and artifact
+  ledger type before execution. The preflight result is immutable and grants no
+  new authority; it must snapshot mutable response/admission inputs so later
+  execution cannot reinterpret caller-mutated raw collections.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

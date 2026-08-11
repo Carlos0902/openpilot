@@ -138,6 +138,13 @@ booleans. The observer reuses admission's argv-aware command comparison,
 requires at most one exact execution from a bounded result list, and accepts
 success only when tool success, result success, and integer zero exit code all
 agree. Missing, malformed, repeated, or contradictory evidence fails closed.
+Single-round static inputs are validated separately before any side effect. The
+preflight accepts at most 32 unique response calls, correlates admissions and
+duplicate blocks to exact tool identity, checks round/window IDs, literal
+mutation mode, result budget, and ledger type, then returns one frozen bundle.
+Mutable response/admission values are deep-copied to close the preflight-to-use
+gap. It does not dispatch, execute, project results, compose wire messages, or
+grant permission.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

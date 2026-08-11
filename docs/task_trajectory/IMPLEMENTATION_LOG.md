@@ -3657,3 +3657,43 @@ PYTHONPATH=Code/src pytest -q Code/tests
     shape changes.
 - Remaining limitation: the provider conversation runner still needs to consume
   this observation and route failure, finalization, or another validation turn.
+
+### Bounded single-round provider preflight
+
+- Observed failure: the aggregate conversation loop correlated response calls,
+  admissions, duplicate blocks, declared windows, result budget, and ledger
+  inputs inline with execution. A static mismatch could therefore be discovered
+  only after entering a side-effecting orchestration path.
+- Validation evidence: the regression suite first fails because no standalone
+  single-round preflight exists. Eleven focused tests pass after implementation
+  for immutable valid inputs, response/admission snapshot isolation and
+  correlation, duplicate identity/disjointness, invalid entry shapes, response
+  cardinality/uniqueness, declared windows, result budget, and artifact-ledger
+  type. The adjacent preflight/dispatch/result/wire set passes 60 and the
+  complete provider-focused set passes 492. The complete repository suite
+  passes 1,588 in an isolated detached worktree, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add one pure preflight that validates all static round inputs
+  and returns a frozen bundle for later execution. It accepts at most 32 response
+  calls, deep-copies mutable response/admission values, and performs no dispatch,
+  execution, result projection, wire composition, state update, or file I/O.
+- Metadata impact note:
+  - Facts: existing provider response/call identity, admitted selections,
+    duplicate/window evidence, literal mutation mode, bounded result budget, and
+    runtime artifact-ledger identity.
+  - Authoritative producers: provider transport owns the response; admission
+    owns executable selections; the caller owns mutation mode, result budget,
+    declared completion IDs, and the runtime ledger.
+  - Lifecycle and control impact: pure runtime preflight. It adds no authority
+    and cannot dispatch, execute, mutate state, or perform I/O.
+  - Existing contracts reviewed: `LLMResponse`, `ProviderToolAdmission`,
+    duplicate blocks, declared-window IDs, result payload bounds, artifact
+    ledger, provider cardinality limits, public metadata inventory, and metadata
+    development conventions.
+  - Decision: return a frozen core value rather than introducing a persisted
+    metadata kind or repeating static checks inside a side-effecting composer.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: a separate single-round composer still needs to consume
+  this bundle, preserve post-execution evidence on projection failure, and then
+  feed a bounded multi-round conversation controller.
