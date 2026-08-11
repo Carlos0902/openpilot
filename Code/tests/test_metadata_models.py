@@ -64,6 +64,7 @@ from metadata import (
     ProjectImprovementRequirement,
     ProjectObjectiveMetadata,
     ProjectStackPresetMetadata,
+    ProviderBudgetDiagnostic,
     ImprovementCandidateMetadata,
     ReferenceInsightMetadata,
     RelatedProjectFileMetadata,
@@ -94,6 +95,7 @@ from metadata import (
     ToolContextMetadata,
     ToolErrorMetadata,
     ToolEventMetadata,
+    ToolEventCompletionOutcome,
     ToolInputMetadata,
     ToolLoopMetadata,
     ToolResultMetadata,
@@ -622,6 +624,88 @@ def test_runtime_budget_derives_static_and_dynamic_tool_event_completion_limits(
         RuntimeBudgetMetadata(
             tool_event_completion_ceiling=700,
             tool_event_completion_floor=800,
+        )
+
+
+def test_runtime_budget_outcome_feedback_is_opt_in_and_bounded() -> None:
+    baseline = RuntimeBudgetMetadata(
+        max_tool_event_completion_tokens=8_000,
+        tool_event_completion_ceiling=2_000,
+        tool_event_completion_floor=800,
+        tool_event_completion_recovery_step=400,
+        tool_event_completion_outcome_feedback_enabled=False,
+    )
+    baseline_limit = baseline.tool_event_completion_limit(round_index=2, calls_remaining=3)
+    baseline.observe_tool_event_outcome(ToolEventCompletionOutcome.EMPTY_RESPONSE)
+    assert baseline.tool_event_completion_limit(round_index=2, calls_remaining=3) == baseline_limit
+
+    adaptive = baseline.model_copy(
+        update={"tool_event_completion_outcome_feedback_enabled": True}
+    )
+    adaptive.observe_tool_event_outcome(ToolEventCompletionOutcome.TRUNCATED)
+    assert adaptive.tool_event_completion_limit(round_index=2, calls_remaining=3) == (
+        baseline_limit + 400
+    )
+    adaptive.observe_tool_event_outcome(ToolEventCompletionOutcome.TRUNCATED)
+    assert adaptive.tool_event_completion_limit(round_index=2, calls_remaining=3) == (
+        baseline_limit + 400
+    )
+    adaptive.observe_tool_event_outcome(ToolEventCompletionOutcome.TOOL_PROGRESS)
+    assert adaptive.tool_event_completion_last_outcome == "tool_progress"
+
+
+def test_provider_budget_diagnostic_preserves_unknown_usage_and_failures() -> None:
+    unknown = ProviderBudgetDiagnostic(
+        round_index=1,
+        requested_limit=1200,
+        reserved_tokens=1200,
+        actual_completion_tokens=None,
+        usage_known=False,
+        budget_tokens_used_before=0,
+        budget_tokens_used_after=1200,
+        budget_tokens_remaining_before=3000,
+        budget_tokens_remaining_after=1800,
+        recovery_bonus_before=0,
+        recovery_bonus_after=200,
+        finish_reason="length",
+        outcome=ToolEventCompletionOutcome.TRUNCATED,
+        provider_cap_hit=True,
+        outcome_feedback_enabled=True,
+    )
+    failed = ProviderBudgetDiagnostic(
+        round_index=2,
+        requested_limit=1200,
+        reserved_tokens=1200,
+        usage_known=False,
+        budget_tokens_used_before=1200,
+        budget_tokens_used_after=2400,
+        budget_tokens_remaining_before=1800,
+        budget_tokens_remaining_after=600,
+        recovery_bonus_before=200,
+        recovery_bonus_after=200,
+        provider_cap_hit=False,
+        outcome_feedback_enabled=True,
+        provider_attempt_failed=True,
+        error_type="TimeoutError",
+    )
+
+    assert unknown.actual_completion_tokens is None
+    assert failed.provider_attempt_failed is True
+    with pytest.raises(ValueError, match="usage-known"):
+        ProviderBudgetDiagnostic(
+            round_index=1,
+            requested_limit=100,
+            reserved_tokens=100,
+            actual_completion_tokens=10,
+            usage_known=False,
+            budget_tokens_used_before=0,
+            budget_tokens_used_after=100,
+            budget_tokens_remaining_before=100,
+            budget_tokens_remaining_after=0,
+            recovery_bonus_before=0,
+            recovery_bonus_after=0,
+            provider_cap_hit=False,
+            outcome_feedback_enabled=False,
         )
 
 
