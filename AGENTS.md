@@ -113,6 +113,10 @@ update this file together with `API.md`.
 - Provider completion outcome must be classified once from strict response
   facts. Truncation takes precedence over tool progress; empty content is not
   normal completion; free-form finish-reason text cannot control other states.
+- Historical provider tool-message compaction may rewrite only tool results
+  before the latest assistant tool-call. It must deep-copy the message list,
+  preserve the latest round byte-for-byte, bound the compacted payload, and
+  convert malformed JSON into a bounded failure projection.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

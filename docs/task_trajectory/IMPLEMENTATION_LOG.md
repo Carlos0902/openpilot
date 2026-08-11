@@ -3991,5 +3991,42 @@ PYTHONPATH=Code/src pytest -q Code/tests
     in the multi-round controller.
   - Serialization and migration: runtime-only value; no persisted shape or
     migration changes.
-- Remaining limitation: the multi-round controller still needs to consume this
+  - Remaining limitation: the multi-round controller still needs to consume this
   outcome together with finalization, repair, and no-progress transitions.
+
+### Bounded historical provider tool-message compaction
+
+- Observed failure: the aggregate round-trip loop compacted historical tool
+  results inline. Without a standalone boundary, a caller could provide an
+  unbounded message list, mutate the source messages during projection, or cause
+  malformed historical JSON to be replayed as a large raw string. The latest
+  tool round also needed to remain untouched for exact provider correlation.
+- Validation evidence: the regression suite first fails because no standalone
+  compaction module exists. Six focused tests pass after implementation for
+  historical-only compaction, latest-round preservation, malformed JSON failure
+  projection, deep-copy isolation, message cardinality, and invalid input
+  rejection. The adjacent historical/completion/repair set passes 28 and the
+  complete provider-focused set passes 618. The complete repository suite
+  passes 1,714 in an isolated detached worktree, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add a pure bounded compactor that deep-copies at most the
+  provider message limit, locates the latest assistant tool-call, and applies
+  the existing provider result-payload fitter only to earlier tool messages.
+  Invalid JSON is converted to a bounded failure mapping before fitting.
+- Metadata impact note:
+  - Facts: existing `LLMMessage` roles/tool calls and provider result payloads.
+  - Authoritative producer: the conversation owner supplies messages; this
+    module derives a model-facing historical projection and owns no execution
+    or evidence fact.
+  - Lifecycle and control impact: context assembly only. It performs no request,
+    admission, tool execution, state mutation, file I/O, or persistence.
+  - Existing contracts reviewed: `LLMMessage`, provider message/result bounds,
+    result payload fitting, tool-wire identity, public metadata inventory, and
+    metadata development conventions.
+  - Decision: reuse the existing result-payload fitter and return a derived
+    message view rather than introduce another message or metadata owner.
+  - Serialization and migration: ephemeral request messages; no persisted
+    schema or migration changes.
+- Remaining limitation: the multi-round controller still needs to call this
+  projection at the historical-compaction point and preserve current-round wire
+  evidence through the next request.

@@ -178,6 +178,10 @@ non-repairable protocol failures do not request repair.
 Provider response classification is centralized in one enum. Truncation wins
 over simultaneous tool calls, tool progress wins over content, and blank
 tool-free responses remain explicit empty responses.
+Historical tool wire compaction is isolated from current-round evidence. It
+deep-copies bounded message collections, rewrites only older tool results,
+preserves the latest tool round, and turns malformed JSON into a bounded failure
+projection using the existing result-payload contract.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

@@ -312,6 +312,12 @@ Completion outcome is a separate pure enum: `normal`, `tool_progress`,
 `truncated`, or `empty_response`. A `length`/`max_tokens` finish reason takes
 precedence over tool calls, then tool calls take precedence over content; a
 tool-free blank response is never normal completion.
+Historical tool-message compaction is a separate pure projection. It accepts at
+most the provider round-trip message limit, deep-copies every message, and
+compacts only tool results older than the latest assistant tool-call. The latest
+tool round remains unchanged; malformed historical JSON becomes a bounded
+failure payload, and every rewritten result stays within the existing provider
+result-character bounds.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only
