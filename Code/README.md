@@ -20,6 +20,12 @@ preflight/reconciliation. Enable it with `openpilot run --checkpointing`; resume
 requires explicit run ID, checkpoint ID, and project path. File mutations are
 hash-reconciled, while commands without a registered probe fail closed.
 
+The unified CLI admission distinguishes lightweight conversation,
+current/external evidence requests, and project execution before constructing
+the legacy project autopilot. It is a routing decision only: tool, network,
+file-scope, confirmation, and validation authority remains in the existing
+typed runtime contracts.
+
 Project-scoped Python validation is gated by a read-only `.venv` preflight.
 Existing ready environments attach without install/network writes; setup or
 resync follows the root permission policy. Failure blocks validation instead of

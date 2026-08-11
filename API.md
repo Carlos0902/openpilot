@@ -894,6 +894,14 @@ project contents or current/external facts produce an evidence-required result
 instead of an assistant ledger commit; evidence escalation and external tools
 remain separate routes.
 
+The unified CLI entry applies a typed pre-task admission before these paths:
+lightweight conversation and knowledge-only questions remain response-only,
+current/external questions enter evidence collection, and project, artifact,
+mutation, execution, or ambiguous requests fail safe to project execution.
+The admission decision selects a route but grants no tool, file, network, or
+mutation authority; those remain owned by the existing evidence, task, Router,
+Guard, and environment contracts.
+
 The bounded response boundary also records the model's claims in a separate,
 content-addressed `response_claim_manifest` artifact. `ResponseCandidate` keeps
 only a reference to that manifest; evidence routing must verify the manifest's

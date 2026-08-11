@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from rich.console import Console
 
+from autonomous_iteration.pre_task_admission import (
+    PreTaskAdmissionKind,
+    UnifiedEntryError,
+    UnifiedEntryFailureStage,
+    resolve_pre_task_admission,
+)
 from core.config import EmbeddingSettings, LLMSettings
 from core.instrumented_llm import InstrumentedLLMClient
 from core.model_health import run_startup_model_health_check
@@ -36,6 +43,19 @@ DEFAULT_IMPROVEMENT_ITERATIONS = 2
 _CONSTRAINT_COMMANDS = frozenset({"/constraints", "/confirm", "/reject", "/revoke"})
 
 
+class _UnifiedAutonomousEntryScope(str, Enum):
+    RESPONSE_CANARY = "response_canary"
+    LEGACY_AUTOPILOT = "legacy_autopilot"
+
+
+def _unified_autonomous_entry_scope(goal: str) -> _UnifiedAutonomousEntryScope:
+    """Compatibility projection of the typed pre-task admission decision."""
+
+    if resolve_pre_task_admission(goal).kind is PreTaskAdmissionKind.PROJECT_EXECUTION:
+        return _UnifiedAutonomousEntryScope.LEGACY_AUTOPILOT
+    return _UnifiedAutonomousEntryScope.RESPONSE_CANARY
+
+
 def _is_constraint_command(user_input: str) -> bool:
     """Return whether input belongs to the typed session-constraint ingress."""
 
@@ -46,6 +66,150 @@ def _is_constraint_command(user_input: str) -> bool:
 def _runtime_diagnostics_enabled() -> bool:
     value = str(os.getenv("OPENPILOT_RUNTIME_DIAGNOSTICS_ENABLED", "1")).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _unified_autonomous_entry_enabled() -> bool:
+    value = str(os.getenv("OPENPILOT_UNIFIED_AUTONOMOUS_ENTRY_ENABLED", "1")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _governed_decomposition_enabled() -> bool:
+    value = str(os.getenv("OPENPILOT_GOVERNED_DECOMPOSITION", "1")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _iteration_turn_store():
+    from autonomous_iteration.iteration_turn_store import IterationTurnStore
+
+    recorder = get_default_hooks().recorder
+    return IterationTurnStore(recorder.trajectory_dir / "iteration_turns")
+
+
+def _try_deterministic_runtime_response(
+    goal: str,
+    *,
+    ingress_state: SessionIngressState,
+    settings: LLMSettings,
+    runtime_options: "OpenPilotRuntimeOptions",
+):
+    if not _unified_autonomous_entry_enabled():
+        return None
+    from autonomous_iteration.deterministic_runtime_response import (
+        DeterministicRuntimeResponseController,
+    )
+    from autonomous_iteration.runtime_facts import RuntimeFactResolver
+
+    facts = RuntimeFactResolver(settings).resolve(
+        project_path=ingress_state.identity.project_root,
+        project_improvement_policy=runtime_options.project_improvement_policy,
+    )
+    return DeterministicRuntimeResponseController(_iteration_turn_store()).try_complete(
+        goal,
+        ingress=ingress_state,
+        facts=facts,
+    )
+
+
+def _runtime_fact_projection(
+    *,
+    ingress_state: SessionIngressState,
+    settings: LLMSettings,
+    runtime_options: "OpenPilotRuntimeOptions",
+):
+    from autonomous_iteration.runtime_facts import RuntimeFactResolver
+
+    return RuntimeFactResolver(settings).resolve(
+        project_path=ingress_state.identity.project_root,
+        project_improvement_policy=runtime_options.project_improvement_policy,
+    )
+
+
+def _execute_response_evidence_task(
+    candidate,
+    *,
+    llm_client,
+    ui: EnhancedUI,
+    tracker: ProgressTracker | None,
+    logger,
+    runtime_options: "OpenPilotRuntimeOptions",
+):
+    if not _governed_decomposition_enabled():
+        raise RuntimeError("response evidence requires governed decomposition")
+    if not _runtime_diagnostics_enabled():
+        raise RuntimeError("response evidence requires durable diagnostics and checkpoint storage")
+
+    hooks = get_default_hooks()
+    from autonomous_iteration.response_evidence_runtime import (
+        execute_response_evidence_task,
+    )
+
+    return execute_response_evidence_task(
+        candidate,
+        turn_store=_iteration_turn_store(),
+        llm_client=llm_client,
+        console=ui.console,
+        logger=logger,
+        tracker=tracker,
+        enhanced_ui=ui,
+        project_improvement_policy=runtime_options.project_improvement_policy,
+        diagnostics_hooks=hooks,
+    )
+
+
+def _try_unified_autonomous_response(
+    goal: str,
+    *,
+    ingress_state: SessionIngressState,
+    settings: LLMSettings,
+    runtime_options: "OpenPilotRuntimeOptions",
+    llm_client,
+    ui: EnhancedUI,
+    tracker: ProgressTracker | None,
+    logger,
+):
+    response = _try_deterministic_runtime_response(
+        goal,
+        ingress_state=ingress_state,
+        settings=settings,
+        runtime_options=runtime_options,
+    )
+    if response is not None:
+        return response
+    if not _unified_autonomous_entry_enabled():
+        return None
+    if _unified_autonomous_entry_scope(goal) == _UnifiedAutonomousEntryScope.LEGACY_AUTOPILOT:
+        return None
+
+    from autonomous_iteration.bounded_model_response import BoundedModelResponseController
+
+    try:
+        candidate = BoundedModelResponseController(
+            _iteration_turn_store(),
+            llm_client,
+        ).complete(
+            goal,
+            ingress=ingress_state,
+            facts=_runtime_fact_projection(
+                ingress_state=ingress_state,
+                settings=settings,
+                runtime_options=runtime_options,
+            ),
+        )
+    except Exception as exc:
+        raise UnifiedEntryError(UnifiedEntryFailureStage.BOUNDED_RESPONSE, exc) from exc
+    if not candidate.evidence_required:
+        return candidate
+    try:
+        return _execute_response_evidence_task(
+            candidate,
+            llm_client=llm_client,
+            ui=ui,
+            tracker=tracker,
+            logger=logger,
+            runtime_options=runtime_options,
+        )
+    except Exception as exc:
+        raise UnifiedEntryError(UnifiedEntryFailureStage.EXTERNAL_EVIDENCE, exc) from exc
 
 
 def _build_task_execution_context(*, source: str, classification: "TaskRouteMetadata") -> dict[str, object]:
@@ -125,10 +289,12 @@ def _format_failure_details(result: dict) -> str:
         context_lines.append(f"Task ID: {context['task_id']}")
     if context.get("failure_id"):
         context_lines.append(f"Failure ID: {context['failure_id']}")
-    if context.get("recoverable") is not None:
-        context_lines.append(f"Recoverable: {'yes' if bool(context['recoverable']) else 'no'}")
-    if context.get("recoverability"):
-        context_lines.append(f"Recovery status: {context['recoverability']}")
+    recoverable = context.get("recoverable")
+    recoverability = context.get("recoverability")
+    if recoverable is not None:
+        context_lines.append(f"Recoverable: {'yes' if bool(recoverable) else 'no'}")
+    if recoverability:
+        context_lines.append(f"Recovery status: {recoverability}")
     if failure_stage or failed_tool:
         context_lines.extend(
             [
@@ -148,7 +314,7 @@ def _format_failure_details(result: dict) -> str:
         context_lines.append(f"Error Type: {context['error_type']}")
     if context.get("suggested_recovery"):
         context_lines.append(f"Recovery: {context['suggested_recovery']}")
-    response_preview = context.get("response_preview")
+    response_preview = context.get("response_preview") or context.get("response_text")
     if response_preview:
         context_lines.append(f"Response Preview: {str(response_preview)[:1000]}")
     if context_lines:
@@ -156,56 +322,35 @@ def _format_failure_details(result: dict) -> str:
     return str(details)
 
 
-def _session_result_payload(result: dict) -> dict:
-    """Use the durable session result when the runtime wraps it."""
-    if not isinstance(result, dict):
-        return {}
-    session_result = result.get("session_result")
-    return session_result if isinstance(session_result, dict) else result
+def _cli_exception_failure(
+    exc: Exception,
+    *,
+    task_id: str | None = None,
+    stage: UnifiedEntryFailureStage | None = None,
+) -> dict[str, object]:
+    """Build a bounded ordinary-mode failure without exposing exception text or a traceback."""
 
-
-def _format_success_details(result: dict) -> str:
-    """Render concrete iteration actions, changed files, and validation state."""
-    result = _session_result_payload(result)
-    lines: list[str] = []
-    completed = int(result.get("completed_improvements") or 0)
-    required = int(result.get("required_improvements") or 0)
-    if completed or required:
-        lines.append(f"代码优化: {completed}/{required}")
-    for item in list(result.get("iterations") or []):
-        iteration = _result_value(item, "iteration") or "?"
-        actions = list(_result_value(item, "applied_actions") or [])
-        changed_files = list(_result_value(item, "changed_files") or [])
-        validation_passed = bool(_result_value(item, "validation_passed"))
-        if actions:
-            lines.append(f"第 {iteration} 轮: {'; '.join(str(action) for action in actions[:3])}")
-        if changed_files:
-            lines.append("修改文件: " + ", ".join(Path(str(path)).name for path in changed_files[:5]))
-        lines.append(f"验证: {'通过' if validation_passed else '未通过'}")
-    return "\n".join(lines) or "任务已完成并通过验证。"
+    resolved_stage = stage or (
+        exc.stage if isinstance(exc, UnifiedEntryError) else None
+    )
+    return {
+        "success": False,
+        "failure_reason": "Autonomous iteration stopped before completion.",
+        "failure_stage": resolved_stage.value if resolved_stage is not None else "CLI",
+        "failed_tool": "autonomous_iteration",
+        "task_id": task_id,
+        "failure_id": f"{task_id}:cli" if task_id else "cli",
+        "error_type": exc.cause_type if isinstance(exc, UnifiedEntryError) else type(exc).__name__,
+        "recoverable": False,
+        "recoverability": Recoverability.NOT_RECOVERABLE.value,
+        "suggested_recovery": "Retry after reviewing the diagnostic log.",
+    }
 
 
 def _result_value(value, key: str):
     if isinstance(value, dict):
         return value.get(key)
     return getattr(value, key, None)
-
-
-def _cli_exception_failure(exc: Exception, *, task_id: str | None = None) -> dict[str, object]:
-    """Build a bounded ordinary-mode failure without exposing exception text."""
-
-    return {
-        "success": False,
-        "failure_reason": "Autonomous iteration stopped before completion.",
-        "failure_stage": "CLI",
-        "failed_tool": "autonomous_iteration",
-        "task_id": task_id,
-        "failure_id": f"{task_id}:cli" if task_id else "cli",
-        "error_type": type(exc).__name__,
-        "recoverable": False,
-        "recoverability": Recoverability.NOT_RECOVERABLE.value,
-        "suggested_recovery": "Retry after reviewing the diagnostic log.",
-    }
 
 
 def _extract_failure_context(result) -> dict:
@@ -218,8 +363,9 @@ def _extract_failure_context(result) -> dict:
             if nested_context:
                 return nested_context
     direct_reason = result.get("failure_reason")
-    failure_payload = result.get("failure") if isinstance(result.get("failure"), dict) else {}
     if direct_reason and direct_reason != "Autopilot reported failure":
+        raw_failure_payload = result.get("failure")
+        direct_failure_payload: dict = raw_failure_payload if isinstance(raw_failure_payload, dict) else {}
         direct_context = {
             "failure_reason": direct_reason,
             "failure_stage": result.get("failure_stage"),
@@ -231,8 +377,8 @@ def _extract_failure_context(result) -> dict:
             "file_path": result.get("file_path"),
             "error_type": result.get("error_type"),
             "suggested_recovery": result.get("suggested_recovery"),
-            "response_preview": result.get("response_preview"),
-            "recoverable": result.get("recoverable", failure_payload.get("recoverable")),
+            "response_preview": result.get("response_preview") or result.get("response_text"),
+            "recoverable": result.get("recoverable", direct_failure_payload.get("recoverable")),
             "recoverability": result.get("recoverability"),
             "failure_id": result.get("failure_id"),
         }
@@ -243,13 +389,15 @@ def _extract_failure_context(result) -> dict:
         if context:
             return context
     if direct_reason:
+        raw_failure_payload = result.get("failure")
+        fallback_failure_payload: dict = raw_failure_payload if isinstance(raw_failure_payload, dict) else {}
         return {
             "failure_reason": direct_reason,
             "failure_stage": result.get("failure_stage"),
             "failed_tool": result.get("failed_tool"),
             "failed_call_id": result.get("failed_call_id"),
             "failed_step_id": result.get("failed_step_id"),
-            "recoverable": result.get("recoverable", failure_payload.get("recoverable")),
+            "recoverable": result.get("recoverable", fallback_failure_payload.get("recoverable")),
             "recoverability": result.get("recoverability"),
             "failure_id": result.get("failure_id"),
         }
@@ -309,7 +457,8 @@ def _failure_context_from_details(details, reason: str) -> dict:
         or details.get("response_preview_start")
         or final_details.get("response_preview")
         or final_details.get("response_preview_start")
-        or None
+        or details.get("response_text")
+        or final_details.get("response_text")
     )
     return {
         "failure_reason": reason,
@@ -481,8 +630,9 @@ def _run_once_mode(
     ui.console.print()
     ui.console.print(f"[bold cyan]Goal:[/bold cyan] {goal}")
     ui.console.print()
-
     execution_context: dict[str, object] = {}
+    failure_stage: UnifiedEntryFailureStage | None = None
+
     try:
         classification = _classify_task_route(goal)
         _show_task_route(ui, classification)
@@ -503,6 +653,41 @@ def _run_once_mode(
         if classification.route == "agent_generator":
             return 0 if _execute_agent_generator(goal, ui, active_llm_client, logger) else 2
 
+        if _unified_autonomous_entry_enabled():
+            identity = ConversationIdentity(
+                conversation_id=f"conversation_{uuid4().hex}",
+                run_id=f"run_{uuid4().hex}",
+                turn_index=1,
+                project_root=str(
+                    Path(project_path or Path.cwd()).expanduser().resolve()
+                ),
+            )
+            ingress = SessionIngressState(
+                identity=identity,
+                turns=[
+                    SessionTurn(
+                        identity=identity,
+                        message_id=f"message_{uuid4().hex}",
+                        role="user",
+                        content=goal,
+                    )
+                ],
+            )
+            response = _try_unified_autonomous_response(
+                goal,
+                ingress_state=ingress,
+                settings=settings,
+                runtime_options=runtime_options,
+                llm_client=active_llm_client,
+                ui=ui,
+                tracker=tracker,
+                logger=logger,
+            )
+            if response is not None:
+                ui.console.print(response.content)
+                return 0
+
+        failure_stage = UnifiedEntryFailureStage.PROJECT_EXECUTION
         # Create autopilot with enhanced UI support
         autopilot = IntelligentAutopilot(
             llm_client=active_llm_client,
@@ -534,7 +719,7 @@ def _run_once_mode(
         ui.show_full_task_graph_timeline()
 
         if result.get("success"):
-            ui.show_success("Goal completed successfully!", _format_success_details(result))
+            ui.show_success("Goal completed successfully!")
             return 0
 
         ui.show_error("Execution failed", _format_failure_details(result))
@@ -548,6 +733,7 @@ def _run_once_mode(
                 _cli_exception_failure(
                     e,
                     task_id=str(execution_context.get("task_id") or "") or None,
+                    stage=failure_stage,
                 )
             ),
         )
@@ -750,6 +936,7 @@ def _run_interactive_mode(
                         logger,
                         runtime_options,
                         ingress_state=ingress_state,
+                        settings=settings,
                     )
                 else:
                     ui.console.print(f"[yellow]Unknown command: {user_input}[/yellow]")
@@ -776,6 +963,7 @@ def _execute_goal_interactive(
     runtime_options: OpenPilotRuntimeOptions,
     *,
     ingress_state: SessionIngressState | None = None,
+    settings: LLMSettings | None = None,
 ):
     """Execute a goal in interactive mode."""
     if _handle_shell_state_command(goal, ui):
@@ -816,6 +1004,38 @@ def _execute_goal_interactive(
     if classification.route == "agent_generator":
         result = _execute_agent_generator(goal, ui, llm_client, logger)
     else:
+        active_settings = settings or getattr(llm_client, "settings", None)
+        if ingress_state is not None and isinstance(active_settings, LLMSettings):
+            try:
+                response = _try_unified_autonomous_response(
+                    goal,
+                    ingress_state=ingress_state,
+                    settings=active_settings,
+                    runtime_options=runtime_options,
+                    llm_client=llm_client,
+                    ui=ui,
+                    tracker=tracker,
+                    logger=logger,
+                )
+            except Exception as exc:
+                failure = _cli_exception_failure(
+                    exc,
+                    task_id=str(execution_context.get("task_id") or "") or None,
+                )
+                show_error = getattr(ui, "show_error", None)
+                error_title = (
+                    exc.stage.title
+                    if isinstance(exc, UnifiedEntryError)
+                    else "Autonomous entry failed"
+                )
+                if callable(show_error):
+                    show_error(error_title, _format_failure_details(failure))
+                else:
+                    ui.console.print(_format_failure_details(failure))
+                return ingress_state
+            if response is not None:
+                ui.console.print(response.content)
+                return response.ingress
         result = _execute_autopilot(goal, ui, tracker, llm_client, logger, runtime_options, context=execution_context)
     if ingress_state is None:
         return result
@@ -1004,15 +1224,14 @@ def _execute_autopilot(
         ui.show_full_task_graph_timeline()
 
         if result.get("success"):
-            success_details = _format_success_details(result)
             warning = result.get("iteration_error")
             if warning:
                 ui.show_success(
                     "Goal completed with iteration warning",
-                    f"{success_details}\n迭代警告: {warning}",
+                    warning,
                 )
             else:
-                ui.show_success("Goal completed!", success_details)
+                ui.show_success("Goal completed!")
         else:
             ui.show_error("Autopilot execution failed", _format_failure_details(result))
         return result
@@ -1023,6 +1242,7 @@ def _execute_autopilot(
         failure = _cli_exception_failure(
             e,
             task_id=str((context or {}).get("task_id") or "") or None,
+            stage=UnifiedEntryFailureStage.PROJECT_EXECUTION,
         )
         ui.show_error("Autopilot execution failed", _format_failure_details(failure))
         return failure

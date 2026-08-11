@@ -1,5 +1,18 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Typed unified pre-task admission
+
+- Observed failure: greetings and ordinary questions entered the autonomous
+  project path and waited on unnecessary planning, while project requests
+  could be mistaken for lightweight responses.
+- Implemented fix: add a controller-owned typed admission that routes
+  lightweight conversation, current/external evidence, and project execution
+  separately; ambiguous or mutation-like requests fail safe to project work.
+- Validation evidence: pre-task, unified-entry, CLI recovery, bounded-response,
+  and evidence-escalation tests **64 passed**; compileall and diff checks pass.
+- Remaining limitation: current/external evidence still depends on its separate
+  network tool and is not part of this routing PR.
+
 ## 2026-08-12 — Discovered persisted-binding opt-in canary
 
 - Observed failure: the token-aware simulation used builder-selected sources
