@@ -72,3 +72,7 @@ Validation command admission preserves the exact task-owned argv and cwd and
 permits only one automatic execution.
 Provider permission decisions require literal booleans and keep mutation opt-in
 separate from user confirmation.
+The single-call read-only admission path composes those boundaries in one
+fail-closed sequence and returns a selection only after registry, contract,
+budget, permission, scope, and exact-validation checks pass; it never executes
+the tool and never admits mutation.

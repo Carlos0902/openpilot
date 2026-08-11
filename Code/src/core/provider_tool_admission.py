@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,7 +26,7 @@ from metadata import (
     ToolErrorMetadata,
     ToolInputMetadata,
 )
-from tools.tool_selection import ToolSelection
+from tools.tool_selection import SelectionReason, ToolSelection
 from tools.mutation_descriptor import FILE_MUTATION_TOOLS
 
 MAX_PROVIDER_TOOL_ARGUMENT_CHARS = 200_000
@@ -171,6 +172,266 @@ class ProviderToolPermissionDecision(BaseModel):
         if self.status == "admitted" and self.mutating and not self.requires_confirmation:
             raise ValueError("admitted mutation must retain confirmation evidence")
         return self
+
+
+def admit_provider_tool_call(
+    call: LLMToolCall,
+    *,
+    task_id: str,
+    session_id: str,
+    round_index: int,
+    ordinal: int,
+    registry: Any,
+    budget: RuntimeBudgetMetadata,
+    prior_usage: ProviderToolBudgetUsage,
+    user_confirmed: bool,
+    read_scope: Sequence[str] | None,
+    project_path: str | None,
+    validation_command: str | None = None,
+    validation_cwd: str | None = None,
+    validation_commands_used: int = 0,
+) -> ProviderToolAdmission:
+    """Admit one provider-native read-only call without executing it."""
+
+    if not str(task_id).strip() or not str(session_id).strip():
+        raise ProviderToolAdmissionError("task_id and session_id are required")
+    if round_index < 1 or ordinal < 1:
+        raise ProviderToolAdmissionError("round_index and ordinal must be positive")
+    if type(user_confirmed) is not bool:
+        raise ProviderToolAdmissionError("user_confirmed must be a literal boolean")
+    if validation_commands_used < 0:
+        raise ProviderToolAdmissionError(
+            "validation_commands_used must be non-negative"
+        )
+
+    provider_call_id = call.id
+    project_call_id = f"{task_id}:r{round_index}:c{ordinal}"
+    tool_name = call.function.name
+    arguments, argument_error = decode_provider_tool_arguments(call)
+    input_metadata = ToolInputMetadata.from_mapping(tool_name, arguments)
+    tool_call = ToolCallMetadata(
+        session_id=session_id,
+        task_id=task_id,
+        step_id=f"step_{round_index}_{ordinal}",
+        call_id=project_call_id,
+        provider_call_id=provider_call_id,
+        tool_name=tool_name,
+        input_metadata=input_metadata,
+        reason="provider-native tool call",
+        round_index=round_index,
+    )
+
+    if argument_error:
+        return _blocked_provider_admission(
+            tool_call,
+            error_type="InvalidToolArguments",
+            error_message=argument_error,
+            recoverable=True,
+            suggested_recovery=(
+                "Return one JSON object containing the tool arguments."
+            ),
+        )
+
+    definition = getattr(registry, "get", lambda _name: None)(tool_name)
+    executor = getattr(registry, "get_executor", lambda _name: None)(tool_name)
+    if definition is None or executor is None:
+        return _blocked_provider_admission(
+            tool_call,
+            error_type="UnknownTool",
+            error_message=f"Unknown or unexecutable tool: {tool_name}",
+            recoverable=True,
+            suggested_recovery=(
+                "Choose a registered tool with an executable contract."
+            ),
+        )
+
+    _apply_provider_input_defaults(definition, input_metadata)
+    contract_error = provider_tool_contract_error(definition, input_metadata)
+    if contract_error:
+        return _blocked_provider_admission(
+            tool_call,
+            error_type="MissingRequiredInput",
+            error_message=contract_error,
+            recoverable=True,
+            suggested_recovery="Retry with all required typed tool arguments.",
+        )
+
+    usage = provider_tool_resource_usage(
+        definition,
+        input_metadata,
+        validation_command=validation_command,
+    )
+    budget_decision = provider_tool_budget_decision(
+        budget,
+        usage,
+        prior=prior_usage,
+    )
+    if budget_decision.status == "blocked":
+        return _blocked_provider_admission(
+            tool_call,
+            error_type="ToolBudgetExhausted",
+            error_message=(
+                "Provider tool call exceeds the remaining runtime budget: "
+                f"{budget_decision.reason_code}."
+            ),
+            recoverable=False,
+            suggested_recovery="Replan within the remaining runtime budget.",
+        )
+
+    permission = provider_tool_permission_decision(
+        tool_name,
+        definition,
+        user_confirmed=user_confirmed,
+        allow_mutations=False,
+    )
+    if permission.status == "blocked":
+        confirmation_required = permission.reason_code == "confirmation_required"
+        return _blocked_provider_admission(
+            tool_call,
+            error_type=(
+                "UserConfirmationRequired"
+                if confirmation_required
+                else "PermissionDenied"
+            ),
+            error_message=(
+                f"Provider tool permission blocked {tool_name}: "
+                f"{permission.reason_code}."
+            ),
+            recoverable=confirmation_required,
+            retry_recommended=False if confirmation_required else None,
+            suggested_recovery=(
+                "Obtain explicit user confirmation before retrying this call."
+                if confirmation_required
+                else "Use a permitted non-mutating tool."
+            ),
+            requires_confirmation=permission.requires_confirmation,
+        )
+
+    capabilities = {
+        str(getattr(capability, "value", capability))
+        for capability in (getattr(definition, "capabilities", []) or [])
+    }
+    if ToolCapability.FILE_READ.value in capabilities:
+        scope_error = provider_read_scope_error(
+            input_metadata,
+            read_scope or (),
+            project_path,
+        )
+        if scope_error:
+            return _blocked_provider_admission(
+                tool_call,
+                error_type="ProviderToolScopeViolation",
+                error_message=scope_error,
+                recoverable=True,
+                suggested_recovery=(
+                    "Use a path from the explicit read_files scope."
+                ),
+            )
+
+    if tool_name == "command_executor":
+        if not str(validation_command or "").strip():
+            return _blocked_provider_admission(
+                tool_call,
+                error_type="ProviderToolValidationViolation",
+                error_message=(
+                    "command_executor requires a task-owned validation command."
+                ),
+                recoverable=False,
+                suggested_recovery=(
+                    "Use the exact typed validation command for this task."
+                ),
+            )
+        validation = provider_validation_command_decision(
+            input_metadata,
+            validation_command=str(validation_command),
+            validation_cwd=validation_cwd,
+            validation_commands_used=validation_commands_used,
+        )
+        if validation.status == "blocked":
+            duplicate = validation.reason_code == "duplicate_validation"
+            return _blocked_provider_admission(
+                tool_call,
+                error_type=(
+                    "ProviderToolValidationDuplicate"
+                    if duplicate
+                    else "ProviderToolValidationViolation"
+                ),
+                error_message=(
+                    "Provider validation command blocked: "
+                    f"{validation.reason_code}."
+                ),
+                recoverable=False,
+                suggested_recovery=(
+                    "Run the exact typed validation command once."
+                ),
+            )
+        input_metadata.mode = validation.effective_mode
+        input_metadata.cwd = validation.effective_cwd
+
+    selection = ToolSelection(
+        step_id=tool_call.step_id,
+        tool_name=tool_name,
+        reason=SelectionReason.CAPABILITY_MATCH,
+        confidence=1.0,
+        input_metadata=input_metadata,
+        requires_confirmation=False,
+    )
+    return ProviderToolAdmission(
+        status="admitted",
+        provider_call_id=provider_call_id,
+        project_call_id=project_call_id,
+        tool_call=tool_call,
+        selection=selection,
+        requires_confirmation=permission.requires_confirmation,
+    )
+
+
+def _apply_provider_input_defaults(
+    definition: Any,
+    input_metadata: ToolInputMetadata,
+) -> None:
+    contract = getattr(definition, "contract_metadata", None)
+    defaults = getattr(contract, "input_defaults", {}) or {}
+    for raw_name, default in defaults.items():
+        field_name = str(raw_name)
+        current = getattr(
+            input_metadata,
+            field_name,
+            input_metadata.attributes.get(field_name),
+        )
+        if current not in (None, "", [], {}):
+            continue
+        if field_name in ToolInputMetadata.model_fields:
+            setattr(input_metadata, field_name, deepcopy(default))
+        else:
+            input_metadata.attributes[field_name] = deepcopy(default)
+
+
+def _blocked_provider_admission(
+    tool_call: ToolCallMetadata,
+    *,
+    error_type: str,
+    error_message: str,
+    recoverable: bool,
+    retry_recommended: bool | None = None,
+    suggested_recovery: str = "",
+    requires_confirmation: bool = False,
+) -> ProviderToolAdmission:
+    return ProviderToolAdmission(
+        status="blocked",
+        provider_call_id=str(tool_call.provider_call_id),
+        project_call_id=tool_call.call_id,
+        tool_call=tool_call,
+        tool_error=provider_tool_error(
+            tool_call,
+            error_type=error_type,
+            error_message=error_message,
+            recoverable=recoverable,
+            retry_recommended=retry_recommended,
+            suggested_recovery=suggested_recovery,
+        ),
+        requires_confirmation=requires_confirmation,
+    )
 
 
 def decode_provider_tool_arguments(
@@ -714,6 +975,7 @@ __all__ = [
     "ProviderToolPermissionDecision",
     "ProviderToolResourceUsage",
     "ProviderValidationCommandDecision",
+    "admit_provider_tool_call",
     "decode_provider_tool_arguments",
     "provider_tool_budget_decision",
     "provider_tool_contract_error",

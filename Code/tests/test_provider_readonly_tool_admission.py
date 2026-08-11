@@ -161,7 +161,10 @@ def test_scope_budget_and_confirmation_fail_before_selection() -> None:
     assert unconfirmed.tool_error.error_type == "UserConfirmationRequired"
     assert out_of_scope.tool_error.error_type == "ProviderToolScopeViolation"
     assert exhausted.tool_error.error_type == "ToolBudgetExhausted"
-    assert all(item.selection is None for item in [unconfirmed, out_of_scope, exhausted])
+    assert all(
+        item.selection is None
+        for item in [unconfirmed, out_of_scope, exhausted]
+    )
 
 
 def test_mutation_is_blocked_in_readonly_admission() -> None:
@@ -180,6 +183,37 @@ def test_mutation_is_blocked_in_readonly_admission() -> None:
     assert admission.tool_error is not None
     assert admission.tool_error.error_type == "PermissionDenied"
     assert "mutation_not_allowed" in admission.tool_error.error_message
+
+
+def test_forbidden_and_unknown_permissions_fail_closed() -> None:
+    unknown = SimpleNamespace(
+        permission_level="unknown",
+        capabilities=[],
+        contract_metadata=ToolContractMetadata(
+            tool_name="custom_reader",
+            input_metadata_type="ToolInputMetadata",
+            output_metadata_type="ToolResultMetadata",
+        ),
+    )
+    admissions = [
+        _admit(
+            _call(arguments={"file_path": "README.md"}),
+            _Registry(
+                {
+                    "file_reader": _definition(
+                        permission=PermissionLevel.FORBIDDEN
+                    )
+                }
+            ),
+        ),
+        _admit(_call("custom_reader"), _Registry({"custom_reader": unknown})),
+    ]
+
+    assert all(item.tool_error is not None for item in admissions)
+    assert all(
+        item.tool_error.error_type == "PermissionDenied"
+        for item in admissions
+    )
 
 
 def test_exact_validation_command_binds_mode_and_cwd(tmp_path) -> None:
@@ -209,7 +243,10 @@ def test_exact_validation_command_binds_mode_and_cwd(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("updates", "error_type"),
     [
-        ({"validation_command": "python -m compileall src"}, "ProviderToolValidationViolation"),
+        (
+            {"validation_command": "python -m compileall src"},
+            "ProviderToolValidationViolation",
+        ),
         (
             {
                 "validation_command": "python -m compileall -q src",

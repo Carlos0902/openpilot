@@ -170,6 +170,11 @@ Provider permission admission fails closed on unknown or forbidden levels.
 Medium/high calls require confirmation; mutations additionally require a
 separate literal-boolean mutation opt-in, explicit confirmation, and retain
 typed mutation/confirmation evidence even after admission.
+A single-call read-only admission boundary now composes registry and executor
+identity, bounded argument decoding, typed defaults and contracts, runtime
+budget, permission, explicit read scope, and exact validation-command checks in
+that order. It creates an executable `ToolSelection` only after every boundary
+passes, blocks every mutation, and never executes the selected tool itself.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

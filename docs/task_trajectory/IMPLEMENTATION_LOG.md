@@ -2676,3 +2676,21 @@ PYTHONPATH=Code/src pytest -q Code/tests
   confirmation evidence.
 - Remaining limitation: permission admission alone does not create an executable
   selection or perform a mutation.
+
+### Read-only provider single-call admission
+
+- Observed failure: the pure provider admission decisions were not composed into
+  one safe call boundary, so a provider request could not become an existing
+  `ToolSelection` even after all read-only authority checks passed.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and the focused provider-admission suite passes 81 protocol, registry,
+  contract, budget, permission, scope, and validation-command checks after the
+  implementation.
+- Implemented fix: add one non-executing single-call admission function that
+  preserves provider/project identity, resolves both registry definition and
+  executor, applies copied typed defaults, then checks contract, budget,
+  permission, explicit read scope, and exact task-owned validation authority
+  before constructing a selection. Mutations fail closed.
+- Remaining limitation: mutation admission, bounded batch accumulation,
+  provider round-trip execution, and runtime event-loop integration remain
+  separate changes.
