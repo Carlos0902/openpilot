@@ -93,6 +93,9 @@ update this file together with `API.md`.
   transition. Validation cannot succeed or fail without an available mutation
   receipt; a successful validation requires a remaining round for finalization;
   free-form error text must not control these branches.
+- Provider responses must be classified before tool execution. A finalization
+  response may not contain tool calls or an empty answer; reasoning-only token
+  exhaustion is a distinct typed failure based only on strict usage evidence.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

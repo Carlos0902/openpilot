@@ -276,6 +276,13 @@ continue validation, request finalization, or fail with a typed stable code.
 Validation without a receipt fails closed, and successful validation on the
 last available round becomes `ProviderToolFinalizationBudgetUnavailable` rather
 than silently completing without a final response.
+Final-response routing is another pure transition evaluated before execution.
+A response with tool calls executes tools only when finalization is not pending;
+otherwise it fails as `ProviderToolFinalizationToolCall`. A tool-free response
+completes normally, except an empty pending finalization, which becomes
+`ProviderToolFinalizationEmpty`. When a `length`/`max_tokens` response has
+strict positive integer completion usage and reasoning usage consumes all of
+it, the error is instead `ProviderToolFinalizationReasoningExhausted`.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

@@ -3776,3 +3776,42 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: a separate read/finalization/no-progress transition and
   then the bounded multi-round controller still need to consume these actions.
+
+### Typed provider final-response transition
+
+- Observed failure: aggregate response handling mixed normal completion, tool
+  execution, finalization tool-call rejection, empty finalization, and reasoning
+  budget exhaustion directly in the multi-round loop. Malformed usage fields
+  were coerced while deciding whether reasoning consumed the whole response.
+- Validation evidence: the regression suite first fails because no standalone
+  final-response transition exists. Fifteen focused tests pass after
+  implementation for normal completion, tool execution, finalization tool-call
+  rejection, generic empty finalization, case-normalized reasoning exhaustion,
+  zero/malformed/untrusted usage fallback, and invalid entry facts. The adjacent
+  final/mutation/validation transition set passes 44 and the complete
+  provider-focused set passes 527. The complete repository suite passes 1,623
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add one pure response classifier returning complete, execute
+  tools, or fail with a stable enum code. Reasoning exhaustion requires
+  `length`/`max_tokens`, positive integer completion usage, integer reasoning
+  usage, and reasoning greater than or equal to completion usage; all other
+  empty finalizations use the generic code.
+- Metadata impact note:
+  - Facts: existing response content, tool calls, finish reason, provider usage,
+    and finalization-pending state only.
+  - Authoritative producers: provider transport owns the response; the
+    conversation controller owns finalization-pending state; this transition is
+    a derived view.
+  - Lifecycle and control impact: runtime routing before execution. It performs
+    no tool admission/execution, state mutation, request, file I/O, or
+    persistence.
+  - Existing contracts reviewed: `LLMResponse`, completion usage, tool-call
+    preservation, finalization error semantics, public metadata inventory, and
+    metadata development conventions.
+  - Decision: use strict core enums and a frozen derived value rather than
+    inline response branches or a new persisted metadata kind.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: read-evidence/no-progress transition and the bounded
+  multi-round controller still need to compose all typed actions.
