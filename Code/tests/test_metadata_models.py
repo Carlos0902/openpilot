@@ -25,7 +25,17 @@ from metadata import (
     ContextCandidateTrust,
     ContextCandidateTruncation,
     ContextCompactionBinding,
+    ContextCompactionAttempt,
+    ContextCompactionFallbackReason,
+    ContextCompactionProviderStatus,
     ContextCompactionRecord,
+    ContextCompactionReuseAdmission,
+    ContextCompactionReuseAdmissionStatus,
+    ContextCompactionReuseRejectionReason,
+    ContextCompactionReuseShadowFailure,
+    ContextCompactionReuseShadowFailureReason,
+    ContextCompactionSelectionOutcome,
+    ContextCompactionSelectionStatus,
     ContextQualityEvaluation,
     ContextQualityExpectation,
     ContextQualityIssueCode,
@@ -238,6 +248,7 @@ def test_context_compaction_contract_binds_only_compaction_artifact(
             integrity_checksum="sha256:" + "e" * 64,
             bytes=200,
         ),
+        source_binding_hash="sha256:" + "f" * 64,
     )
 
     restored = ContextCompactionBinding.model_validate_json(binding.model_dump_json())
@@ -246,6 +257,19 @@ def test_context_compaction_contract_binds_only_compaction_artifact(
     assert restored.record.source_candidate_ids == ["observation-1", "observation-2"]
     assert restored.record.source_fingerprint == "sha256:" + "d" * 64
     assert restored.artifact.integrity_checksum == "sha256:" + "e" * 64
+    assert restored.source_binding_hash == "sha256:" + "f" * 64
+    historical = ContextCompactionBinding.model_validate(
+        {
+            "record": record.model_dump(mode="python"),
+            "artifact": {
+                "artifact_id": "legacy-compaction-artifact",
+                "kind": "context_compaction",
+                "integrity_checksum": "sha256:" + "a" * 64,
+                "bytes": 200,
+            },
+        }
+    )
+    assert historical.source_binding_hash == ""
     with pytest.raises(ValueError, match="context_compaction"):
         ContextCompactionBinding.model_validate(
             {
@@ -255,6 +279,277 @@ def test_context_compaction_contract_binds_only_compaction_artifact(
                     "kind": "prompt_context",
                 },
             }
+        )
+    with pytest.raises(ValueError, match="source_binding_hash"):
+        ContextCompactionBinding.model_validate(
+            {
+                **binding.model_dump(mode="python"),
+                "source_binding_hash": "not-a-hash",
+            }
+        )
+
+
+def test_context_compaction_attempt_distinguishes_provider_acceptance_and_builder_selection() -> None:
+    source_fingerprint = "sha256:" + "f" * 64
+    accepted = ContextCompactionAttempt(
+        attempt_ordinal=1,
+        source_candidate_ids=["dialog-1", "dialog-2"],
+        source_fingerprint=source_fingerprint,
+        algorithm="llm_rolling_summary_v1",
+        provider_status=ContextCompactionProviderStatus.ACCEPTED,
+        selection_status=ContextCompactionSelectionStatus.NOT_SELECTED,
+        fallback_reason=ContextCompactionFallbackReason.SUMMARY_NOT_FIT_ATOMICALLY,
+        summary_token_limit=80,
+        summary_token_count=20,
+        usage_complete=True,
+        finish_reason="stop",
+        provider_prompt_tokens=100,
+        provider_completion_tokens=20,
+        provider_total_tokens=120,
+    )
+    deterministic = ContextCompactionAttempt(
+        attempt_ordinal=2,
+        source_candidate_ids=["dialog-1", "dialog-2"],
+        source_fingerprint=source_fingerprint,
+        algorithm="deterministic_observation_mask_v1",
+        provider_status=ContextCompactionProviderStatus.NOT_ATTEMPTED,
+        selection_status=ContextCompactionSelectionStatus.SELECTED,
+        fallback_reason=ContextCompactionFallbackReason.DETERMINISTIC_FALLBACK,
+        artifact_sink_status="persisted",
+        artifact_binding=True,
+        used_in_prompt=True,
+    )
+    selection = ContextSelectionMetadata(
+        max_prompt_chars=1000,
+        original_prompt_chars=500,
+        final_prompt_chars=400,
+        compaction_attempts=[accepted, deterministic],
+    )
+
+    restored = ContextSelectionMetadata.model_validate_json(selection.model_dump_json())
+    assert restored.compaction_attempts[0].provider_status == "accepted"
+    assert restored.compaction_attempts[0].selection_status == "not_selected"
+    assert restored.compaction_attempts[1].fallback_reason == "deterministic_fallback"
+
+    with pytest.raises(ValueError, match="deterministic compaction cannot be provider accepted"):
+        ContextCompactionAttempt(
+            attempt_ordinal=1,
+            source_candidate_ids=["dialog-1"],
+            source_fingerprint=source_fingerprint,
+            algorithm="deterministic_observation_mask_v1",
+            provider_status=ContextCompactionProviderStatus.ACCEPTED,
+            selection_status=ContextCompactionSelectionStatus.SELECTED,
+        )
+    with pytest.raises(ValueError, match="not_selected compaction attempt requires a fallback"):
+        ContextCompactionAttempt(
+            attempt_ordinal=1,
+            source_candidate_ids=["dialog-1"],
+            source_fingerprint=source_fingerprint,
+            algorithm="llm_rolling_summary_v1",
+            provider_status=ContextCompactionProviderStatus.ACCEPTED,
+            selection_status=ContextCompactionSelectionStatus.NOT_SELECTED,
+            summary_token_limit=80,
+            summary_token_count=20,
+            usage_complete=True,
+            finish_reason="stop",
+            provider_prompt_tokens=100,
+            provider_completion_tokens=20,
+            provider_total_tokens=120,
+        )
+    with pytest.raises(ValueError, match="usage_complete=true requires all provider token fields"):
+        ContextCompactionAttempt(
+            attempt_ordinal=1,
+            source_candidate_ids=["dialog-1"],
+            source_fingerprint=source_fingerprint,
+            algorithm="llm_rolling_summary_v1",
+            provider_status=ContextCompactionProviderStatus.REJECTED,
+            selection_status=ContextCompactionSelectionStatus.NOT_SELECTED,
+            fallback_reason=ContextCompactionFallbackReason.REQUEST_OR_PROVIDER_FAILURE,
+            summary_token_limit=80,
+            usage_complete=True,
+            finish_reason="length",
+        )
+    with pytest.raises(ValueError):
+        ContextCompactionAttempt(
+            attempt_ordinal=1,
+            source_candidate_ids=["dialog-1"],
+            source_fingerprint=source_fingerprint,
+            algorithm="llm_rolling_summary_v1",
+            provider_status=ContextCompactionProviderStatus.REJECTED,
+            selection_status=ContextCompactionSelectionStatus.NOT_SELECTED,
+            fallback_reason=ContextCompactionFallbackReason.REQUEST_OR_PROVIDER_FAILURE,
+            provider_prompt_tokens=True,
+        )
+
+
+def test_context_compaction_attempt_observed_only_is_body_free_and_not_authority() -> None:
+    source_fingerprint = "sha256:" + "a" * 64
+    attempt = ContextCompactionAttempt(
+        attempt_ordinal=1,
+        source_candidate_ids=["dialog-1", "dialog-2"],
+        source_fingerprint=source_fingerprint,
+        source_chars=500,
+        algorithm="llm_rolling_summary_v1",
+        provider_status=ContextCompactionProviderStatus.ACCEPTED,
+        selection_status=ContextCompactionSelectionStatus.NOT_SELECTED,
+        summary_token_limit=80,
+        summary_token_count=18,
+        usage_complete=True,
+        finish_reason="stop",
+        provider_prompt_tokens=100,
+        provider_completion_tokens=18,
+        provider_total_tokens=118,
+        generated_candidate_id="compaction:generated-1",
+        generated_summary_fingerprint="sha256:" + "b" * 64,
+        generated_summary_chars=120,
+        selection_outcome=ContextCompactionSelectionOutcome.GENERATED_OBSERVED_ONLY,
+        artifact_sink_status="observed_only",
+    )
+    payload = attempt.model_dump(mode="json")
+    assert "summary" not in payload
+    assert "content" not in payload
+    assert payload["selection_outcome"] == "generated_observed_only"
+    assert payload["artifact_binding"] is False
+    assert payload["used_in_prompt"] is False
+
+    with pytest.raises(ValueError, match="observed-only sink status"):
+        ContextCompactionAttempt(
+            **{
+                **attempt.model_dump(mode="python"),
+                "artifact_sink_status": "observed_only",
+                "selection_outcome": ContextCompactionSelectionOutcome.DETERMINISTIC_FALLBACK,
+                "fallback_reason": ContextCompactionFallbackReason.DETERMINISTIC_FALLBACK,
+            }
+        )
+
+
+def test_context_compaction_reuse_admission_is_shadow_only_and_body_free() -> None:
+    admission = ContextCompactionReuseAdmission(
+        admission_id="reuse-1",
+        status=ContextCompactionReuseAdmissionStatus.ADMITTED,
+        source_candidate_ids=["dialog-1", "dialog-2"],
+        source_fingerprint="sha256:" + "1" * 64,
+        source_binding_hash="sha256:" + "2" * 64,
+        required_candidate_ids=["system", "task"],
+        recent_suffix_ids=["dialog-9", "dialog-10"],
+        session_constraints_hash="sha256:" + "3" * 64,
+        artifact_id="artifact-1",
+        artifact_kind="context_compaction",
+        artifact_integrity_checksum="sha256:" + "4" * 64,
+        generated_summary_fingerprint="sha256:" + "5" * 64,
+    )
+    selection = ContextSelectionMetadata(
+        max_prompt_chars=1000,
+        original_prompt_chars=500,
+        final_prompt_chars=400,
+        compaction_reuse_admissions=[admission],
+    )
+
+    restored = ContextSelectionMetadata.model_validate_json(selection.model_dump_json())
+    payload = restored.model_dump(mode="json")
+    assert payload["compaction_reuse_admissions"][0]["status"] == "admitted"
+    assert payload["compaction_reuse_admissions"][0]["used_in_prompt"] is False
+    encoded = json.dumps(payload)
+    assert "summary_text" not in encoded
+    assert "summary_payload" not in encoded
+    assert "content" not in encoded
+
+    rejected = ContextCompactionReuseAdmission(
+        admission_id="reuse-2",
+        status=ContextCompactionReuseAdmissionStatus.REJECTED,
+        rejection_reason=ContextCompactionReuseRejectionReason.SOURCE_FINGERPRINT_MISMATCH,
+        source_candidate_ids=["dialog-1"],
+        source_fingerprint="sha256:" + "6" * 64,
+        source_binding_hash="sha256:" + "7" * 64,
+        artifact_id="artifact-1",
+        artifact_kind="context_compaction",
+        artifact_integrity_checksum="sha256:" + "8" * 64,
+    )
+    assert rejected.rejection_reason == "source_fingerprint_mismatch"
+
+    with pytest.raises(ValueError, match="rejected reuse admission requires"):
+        ContextCompactionReuseAdmission(
+            admission_id="reuse-3",
+            status=ContextCompactionReuseAdmissionStatus.REJECTED,
+            source_candidate_ids=["dialog-1"],
+            source_fingerprint="sha256:" + "6" * 64,
+            source_binding_hash="sha256:" + "7" * 64,
+            artifact_id="artifact-1",
+            artifact_kind="context_compaction",
+            artifact_integrity_checksum="sha256:" + "8" * 64,
+        )
+    with pytest.raises(ValueError, match="cannot enter the prompt"):
+        ContextCompactionReuseAdmission(
+            **{
+                **admission.model_dump(mode="python"),
+                "used_in_prompt": True,
+            }
+        )
+    with pytest.raises(ValueError, match="reuse admission source candidate IDs must be unique"):
+        ContextCompactionReuseAdmission(
+            **{
+                **admission.model_dump(mode="python"),
+                "source_candidate_ids": ["dialog-1", "dialog-1"],
+            }
+        )
+    with pytest.raises(ValueError, match="compaction reuse admission IDs must be unique"):
+        ContextSelectionMetadata(
+            max_prompt_chars=1000,
+            original_prompt_chars=500,
+            final_prompt_chars=400,
+            compaction_reuse_admissions=[admission, admission.model_copy()],
+        )
+
+
+def test_context_compaction_shadow_failure_is_typed_and_body_free() -> None:
+    failure = ContextCompactionReuseShadowFailure(
+        failure_id="compaction-reuse-shadow:provider_exception",
+        reason=ContextCompactionReuseShadowFailureReason.PROVIDER_EXCEPTION,
+        exception_type="RuntimeError",
+    )
+    selection = ContextSelectionMetadata(
+        max_prompt_chars=1000,
+        original_prompt_chars=500,
+        final_prompt_chars=400,
+        compaction_reuse_shadow_failures=[failure],
+    )
+    restored = ContextSelectionMetadata.model_validate_json(selection.model_dump_json())
+    payload = restored.model_dump(mode="json")
+    assert payload["compaction_reuse_shadow_failures"][0]["reason"] == "provider_exception"
+    assert payload["compaction_reuse_shadow_failures"][0]["exception_type"] == "RuntimeError"
+    assert "shadow admission unavailable" not in json.dumps(payload)
+
+    with pytest.raises(ValueError, match="empty shadow provider result"):
+        ContextCompactionReuseShadowFailure(
+            failure_id="empty",
+            reason=ContextCompactionReuseShadowFailureReason.PROVIDER_EMPTY,
+            exception_type="RuntimeError",
+        )
+    with pytest.raises(ValueError, match="strict shadow failures"):
+        ContextCompactionReuseShadowFailure(
+            failure_id="strict",
+            reason=ContextCompactionReuseShadowFailureReason.PROVIDER_EXCEPTION,
+            exception_type="RuntimeError",
+            strict_sources=True,
+        )
+
+
+def test_admitted_reuse_requires_production_artifact_identity() -> None:
+    payload = {
+        "admission_id": "invalid-admitted",
+        "status": ContextCompactionReuseAdmissionStatus.ADMITTED,
+        "source_candidate_ids": ["dialog-1"],
+        "source_fingerprint": "sha256:" + "1" * 64,
+        "source_binding_hash": "sha256:" + "2" * 64,
+        "artifact_id": "artifact-1",
+        "artifact_kind": "wrong_kind",
+        "artifact_integrity_checksum": "sha256:" + "3" * 64,
+    }
+    with pytest.raises(ValueError, match="context_compaction artifact kind"):
+        ContextCompactionReuseAdmission(**payload)
+    with pytest.raises(ValueError, match="summary fingerprint"):
+        ContextCompactionReuseAdmission(
+            **{**payload, "artifact_kind": "context_compaction"}
         )
 
 
