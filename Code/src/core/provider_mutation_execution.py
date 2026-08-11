@@ -6,6 +6,9 @@ from collections.abc import Sequence
 from typing import Any
 
 from core.provider_code_artifact_ledger import ProviderCodeArtifactLedger
+from core.provider_generated_unit_redaction import (
+    redact_provider_generated_units,
+)
 from core.provider_mutation_execution_batch import (
     prepare_provider_mutation_execution_batch,
 )
@@ -38,13 +41,14 @@ def execute_provider_mutation_admissions(
             authorized_post_processing_write_scope
         ),
     )
-    return execute_prepared_provider_admissions(
+    loop_result = execute_prepared_provider_admissions(
         runner,
         task,
         prepared,
         round_index=round_index,
         mutation_mode=True,
     )
+    return redact_provider_generated_units(loop_result)
 
 
 __all__ = ["execute_provider_mutation_admissions"]

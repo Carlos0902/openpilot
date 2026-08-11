@@ -3462,3 +3462,42 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: generated code remains present in returned loop
   evidence until the separate redaction integration runs; round-trip dispatch
   does not yet call either execution entry.
+
+### Mutation execution evidence redaction integration
+
+- Observed failure: the mutation bridge returned complete `generated_unit`
+  bodies in result maps, tool invocations, and event/error projections on
+  successful execution, artifact-backed execution, checkpoint prepare failure,
+  observation failure, and blocked admission paths.
+- Validation evidence: five return-path assertions fail on the stacked base;
+  the six mutation bridge tests pass after integration together with 12
+  redactor tests and six read-bridge regressions. Executor capture still proves
+  that verified code is available during execution, while every retained view
+  contains only count/hash diagnostics. A blocked source admission remains
+  unchanged outside the returned execution evidence. The complete
+  provider-focused set passes 431, followed by successful source compilation
+  and diff validation. The complete repository suite passes 1,527 in an
+  isolated detached worktree.
+- Implemented fix: deep-copy admission input when constructing the
+  execution-owned tool call, then pass every mutation bridge result through the
+  existing atomic generated-unit redactor before returning it. No admission,
+  binding, checkpoint, executor, or validation behavior changes.
+- Metadata impact note:
+  - Facts: existing generated-body length/hash diagnostics and body-free
+    retained provider lifecycle evidence.
+  - Authoritative producers: mutation preparation supplies execution input;
+    the executor consumes it; the existing redactor owns post-execution
+    sanitization.
+  - Lifecycle and control impact: evidence retention only. Redaction cannot
+    alter execution authority, mutation result, validation, state accounting,
+    or the caller-owned source admission.
+  - Existing contracts reviewed: `ToolEventLoopRunResult`, `ToolLoopMetadata`,
+    `ToolInputMetadata.runtime_handles`, and the generated-unit redaction
+    limits/diagnostics.
+  - Decision: call the existing redactor at the mutation bridge return boundary
+    and copy execution input rather than adding another redaction implementation
+    or mutating admission authority objects.
+  - Serialization and migration: retained evidence uses existing body-free
+    diagnostics and no persisted schema changes.
+- Remaining limitation: the provider round-trip dispatcher still does not route
+  admitted batches into the read or mutation execution bridge.

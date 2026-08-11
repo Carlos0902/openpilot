@@ -104,8 +104,10 @@ The mutation bridge runs that prepared batch through the shared lifecycle with
 the existing edit guard, pending-verification, prepared checkpoint, executor,
 observed checkpoint, state update, diagnostics, and event/result hooks. When
 the task already owns an exact validation command, generic verifier execution
-is deferred to the separately admitted provider command. Generated-unit
-redaction and round-trip dispatch remain later boundaries.
+is deferred to the separately admitted provider command. Before returning, the
+bridge redacts generated units from success and failure evidence after copying
+execution-owned input metadata, preserving the caller's source admission.
+Round-trip dispatch remains a later boundary.
 The read-only provider execution bridge then reuses the normal tool lifecycle:
 prepared checkpoint, execution, observed checkpoint, state application,
 diagnostics, events, and result maps. Blocked or unprepared calls cannot

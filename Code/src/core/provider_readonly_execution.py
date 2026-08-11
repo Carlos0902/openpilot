@@ -388,7 +388,7 @@ def _prepare_tool_call(
     admission: ProviderToolAdmission,
 ) -> tuple[ToolCallMetadata, ToolContextMetadata]:
     tool_call = admission.tool_call
-    input_metadata = tool_call.input_metadata
+    input_metadata = tool_call.input_metadata.model_copy(deep=True)
     apply_project_context = getattr(
         runner.runtime,
         "_apply_project_command_context",

@@ -211,7 +211,10 @@ pending-verification hooks. A failed prepared checkpoint prevents the writer;
 an unobserved result cannot update state. After a successful writer, a
 task-owned exact validation command suppresses the generic verifier so the
 separately admitted provider validation call remains authoritative. This bridge
-does not redact retained generated code or itself mark validation complete.
+redacts generated code from every returned success/failure loop result, but does
+not itself mark validation complete. Execution-owned input metadata is deep
+copied first, so sanitizing retained evidence does not mutate the caller's
+source admission.
 The read-only execution bridge consumes that preflighted tuple in response
 order and reuses the shared prepared-checkpoint, executor,
 observed-checkpoint, state-update, diagnostics, event, and result lifecycle.
