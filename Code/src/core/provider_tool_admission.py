@@ -8,6 +8,8 @@ tool-call, selection, failure, and error contracts.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -23,6 +25,7 @@ from metadata import (
 from tools.tool_selection import ToolSelection
 
 MAX_PROVIDER_TOOL_ARGUMENT_CHARS = 200_000
+MAX_PROVIDER_SCOPE_PATHS = 64
 
 
 class ProviderToolAdmissionError(ValueError):
@@ -182,6 +185,129 @@ def provider_tool_contract_error(
     return None
 
 
+def provider_read_scope_error(
+    input_metadata: ToolInputMetadata,
+    read_scope: Sequence[str],
+    project_path: str | None,
+) -> str | None:
+    """Require read requests to match an explicit project-contained path set."""
+
+    raw_allowed = [str(path) for path in read_scope if str(path or "").strip()]
+    if not raw_allowed:
+        return "Provider reads require a non-empty explicit read_files scope."
+    if len(raw_allowed) > MAX_PROVIDER_SCOPE_PATHS:
+        return f"Provider read scope may contain at most {MAX_PROVIDER_SCOPE_PATHS} paths."
+    boundary_error = _scope_path_boundary_error(
+        raw_allowed, project_path, "read scope"
+    )
+    if boundary_error:
+        return boundary_error
+
+    requested_raw = _requested_paths(input_metadata, include_project_path=False)
+    if not requested_raw:
+        return "Provider read did not provide an explicit target path."
+    if len(requested_raw) > MAX_PROVIDER_SCOPE_PATHS:
+        return f"Provider read request may contain at most {MAX_PROVIDER_SCOPE_PATHS} paths."
+    boundary_error = _scope_path_boundary_error(
+        requested_raw, project_path, "read request"
+    )
+    if boundary_error:
+        return boundary_error
+
+    allowed = {_canonical_path(path, project_path) for path in raw_allowed}
+    requested = [_canonical_path(path, project_path) for path in requested_raw]
+    outside = [path for path in requested if path not in allowed]
+    if outside:
+        return (
+            "Provider read scope permits only explicit files; outside path(s): "
+            + ", ".join(outside[:4])
+        )
+    return None
+
+
+def provider_write_scope_error(
+    input_metadata: ToolInputMetadata,
+    write_scope: Sequence[str],
+    project_path: str | None,
+) -> str | None:
+    """Require mutation requests to match an explicit project-contained path set."""
+
+    raw_allowed = [str(path) for path in write_scope if str(path or "").strip()]
+    if not raw_allowed:
+        return "Provider mutation requires a non-empty explicit write_files scope."
+    if len(raw_allowed) > MAX_PROVIDER_SCOPE_PATHS:
+        return f"Provider write scope may contain at most {MAX_PROVIDER_SCOPE_PATHS} paths."
+    boundary_error = _scope_path_boundary_error(
+        raw_allowed, project_path, "write scope"
+    )
+    if boundary_error:
+        return boundary_error
+
+    requested_raw = _requested_paths(input_metadata, include_project_path=True)
+    if not requested_raw:
+        return "Provider mutation did not provide an explicit target path."
+    if len(requested_raw) > MAX_PROVIDER_SCOPE_PATHS:
+        return f"Provider write request may contain at most {MAX_PROVIDER_SCOPE_PATHS} paths."
+    boundary_error = _scope_path_boundary_error(
+        requested_raw, project_path, "write request"
+    )
+    if boundary_error:
+        return boundary_error
+
+    allowed = {_canonical_path(path, project_path) for path in raw_allowed}
+    requested = [_canonical_path(path, project_path) for path in requested_raw]
+    outside = [path for path in requested if path not in allowed]
+    if outside:
+        return (
+            "Provider write scope permits only explicit files; outside path(s): "
+            + ", ".join(outside[:4])
+        )
+    return None
+
+
+def _requested_paths(
+    input_metadata: ToolInputMetadata,
+    *,
+    include_project_path: bool,
+) -> list[str]:
+    params = input_metadata.to_params()
+    fields = ["file_path", "directory_path"]
+    if include_project_path:
+        fields.append("project_path")
+    requested = [str(params[field]) for field in fields if params.get(field)]
+    requested.extend(str(path) for path in (params.get("file_paths") or []) if path)
+    return requested
+
+
+def _canonical_path(raw_path: Any, project_path: str | None) -> str:
+    path = Path(str(raw_path or "")).expanduser()
+    if not path.is_absolute() and project_path:
+        path = Path(project_path).expanduser() / path
+    return str(path.resolve(strict=False))
+
+
+def _scope_path_boundary_error(
+    raw_paths: Sequence[str],
+    project_path: str | None,
+    label: str,
+) -> str | None:
+    if not project_path:
+        return None
+    root = Path(project_path).expanduser().resolve(strict=False)
+    for raw in raw_paths:
+        candidate = Path(str(raw)).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if candidate.is_symlink():
+            return f"Provider {label} rejects symlink paths: {candidate}"
+        resolved = candidate.resolve(strict=False)
+        if not resolved.is_relative_to(root):
+            return (
+                f"Provider {label} rejects paths outside the project root: {resolved}"
+            )
+    return None
+
+
 def _any_required_group_present(
     input_metadata: ToolInputMetadata,
     groups: list[list[str]],
@@ -259,10 +385,13 @@ def provider_tool_error(
 
 
 __all__ = [
+    "MAX_PROVIDER_SCOPE_PATHS",
     "MAX_PROVIDER_TOOL_ARGUMENT_CHARS",
     "ProviderToolAdmission",
     "ProviderToolAdmissionError",
     "decode_provider_tool_arguments",
     "provider_tool_contract_error",
     "provider_tool_error",
+    "provider_read_scope_error",
+    "provider_write_scope_error",
 ]

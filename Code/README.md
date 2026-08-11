@@ -64,3 +64,5 @@ Provider tool schemas are a narrow read-only projection of registered typed
 contracts, not a copy of the broad internal input model.
 Provider argument decoding and contract validation are bounded pure checks;
 successful validation is not an execution permission.
+Provider path-scope checks require exact project-contained, non-symlink targets;
+an empty explicit scope grants no file authority.

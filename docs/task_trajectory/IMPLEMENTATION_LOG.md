@@ -2618,3 +2618,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Implemented fix: add pure argument decoding with a 200,000-character cap and
   contract validation aligned with the preceding 64-field provider projection.
 - Remaining limitation: validation does not select, authorize, or execute tools.
+
+### Provider file path-scope validation
+
+- Observed failure: provider file requests lacked one pure boundary for exact
+  read/write scope matching, project containment, symlink rejection, and empty
+  explicit scope semantics.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes explicit-match, empty-scope, outside-root, symlink, missing-target,
+  parent-escape, and 64-path-cap checks after implementation; the full suite
+  remains green.
+- Implemented fix: add bounded canonical path checks for read and mutation
+  inputs; empty explicit scopes grant no authority and diagnostic output lists
+  at most four outside paths.
+- Remaining limitation: path validation does not itself authorize or execute a
+  provider tool call.

@@ -154,6 +154,9 @@ One request may expose at most 32 tools and 64 declared fields per tool.
 Provider tool arguments accept only JSON objects, with a 200,000-character cap
 before parsing. Required, alternative-required, and conditional requirements
 are checked against the existing typed input metadata without granting execution.
+Provider file reads and writes require non-empty explicit scopes, exact canonical
+path matches, project-root containment, and non-symlink paths. Scope and request
+sets are independently capped at 64 paths.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
