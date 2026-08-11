@@ -194,7 +194,9 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
 - `ToolCallMetadata` is a requested invocation, `ToolErrorMetadata` is a
   protocol/execution failure, and `ToolEventMetadata` is the lifecycle event
   that may embed either. Their repeated correlation fields are intentional for
-  standalone trajectory records.
+  standalone trajectory records. `call_id` remains the project-owned lifecycle
+  identity; optional `provider_call_id` is external wire correlation only and
+  never grants execution authority.
 - `AgentExecutionMetadata` and `ModuleExecutionMetadata` share an execution
   envelope but identify different ownership levels. Consolidation should wait
   until producers and consumers demonstrate identical lifecycle semantics.

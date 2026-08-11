@@ -241,6 +241,8 @@ class ToolCallMetadata(MetadataBase):
     task_id: str
     step_id: str
     call_id: str
+    # External wire correlation only; project lifecycle authority stays call_id.
+    provider_call_id: str | None = Field(default=None, min_length=1)
     tool_name: str
     input_metadata: ToolInputMetadata
     tool_context: ToolContextMetadata | None = None
@@ -260,6 +262,7 @@ class ToolErrorMetadata(MetadataBase):
     task_id: str
     step_id: str
     call_id: str
+    provider_call_id: str | None = Field(default=None, min_length=1)
     tool_name: str
     error_type: str
     error_message: str

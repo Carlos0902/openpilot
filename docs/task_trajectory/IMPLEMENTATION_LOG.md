@@ -2554,3 +2554,27 @@ PYTHONPATH=Code/src pytest -q Code/tests
   error metadata assembly and attach the adapter's body-free typed observation.
 - Remaining limitation: unknown provider usage fields remain unknown rather than
   being inferred.
+
+### Provider tool-call correlation identity
+
+- Observed failure: the tool metadata protocol had only the project-owned
+  `call_id`, so provider request/result correlation would either overwrite that
+  identity or be hidden in free-form diagnostics.
+- Metadata impact note:
+  - Fact: optional external provider tool-call identity.
+  - Authoritative producer: provider tool admission; consumers: round-trip,
+    error projection, and trajectory records.
+  - Lifecycle: event evidence. Control impact: none; `call_id` remains authority.
+  - Existing contracts reviewed: `ToolCallMetadata`, `ToolErrorMetadata`,
+    `ToolEventMetadata`, and `ToolLoopMetadata`.
+  - Decision: extend the two standalone call/error records; no duplicate source
+    is created because provider and project IDs have distinct owners.
+  - Serialization and migration: historical payloads default to `None`; new
+    non-empty values round-trip and empty strings reject.
+  - Tests and docs: focused construction, invalid input, historical read, JSON
+    round-trip, catalog, API, and implementation log.
+- Validation evidence: five regressions fail on the stacked base and pass after
+  the optional strict fields are added; the full suite remains green.
+- Implemented fix: add `provider_call_id` to call and error metadata without
+  changing their `MetadataKind` or lifecycle authority.
+- Remaining limitation: admission and execution producers remain separate PRs.

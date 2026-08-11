@@ -139,6 +139,9 @@ from visible text; reasoning fragments never become user-visible deltas.
 Streaming tool-call fragments are joined by their provider index, validated into
 the typed call contract, and finalized in index order. Malformed containers,
 negative indexes, or incomplete final shapes fail closed.
+Provider call IDs are retained separately from project-owned tool lifecycle IDs;
+the external ID correlates wire requests and results but never grants permission,
+budget, checkpoint, or execution authority.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
