@@ -102,3 +102,60 @@ def test_native_retry_rejects_unbounded_override() -> None:
             resolved,
             transport_retries=6,
         )
+
+
+def test_native_network_failure_retries_once_without_environment_proxy(monkeypatch) -> None:
+    client = LLMClient(_settings(retries=0), enable_cache=False)
+    monkeypatch.setattr(client, "_should_retry_without_env_proxy", lambda _exc: True)
+    trust_env_values: list[bool] = []
+
+    class ProxySensitiveTransport:
+        def send_once(self, *_args, trust_env=True, **_kwargs):
+            trust_env_values.append(trust_env)
+            if trust_env:
+                raise LLMProviderError(
+                    "proxy connection failed",
+                    retryable=True,
+                    category=ErrorCategory.NETWORK,
+                )
+            return _response()
+
+    request, resolved = _request_and_policy(client)
+    response = client._create_native_completion_with_transport_retry(
+        ProxySensitiveTransport(), request, resolved
+    )
+
+    assert trust_env_values == [True, False]
+    assert response.provider_details["transport_retry_history"][-1] == {
+        "attempt": 2,
+        "status": "success",
+        "retryable": False,
+        "trust_env": False,
+        "reason": "env_proxy_fallback",
+    }
+
+
+def test_native_proxy_fallback_failure_is_single_and_visible(monkeypatch) -> None:
+    client = LLMClient(_settings(retries=1), enable_cache=False)
+    monkeypatch.setattr(client, "_should_retry_without_env_proxy", lambda _exc: True)
+    trust_env_values: list[bool] = []
+
+    class FailingTransport:
+        def send_once(self, *_args, trust_env=True, **_kwargs):
+            trust_env_values.append(trust_env)
+            raise LLMProviderError(
+                "network unavailable",
+                retryable=True,
+                category=ErrorCategory.NETWORK,
+            )
+
+    request, resolved = _request_and_policy(client)
+    with pytest.raises(LLMProviderError) as exc_info:
+        client._create_native_completion_with_transport_retry(
+            FailingTransport(), request, resolved
+        )
+
+    assert trust_env_values == [True, True, False]
+    assert exc_info.value.context["transport_retry_history"][-1]["reason"] == (
+        "env_proxy_fallback"
+    )
