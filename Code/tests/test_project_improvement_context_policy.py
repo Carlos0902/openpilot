@@ -263,7 +263,7 @@ def test_goal_and_task_design_project_active_session_constraints_as_required_can
     )
 
     for candidates in (goal_candidates, task_candidates_with_state):
-        projected = [candidate for candidate in candidates if candidate.source_id == state.canonical_hash]
+        projected = [candidate for candidate in candidates if candidate.source_id == state.authority_hash]
         assert len(projected) == 1
         assert projected[0].retention == ContextCandidateRetention.REQUIRED
         assert projected[0].truncation == ContextCandidateTruncation.FORBIDDEN
