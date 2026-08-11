@@ -96,6 +96,9 @@ update this file together with `API.md`.
 - Provider responses must be classified before tool execution. A finalization
   response may not contain tool calls or an empty answer; reasoning-only token
   exhaustion is a distinct typed failure based only on strict usage evidence.
+- Read-only finalization must require complete scoped reads plus either the page
+  cap or a bounded no-progress projection. Both routes must reserve a remaining
+  provider round before setting finalization pending.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

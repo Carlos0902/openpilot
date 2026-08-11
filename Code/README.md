@@ -159,6 +159,10 @@ or fail finalization. Finalization cannot issue another tool call or return an
 empty answer. Strict positive integer usage evidence distinguishes reasoning
 token exhaustion from a generic empty finalization; malformed usage never
 controls the branch.
+Read-only finalization uses a pure evidence gate: all scoped reads complete, a
+read-only tool set, no earlier finalization request, and either page-cap
+readiness or bounded no-progress evidence. It reserves the next round before
+setting pending; the last round returns the typed budget-unavailable failure.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

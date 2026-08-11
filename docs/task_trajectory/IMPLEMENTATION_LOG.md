@@ -3815,3 +3815,39 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: read-evidence/no-progress transition and the bounded
   multi-round controller still need to compose all typed actions.
+
+### Typed read-only finalization transition
+
+- Observed failure: aggregate read finalization used two inline branches. The
+  page-cap route checked whether another round remained, but the bounded
+  no-progress route set finalization pending even on the last round, producing a
+  later generic round-limit failure instead of the actual budget error.
+- Validation evidence: the regression suite first fails because no standalone
+  read-finalization transition exists. Eighteen focused tests pass after
+  implementation for page-cap and bounded-no-progress finalization, both
+  last-round budget failures, every evidence gate, prior-request suppression,
+  and malformed or contradictory state facts. The adjacent read/final/mutation
+  transition set passes 47 and the complete provider-focused set passes 545.
+  The complete repository suite passes 1,641 in an isolated detached worktree,
+  followed by successful source compilation and diff validation.
+- Implemented fix: add one pure transition that combines the shared complete
+  reads/read-only/no-prior-request gates with the two eligible evidence routes,
+  checks remaining round budget once, and returns none, request finalization, or
+  fail with a stable enum code.
+- Metadata impact note:
+  - Facts: existing page-cap, scoped-read completion, read-only tool-set,
+    bounded-projection, progress, finalization-count, and round-budget facts.
+  - Authoritative producers: provider evidence state owns read/page/projection
+    facts; the conversation controller owns progress, finalization count, and
+    round position.
+  - Lifecycle and control impact: runtime finalization routing only. It performs
+    no request, tool execution, state mutation, file I/O, or persistence.
+  - Existing contracts reviewed: provider evidence coverage/state, round bounds,
+    finalization error semantics, public metadata inventory, and metadata
+    development conventions.
+  - Decision: return strict core enums and a frozen derived value rather than
+    retain duplicated inline branches or add a persisted metadata kind.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: duplicate-only/no-progress failure policy and the
+  bounded multi-round controller still need to compose the typed transitions.

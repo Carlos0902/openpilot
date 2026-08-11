@@ -283,6 +283,12 @@ completes normally, except an empty pending finalization, which becomes
 `ProviderToolFinalizationEmpty`. When a `length`/`max_tokens` response has
 strict positive integer completion usage and reasoning usage consumes all of
 it, the error is instead `ProviderToolFinalizationReasoningExhausted`.
+Read-only finalization eligibility is a separate pure transition. It requires
+zero prior finalization requests, complete scoped reads, a read-only tool set,
+and either page-cap readiness or a no-progress round with a bounded projection.
+Both routes verify that another provider round remains; otherwise they return
+`ProviderToolFinalizationBudgetUnavailable` instead of setting a pending state
+that can only end as a generic round-limit failure.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only
