@@ -14,6 +14,7 @@ from tools.tool_selection import SelectionReason, ToolSelection
 
 from autonomous_iteration.checkpoint_store import RuntimeCheckpointStore
 from autonomous_iteration.runtime_controller import (
+    ActiveDiagnosticEvaluator,
     AgentRuntimeController,
     EditGuard,
     FileSelector,
@@ -28,6 +29,12 @@ from memory.context_builder import MemoryContextBuilder
 from memory.memory_store import MemoryStore
 from memory.short_memory import ShortMemory
 from metadata import (
+    ActiveDiagnosticConflict,
+    ActiveDiagnosticDecision,
+    ActiveDiagnosticDecisionKind,
+    ActiveDiagnosticItemStatus,
+    ActiveDiagnosticRisk,
+    ActiveDiagnosticRiskSeverity,
     AgentPhase,
     CheckpointBoundary,
     CheckpointFaultPoint,
@@ -530,6 +537,181 @@ def test_runtime_state_serializes_budget_and_phase() -> None:
     assert payload["decision_history"] == []
     assert payload["execution_mode"] == "mutation_allowed"
     assert payload["execution_mode_source"] == "default"
+
+
+def test_runtime_state_round_trips_owned_active_diagnostic_facts() -> None:
+    state = RuntimeStateMetadata(goal="Diagnose project")
+    state.add_diagnostic_conflict(
+        ActiveDiagnosticConflict(
+            conflict_id="config-version",
+            statement="Runtime and lockfile report different versions.",
+            evidence_refs=("artifact:runtime", "artifact:lockfile"),
+        )
+    )
+    state.add_diagnostic_risk(
+        ActiveDiagnosticRisk(
+            risk_id="stale-validation",
+            statement="Validation predates the latest mutation.",
+            severity=ActiveDiagnosticRiskSeverity.HIGH,
+            evidence_refs=("checkpoint:validation",),
+            blocking=True,
+        )
+    )
+
+    restored = RuntimeStateMetadata.model_validate(state.to_json_dict())
+
+    assert restored.diagnostic_conflicts[0].status == ActiveDiagnosticItemStatus.OPEN
+    assert restored.diagnostic_risks[0].blocking is True
+    assert restored.diagnostic_decisions == []
+    assert restored.diagnostic_progress_signature is None
+
+
+def test_active_diagnostic_conflict_resolution_requires_new_evidence() -> None:
+    with pytest.raises(ValueError, match="resolution evidence"):
+        ActiveDiagnosticConflict(
+            conflict_id="config-version",
+            statement="Runtime and lockfile report different versions.",
+            evidence_refs=("artifact:runtime", "artifact:lockfile"),
+            status=ActiveDiagnosticItemStatus.RESOLVED,
+        )
+
+
+def test_active_diagnostic_decision_history_has_a_hard_append_limit() -> None:
+    state = RuntimeStateMetadata(goal="Bound diagnostic history")
+    signature = "sha256:" + "d" * 64
+    for ordinal in range(1, 129):
+        state.record_diagnostic_decision(
+            ActiveDiagnosticDecision(
+                decision_id=f"decision-{ordinal}",
+                ordinal=ordinal,
+                kind=ActiveDiagnosticDecisionKind.MEASURE,
+                reason="Measure the next bounded fact.",
+                need_type="file_read",
+                question="Inspect one file.",
+                state_signature=signature,
+                evidence_changed=ordinal == 1,
+            )
+        )
+
+    with pytest.raises(ValueError, match="history limit"):
+        state.record_diagnostic_decision(
+            ActiveDiagnosticDecision(
+                decision_id="decision-129",
+                ordinal=129,
+                kind=ActiveDiagnosticDecisionKind.MEASURE,
+                reason="Measure beyond the limit.",
+                need_type="file_read",
+                question="Inspect another file.",
+                state_signature=signature,
+                evidence_changed=False,
+            )
+        )
+    assert len(RuntimeStateMetadata.model_validate(state.to_json_dict()).diagnostic_decisions) == 128
+
+
+def test_active_diagnostic_evaluator_uses_non_compensatory_decision_hierarchy() -> None:
+    evaluator = ActiveDiagnosticEvaluator()
+    measure = DecisionNeedMetadata(
+        need_type="file_read",
+        question="Inspect configuration",
+        target_path="config.toml",
+        cost_hint="low",
+    )
+    act = DecisionNeedMetadata(
+        need_type="file_write",
+        question="Patch configuration",
+        target_path="config.toml",
+        attributes={"content": "enabled = true"},
+        cost_hint="high",
+    )
+    verify = DecisionNeedMetadata(
+        need_type="smoke_test",
+        question="Run tests",
+        command="pytest",
+        cost_hint="low",
+    )
+    recover = DecisionNeedMetadata(
+        need_type="repair",
+        question="Repair the failed validation",
+        command="pytest --lf",
+        cost_hint="medium",
+    )
+
+    unknown_state = RuntimeStateMetadata(goal="Patch config")
+    unknown_state.add_unknown("Which configuration is active?")
+    selected = evaluator.choose(unknown_state, (act, measure))
+    assert selected.need == measure
+    assert selected.decision.kind == ActiveDiagnosticDecisionKind.MEASURE
+
+    verify_state = RuntimeStateMetadata(
+        goal="Patch config",
+        phase=AgentPhase.VERIFY,
+        modified_files=["config.toml"],
+        verification_status="required",
+    )
+    selected = evaluator.choose(verify_state, (measure, verify, act))
+    assert selected.need == verify
+    assert selected.decision.kind == ActiveDiagnosticDecisionKind.VERIFY
+
+    recover_state = RuntimeStateMetadata(
+        goal="Patch config",
+        phase=AgentPhase.RECOVER,
+        modified_files=["config.toml"],
+        verification_status="failed",
+    )
+    selected = evaluator.choose(recover_state, (measure, recover))
+    assert selected.need == recover
+    assert selected.decision.kind == ActiveDiagnosticDecisionKind.RECOVER
+
+    blocked_state = RuntimeStateMetadata(goal="Patch config")
+    blocked_state.add_diagnostic_risk(
+        ActiveDiagnosticRisk(
+            risk_id="indeterminate-write",
+            statement="The prior write outcome is indeterminate.",
+            severity=ActiveDiagnosticRiskSeverity.CRITICAL,
+            evidence_refs=("checkpoint:write",),
+            blocking=True,
+        )
+    )
+    selected = evaluator.choose(blocked_state, (measure, act))
+    assert selected.need is None
+    assert selected.decision.kind == ActiveDiagnosticDecisionKind.STOP
+
+
+def test_active_diagnostic_decision_explains_whether_evidence_changed() -> None:
+    evaluator = ActiveDiagnosticEvaluator()
+    state = RuntimeStateMetadata(goal="Inspect project")
+    need = DecisionNeedMetadata(
+        need_type="project_structure",
+        question="Inspect project files",
+        target_path=".",
+    )
+
+    first = evaluator.choose(state, (need,))
+    second = evaluator.choose(state, (need,))
+    state.add_fact("Project root exists.")
+    third = evaluator.choose(state, (need,))
+
+    assert first.decision.evidence_changed is True
+    assert "Initial diagnostic state" in first.decision.reason
+    assert second.decision.evidence_changed is False
+    assert "No new evidence" in second.decision.reason
+    assert third.decision.evidence_changed is True
+    assert "New evidence" in third.decision.reason
+    assert len(state.diagnostic_decisions) == 3
+
+
+def test_content_change_resets_no_progress_even_when_collection_lengths_match() -> None:
+    state = RuntimeStateMetadata(goal="Observe", known_facts=["old value"])
+    updater = StateUpdater()
+    before = updater._progress_signature(state)
+    state.known_facts[0] = "new value"
+    state.no_progress_rounds = 2
+
+    updater._update_progress_stop_condition(state, before)
+
+    assert state.no_progress_rounds == 0
+    assert state.phase != AgentPhase.BLOCKED
 
 
 @pytest.mark.parametrize(
@@ -1170,6 +1352,8 @@ def test_state_updater_replans_after_failed_verification() -> None:
     assert state.verification_status == "failed"
     assert state.replan_count == 1
     assert state.budget.replan_rounds_used == 1
+    assert state.diagnostic_risks[0].severity == ActiveDiagnosticRiskSeverity.HIGH
+    assert state.diagnostic_risks[0].status == ActiveDiagnosticItemStatus.OPEN
 
 
 def test_state_updater_blocks_after_repeated_no_progress_results() -> None:
@@ -1228,6 +1412,15 @@ def test_runtime_reporter_summarizes_evidence_changes_and_risks() -> None:
     state.select_file("app.py", "test failure references app.py")
     state.add_modified_file("app.py")
     state.completion_reason = "verification failed"
+    state.add_diagnostic_risk(
+        ActiveDiagnosticRisk(
+            risk_id="failed-validation",
+            statement="Latest verification failed.",
+            severity=ActiveDiagnosticRiskSeverity.HIGH,
+            evidence_refs=("tool:pytest",),
+            blocking=True,
+        )
+    )
 
     report = RuntimeReporter().report(state)
 
@@ -1237,6 +1430,8 @@ def test_runtime_reporter_summarizes_evidence_changes_and_risks() -> None:
     assert report.modified_files == ["app.py"]
     assert "unresolved runtime questions remain" in report.residual_risks
     assert "verification status is failed" in report.residual_risks
+    assert report.diagnostic_risks == state.diagnostic_risks
+    assert "open diagnostic risk: Latest verification failed." in report.residual_risks
 
 
 def test_agent_runtime_controller_returns_runtime_state_and_report() -> None:

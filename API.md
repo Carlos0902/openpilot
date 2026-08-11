@@ -805,6 +805,12 @@ read-only state when loaded. Tool-routing denials are retained as typed
 `GuardDecisionMetadata` entries in `guard_history` and are execution failures
 for required decision needs; an empty selection is not success.
 
+The runtime also records bounded task-owned diagnostic conflicts, risks, and
+Controller decisions. The diagnostic evaluator chooses a single
+measure/act/verify/recover/stop disposition from the current evidence before
+the existing Router and Guard run. These values explain progress and stopping
+decisions; they do not grant tools, file scope, or mutation permission.
+
 Planned and observed file state are separate contracts. `Task.write_files`
 describes intent. `TaskExecutionResult.attributes.observed_modified_files` and
 `ExecutionStateMetadata.changed_files` describe successful file-tool side

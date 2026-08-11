@@ -2171,6 +2171,123 @@ class GuardDecisionMetadata(MetadataBase):
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class ActiveDiagnosticDecisionKind(str, Enum):
+    """Controller-owned non-compensatory next-step categories."""
+
+    MEASURE = "measure"
+    ACT = "act"
+    VERIFY = "verify"
+    RECOVER = "recover"
+    STOP = "stop"
+
+
+class ActiveDiagnosticItemStatus(str, Enum):
+    """Lifecycle shared by task-owned conflicts and risks."""
+
+    OPEN = "open"
+    RESOLVED = "resolved"
+
+
+class ActiveDiagnosticRiskSeverity(str, Enum):
+    """Typed diagnostic severity; Guard remains the permission owner."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class _ActiveDiagnosticValue(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        use_enum_values=True,
+        validate_assignment=True,
+    )
+
+
+class ActiveDiagnosticConflict(_ActiveDiagnosticValue):
+    """One evidence-linked contradiction affecting the next decision."""
+
+    conflict_id: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    evidence_refs: tuple[str, ...] = Field(min_length=2, max_length=16)
+    status: ActiveDiagnosticItemStatus = ActiveDiagnosticItemStatus.OPEN
+    resolution_evidence_refs: tuple[str, ...] = Field(default=(), max_length=16)
+
+    @model_validator(mode="after")
+    def _resolution_matches_status(self) -> "ActiveDiagnosticConflict":
+        if any(not item.strip() for item in self.evidence_refs):
+            raise ValueError("diagnostic conflict evidence references must not be blank")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("diagnostic conflict evidence references must be unique")
+        if any(not item.strip() for item in self.resolution_evidence_refs):
+            raise ValueError("diagnostic conflict resolution evidence must not be blank")
+        if self.status == ActiveDiagnosticItemStatus.RESOLVED:
+            if not self.resolution_evidence_refs:
+                raise ValueError("resolved diagnostic conflict requires resolution evidence")
+        elif self.resolution_evidence_refs:
+            raise ValueError("open diagnostic conflict cannot carry resolution evidence")
+        return self
+
+
+class ActiveDiagnosticRisk(_ActiveDiagnosticValue):
+    """One evidence-linked task risk used by the diagnostic evaluator."""
+
+    risk_id: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    severity: ActiveDiagnosticRiskSeverity = ActiveDiagnosticRiskSeverity.MEDIUM
+    evidence_refs: tuple[str, ...] = Field(min_length=1, max_length=16)
+    blocking: bool = False
+    status: ActiveDiagnosticItemStatus = ActiveDiagnosticItemStatus.OPEN
+    resolution_evidence_refs: tuple[str, ...] = Field(default=(), max_length=16)
+
+    @model_validator(mode="after")
+    def _resolution_matches_status(self) -> "ActiveDiagnosticRisk":
+        if any(not item.strip() for item in self.evidence_refs):
+            raise ValueError("diagnostic risk evidence references must not be blank")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("diagnostic risk evidence references must be unique")
+        if any(not item.strip() for item in self.resolution_evidence_refs):
+            raise ValueError("diagnostic risk resolution evidence must not be blank")
+        if self.status == ActiveDiagnosticItemStatus.RESOLVED:
+            if not self.resolution_evidence_refs:
+                raise ValueError("resolved diagnostic risk requires resolution evidence")
+            if self.blocking:
+                raise ValueError("resolved diagnostic risk cannot remain blocking")
+        elif self.resolution_evidence_refs:
+            raise ValueError("open diagnostic risk cannot carry resolution evidence")
+        return self
+
+
+class ActiveDiagnosticDecision(_ActiveDiagnosticValue):
+    """One Controller decision over the current canonical diagnostic state."""
+
+    decision_id: str = Field(min_length=1, max_length=160)
+    ordinal: int = Field(ge=1)
+    kind: ActiveDiagnosticDecisionKind
+    reason: str = Field(min_length=1, max_length=2000)
+    need_type: str | None = Field(default=None, min_length=1, max_length=160)
+    question: str | None = Field(default=None, min_length=1, max_length=2000)
+    state_signature: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    evidence_changed: bool
+    contributing_conflict_ids: tuple[str, ...] = Field(default=(), max_length=64)
+    contributing_risk_ids: tuple[str, ...] = Field(default=(), max_length=64)
+
+    @model_validator(mode="after")
+    def _need_matches_kind(self) -> "ActiveDiagnosticDecision":
+        if (self.need_type is None) != (self.question is None):
+            raise ValueError("diagnostic decision need type and question must appear together")
+        if self.kind != ActiveDiagnosticDecisionKind.STOP and self.need_type is None:
+            raise ValueError("non-stop diagnostic decision requires a concrete need")
+        if len(set(self.contributing_conflict_ids)) != len(
+            self.contributing_conflict_ids
+        ):
+            raise ValueError("diagnostic conflict IDs must be unique")
+        if len(set(self.contributing_risk_ids)) != len(self.contributing_risk_ids):
+            raise ValueError("diagnostic risk IDs must be unique")
+        return self
+
+
 class RuntimeStateMetadata(MetadataBase):
     """Explicit task state that drives phase transitions and tool decisions."""
 
@@ -2197,6 +2314,22 @@ class RuntimeStateMetadata(MetadataBase):
     tool_history: list[dict[str, JsonValue]] = Field(default_factory=list)
     decision_history: list[ToolDecisionMetadata] = Field(default_factory=list)
     guard_history: list[GuardDecisionMetadata] = Field(default_factory=list)
+    diagnostic_conflicts: list[ActiveDiagnosticConflict] = Field(
+        default_factory=list,
+        max_length=64,
+    )
+    diagnostic_risks: list[ActiveDiagnosticRisk] = Field(
+        default_factory=list,
+        max_length=64,
+    )
+    diagnostic_decisions: list[ActiveDiagnosticDecision] = Field(
+        default_factory=list,
+        max_length=128,
+    )
+    diagnostic_progress_signature: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
     verification_status: VerificationStatus = VerificationStatus.NOT_STARTED
     risk_level: str = "low"
     core_success: bool | None = None
@@ -2234,6 +2367,44 @@ class RuntimeStateMetadata(MetadataBase):
                 "Migrated from legacy runtime_mode:read_only_analysis assumption.",
             )
         return migrated
+
+    @model_validator(mode="after")
+    def _active_diagnostic_history_is_consistent(self) -> "RuntimeStateMetadata":
+        conflict_ids = [item.conflict_id for item in self.diagnostic_conflicts]
+        risk_ids = [item.risk_id for item in self.diagnostic_risks]
+        decision_ids = [item.decision_id for item in self.diagnostic_decisions]
+        if len(conflict_ids) != len(set(conflict_ids)):
+            raise ValueError("diagnostic conflict IDs must be unique")
+        if len(risk_ids) != len(set(risk_ids)):
+            raise ValueError("diagnostic risk IDs must be unique")
+        if len(decision_ids) != len(set(decision_ids)):
+            raise ValueError("diagnostic decision IDs must be unique")
+        conflict_id_set = set(conflict_ids)
+        risk_id_set = set(risk_ids)
+        if any(
+            not set(item.contributing_conflict_ids).issubset(conflict_id_set)
+            for item in self.diagnostic_decisions
+        ):
+            raise ValueError("diagnostic decision references an unknown conflict")
+        if any(
+            not set(item.contributing_risk_ids).issubset(risk_id_set)
+            for item in self.diagnostic_decisions
+        ):
+            raise ValueError("diagnostic decision references an unknown risk")
+        expected_ordinals = list(range(1, len(self.diagnostic_decisions) + 1))
+        if [item.ordinal for item in self.diagnostic_decisions] != expected_ordinals:
+            raise ValueError("diagnostic decision ordinals must be contiguous")
+        if self.diagnostic_decisions:
+            if (
+                self.diagnostic_progress_signature
+                != self.diagnostic_decisions[-1].state_signature
+            ):
+                raise ValueError(
+                    "diagnostic progress signature must match the latest decision"
+                )
+        elif self.diagnostic_progress_signature is not None:
+            raise ValueError("diagnostic progress signature requires decision history")
+        return self
 
     def add_fact(self, fact: str) -> None:
         fact = fact.strip()
@@ -2291,6 +2462,84 @@ class RuntimeStateMetadata(MetadataBase):
 
     def record_guard_decision(self, decision: GuardDecisionMetadata) -> None:
         self.guard_history.append(decision)
+
+    def add_diagnostic_conflict(self, conflict: ActiveDiagnosticConflict) -> None:
+        existing = next(
+            (
+                item
+                for item in self.diagnostic_conflicts
+                if item.conflict_id == conflict.conflict_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing != conflict:
+                raise ValueError("diagnostic conflict ID already has different facts")
+            return
+        if len(self.diagnostic_conflicts) >= 64:
+            raise ValueError("diagnostic conflict limit reached")
+        self.diagnostic_conflicts.append(conflict)
+
+    def add_diagnostic_risk(self, risk: ActiveDiagnosticRisk) -> None:
+        existing = next(
+            (item for item in self.diagnostic_risks if item.risk_id == risk.risk_id),
+            None,
+        )
+        if existing is not None:
+            if existing != risk:
+                raise ValueError("diagnostic risk ID already has different facts")
+            return
+        if len(self.diagnostic_risks) >= 64:
+            raise ValueError("diagnostic risk limit reached")
+        self.diagnostic_risks.append(risk)
+
+    def resolve_diagnostic_conflict(
+        self,
+        conflict_id: str,
+        *,
+        evidence_refs: tuple[str, ...],
+    ) -> None:
+        if not evidence_refs:
+            raise ValueError("diagnostic conflict resolution requires evidence")
+        for index, conflict in enumerate(self.diagnostic_conflicts):
+            if conflict.conflict_id == conflict_id:
+                self.diagnostic_conflicts[index] = conflict.model_copy(
+                    update={
+                        "status": ActiveDiagnosticItemStatus.RESOLVED,
+                        "resolution_evidence_refs": evidence_refs,
+                    }
+                )
+                return
+        raise ValueError("diagnostic conflict ID is unknown")
+
+    def resolve_diagnostic_risk(
+        self,
+        risk_id: str,
+        *,
+        evidence_refs: tuple[str, ...],
+    ) -> None:
+        if not evidence_refs:
+            raise ValueError("diagnostic risk resolution requires evidence")
+        for index, risk in enumerate(self.diagnostic_risks):
+            if risk.risk_id == risk_id:
+                self.diagnostic_risks[index] = risk.model_copy(
+                    update={
+                        "status": ActiveDiagnosticItemStatus.RESOLVED,
+                        "blocking": False,
+                        "resolution_evidence_refs": evidence_refs,
+                    }
+                )
+                return
+        raise ValueError("diagnostic risk ID is unknown")
+
+    def record_diagnostic_decision(self, decision: ActiveDiagnosticDecision) -> None:
+        if len(self.diagnostic_decisions) >= 128:
+            raise ValueError("diagnostic decision history limit reached")
+        expected_ordinal = len(self.diagnostic_decisions) + 1
+        if decision.ordinal != expected_ordinal:
+            raise ValueError("diagnostic decision ordinal must be contiguous")
+        self.diagnostic_decisions.append(decision)
+        self.diagnostic_progress_signature = decision.state_signature
 
     def record_decomposition_decision(self, decision: DecompositionPolicyDecision) -> None:
         self.decomposition_decisions.append(decision)
@@ -2868,5 +3117,8 @@ class RuntimeReportMetadata(MetadataBase):
     verification_status: VerificationStatus = VerificationStatus.NOT_STARTED
     risk_level: str = "low"
     tool_decisions: list[ToolDecisionMetadata] = Field(default_factory=list)
+    diagnostic_conflicts: list[ActiveDiagnosticConflict] = Field(default_factory=list)
+    diagnostic_risks: list[ActiveDiagnosticRisk] = Field(default_factory=list)
+    diagnostic_decisions: list[ActiveDiagnosticDecision] = Field(default_factory=list)
     tool_history: list[dict[str, JsonValue]] = Field(default_factory=list)
     residual_risks: list[str] = Field(default_factory=list)

@@ -5173,3 +5173,17 @@ PYTHONPATH=Code/src pytest -q Code/tests
   and ledger suite **63 passed**; `compileall` and `git diff --check` pass.
 - Remaining limitations: this slice does not collect evidence, execute tools,
   or wire the controller into the default CLI route.
+### Active diagnostic decision boundary (stacked PR)
+
+- Observed failure: streamed diagnostic needs could be routed directly from
+  the latest model output without a typed, progress-sensitive controller
+  decision, so repeated or conflicting evidence could select an unsafe next
+  step.
+- Implemented fix: add task-owned conflict/risk/decision metadata and a
+  deterministic non-compensatory evaluator that selects measure, act, verify,
+  recover, or stop before the existing Router and Guard.
+- Validation: focused controller and metadata regression tests run from the
+  current stacked worktree before publishing.
+- Remaining limitation: the development-only three-arm experiment is not part
+  of this PR; this change only carries the runtime contract and controller
+  behavior.

@@ -10,6 +10,12 @@ from metadata.artifacts import (
     ProviderCodeArtifactReference,
 )
 from metadata.agent_runtime import (
+    ActiveDiagnosticConflict,
+    ActiveDiagnosticDecision,
+    ActiveDiagnosticDecisionKind,
+    ActiveDiagnosticItemStatus,
+    ActiveDiagnosticRisk,
+    ActiveDiagnosticRiskSeverity,
     AgentPhase,
     CheckpointBoundary,
     CheckpointFaultPoint,
@@ -253,6 +259,12 @@ from metadata.tooling import (
 from metadata.warnings import WarningCheckResultMetadata, WarningItemMetadata
 
 __all__ = [
+    "ActiveDiagnosticConflict",
+    "ActiveDiagnosticDecision",
+    "ActiveDiagnosticDecisionKind",
+    "ActiveDiagnosticItemStatus",
+    "ActiveDiagnosticRisk",
+    "ActiveDiagnosticRiskSeverity",
     "ArtifactMetadata",
     "AgentPhase",
     "CheckpointBoundary",

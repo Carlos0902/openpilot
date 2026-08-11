@@ -85,6 +85,11 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   resume attempt;
   `RuntimeReportMetadata` is its final auditable projection;
   `ProjectStateMetadata` describes the target project rather than a task run.
+- `RuntimeStateMetadata.diagnostic_conflicts`, `diagnostic_risks`, and
+  `diagnostic_decisions` are bounded task-owned values. They record the
+  evidence-linked diagnostic state and the Controller's next-step disposition;
+  `DecisionNeedMetadata`, `ToolRouter`, and `GuardDecisionMetadata` remain the
+  concrete request, capability, and permission owners.
 - `RuntimeStateMetadata.session_constraints` is the single owner of the
   source-linked, in-session constraint ledger. `SessionConstraintProposal`,
   `SessionConstraintEntry`, and `SessionConstraintState` are strict nested
