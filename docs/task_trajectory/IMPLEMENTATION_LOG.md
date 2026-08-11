@@ -2578,3 +2578,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Implemented fix: add `provider_call_id` to call and error metadata without
   changing their `MetadataKind` or lifecycle authority.
 - Remaining limitation: admission and execution producers remain separate PRs.
+
+### Typed provider admission outcomes
+
+- Observed failure: provider-native calls had no strict result distinguishing an
+  executable project selection from a blocked protocol or policy failure.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes seven admitted/blocked, lineage, contradiction, and identity tests
+  after implementation; the full suite remains green.
+- Implemented fix: add a core-owned strict admission outcome that reuses
+  `ToolCallMetadata`, `ToolSelection`, `ToolErrorMetadata`, and `FailureMetadata`;
+  provider error projection preserves both correlation identities.
+- Remaining limitation: registry, argument, permission, scope, and budget
+  admission decisions remain separate changes.

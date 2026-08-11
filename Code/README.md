@@ -58,3 +58,5 @@ normalized response is returned.
 Provider message mappings and SDK objects share one response normalization path.
 Normalized responses attach typed reasoning-usage observations without storing
 provider reasoning bodies in diagnostics.
+Provider tool admission outcomes reuse project call, selection, failure, and
+error contracts; wire identity alone never authorizes execution.

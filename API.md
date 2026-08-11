@@ -142,6 +142,10 @@ negative indexes, or incomplete final shapes fail closed.
 Provider call IDs are retained separately from project-owned tool lifecycle IDs;
 the external ID correlates wire requests and results but never grants permission,
 budget, checkpoint, or execution authority.
+Provider-native admission returns one strict `admitted` or `blocked` outcome.
+Admitted outcomes require an existing typed `ToolSelection`; blocked outcomes
+require an existing typed `ToolErrorMetadata`. Contradictory payloads and
+provider/project identity drift reject during validation.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
