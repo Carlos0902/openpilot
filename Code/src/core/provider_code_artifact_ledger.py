@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any
 
@@ -83,57 +83,109 @@ class ProviderCodeArtifactLedger:
     ) -> ProviderCodeArtifactReference:
         """Register one code body and return its body-free typed reference."""
 
-        summary = _artifact_summary(artifact)
-        code = _artifact_code(summary)
-        if len(code) > MAX_PROVIDER_CODE_ARTIFACT_CHARS:
-            raise ProviderCodeArtifactLedgerError(
-                "code artifact exceeds the provider artifact character limit"
-            )
-        encoded = code.encode("utf-8")
-        digest = hashlib.sha256(encoded).hexdigest()
-        try:
-            reference = ProviderCodeArtifactReference(
-                kind="code_artifact",
-                source_id=source_id,
-                provider_call_id=provider_call_id,
-                sha256=digest,
-                bytes=len(encoded),
-                chars=len(code),
-                language=_artifact_language(summary),
-            )
-        except ValidationError as exc:
-            raise ProviderCodeArtifactLedgerError(
-                "code artifact reference fields are invalid"
-            ) from exc
+        return self.register_batch(
+            ((artifact, source_id, provider_call_id),)
+        )[0]
 
-        lineage = (reference.source_id, reference.provider_call_id)
-        existing_digest = self._digest_by_lineage.get(lineage)
-        if existing_digest is not None and existing_digest != digest:
-            raise ProviderCodeArtifactLedgerError(
-                "code artifact lineage is already bound to different content"
-            )
-        key = (digest, reference.source_id, reference.provider_call_id)
-        existing = self._entries.get(key)
-        if existing is not None:
-            existing_code, existing_reference = existing
-            if existing_code != code or existing_reference != reference:
-                raise ProviderCodeArtifactLedgerError(
-                    "code artifact ledger entry is inconsistent"
-                )
-            return existing_reference
+    def prepare(
+        self,
+        artifact: CodeArtifactMetadata | Mapping[str, Any],
+        *,
+        source_id: str,
+        provider_call_id: str,
+    ) -> ProviderCodeArtifactReference:
+        """Validate one artifact and derive its reference without mutation."""
 
-        if self.artifact_count >= self._max_artifacts:
-            raise ProviderCodeArtifactLedgerError(
-                "code artifact ledger capacity is exhausted"
-            )
-        if self._total_chars + len(code) > self._max_total_chars:
-            raise ProviderCodeArtifactLedgerError(
-                "code artifact ledger character capacity is exhausted"
-            )
-        self._entries[key] = (code, reference)
-        self._digest_by_lineage[lineage] = digest
-        self._total_chars += len(code)
+        _code, reference = _prepared_registration(
+            artifact,
+            source_id=source_id,
+            provider_call_id=provider_call_id,
+        )
         return reference
+
+    def register_batch(
+        self,
+        registrations: Sequence[
+            tuple[
+                CodeArtifactMetadata | Mapping[str, Any],
+                str,
+                str,
+            ]
+        ],
+    ) -> tuple[ProviderCodeArtifactReference, ...]:
+        """Atomically register one bounded provider response artifact batch."""
+
+        if not isinstance(registrations, Sequence) or isinstance(
+            registrations,
+            (str, bytes),
+        ):
+            raise ProviderCodeArtifactLedgerError(
+                "artifact registrations must be a bounded sequence"
+            )
+        if len(registrations) > MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE:
+            raise ProviderCodeArtifactLedgerError(
+                "artifact registrations exceed the provider call limit"
+            )
+        prepared: list[tuple[str, ProviderCodeArtifactReference]] = []
+        for registration in registrations:
+            if not isinstance(registration, tuple) or len(registration) != 3:
+                raise ProviderCodeArtifactLedgerError(
+                    "artifact registration entries must be three-item tuples"
+                )
+            artifact, source_id, provider_call_id = registration
+            prepared.append(
+                _prepared_registration(
+                    artifact,
+                    source_id=source_id,
+                    provider_call_id=provider_call_id,
+                )
+            )
+
+        entries = dict(self._entries)
+        digest_by_lineage = dict(self._digest_by_lineage)
+        total_chars = self._total_chars
+        references: list[ProviderCodeArtifactReference] = []
+        for code, reference in prepared:
+            lineage = (reference.source_id, reference.provider_call_id)
+            existing_digest = digest_by_lineage.get(lineage)
+            if (
+                existing_digest is not None
+                and existing_digest != reference.sha256
+            ):
+                raise ProviderCodeArtifactLedgerError(
+                    "code artifact lineage is already bound to different content"
+                )
+            key = (
+                reference.sha256,
+                reference.source_id,
+                reference.provider_call_id,
+            )
+            existing = entries.get(key)
+            if existing is not None:
+                existing_code, existing_reference = existing
+                if existing_code != code or existing_reference != reference:
+                    raise ProviderCodeArtifactLedgerError(
+                        "code artifact ledger entry is inconsistent"
+                    )
+                references.append(existing_reference)
+                continue
+            if len(entries) >= self._max_artifacts:
+                raise ProviderCodeArtifactLedgerError(
+                    "code artifact ledger capacity is exhausted"
+                )
+            if total_chars + len(code) > self._max_total_chars:
+                raise ProviderCodeArtifactLedgerError(
+                    "code artifact ledger character capacity is exhausted"
+                )
+            entries[key] = (code, reference)
+            digest_by_lineage[lineage] = reference.sha256
+            total_chars += len(code)
+            references.append(reference)
+
+        self._entries = entries
+        self._digest_by_lineage = digest_by_lineage
+        self._total_chars = total_chars
+        return tuple(references)
 
     def resolve(
         self,
@@ -188,6 +240,37 @@ def _artifact_summary(
             "code artifact registration requires code_artifact kind"
         )
     return summary
+
+
+def _prepared_registration(
+    artifact: CodeArtifactMetadata | Mapping[str, Any],
+    *,
+    source_id: str,
+    provider_call_id: str,
+) -> tuple[str, ProviderCodeArtifactReference]:
+    summary = _artifact_summary(artifact)
+    code = _artifact_code(summary)
+    if len(code) > MAX_PROVIDER_CODE_ARTIFACT_CHARS:
+        raise ProviderCodeArtifactLedgerError(
+            "code artifact exceeds the provider artifact character limit"
+        )
+    encoded = code.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        reference = ProviderCodeArtifactReference(
+            kind="code_artifact",
+            source_id=source_id,
+            provider_call_id=provider_call_id,
+            sha256=digest,
+            bytes=len(encoded),
+            chars=len(code),
+            language=_artifact_language(summary),
+        )
+    except ValidationError as exc:
+        raise ProviderCodeArtifactLedgerError(
+            "code artifact reference fields are invalid"
+        ) from exc
+    return code, reference
 
 
 def _artifact_code(summary: Mapping[str, Any]) -> str:

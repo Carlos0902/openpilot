@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from core.llm import LLMResponse, LLMToolResult
+from core.provider_code_artifact_ledger import (
+    ProviderCodeArtifactLedger,
+    ProviderCodeArtifactLedgerError,
+)
 from core.provider_tool_batch_admission import (
     MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE,
 )
@@ -21,11 +26,19 @@ from core.provider_tool_result_projection import (
     project_provider_tool_result,
 )
 from core.tool_event_loop import ToolEventLoopRunResult
-from metadata import ToolErrorMetadata
+from metadata import ProviderCodeArtifactReference, ToolErrorMetadata
 
 
 class ProviderToolResultBatchError(ValueError):
     """Raised when provider result identity or payload facts are invalid."""
+
+
+@dataclass(frozen=True)
+class _CodeArtifactRegistration:
+    artifact: Any
+    source_id: str
+    provider_call_id: str
+    reference: ProviderCodeArtifactReference
 
 
 def provider_tool_result_batch(
@@ -35,6 +48,7 @@ def provider_tool_result_batch(
     duplicate_blocks: Sequence[ProviderToolDuplicateBlock] = (),
     declared_window_complete_ids: Sequence[str] = (),
     char_budget: int = MAX_PROVIDER_TOOL_RESULT_CHARS,
+    code_artifact_ledger: ProviderCodeArtifactLedger | None = None,
 ) -> tuple[LLMToolResult, ...]:
     """Return one bounded result for every provider call in response order."""
 
@@ -51,6 +65,13 @@ def provider_tool_result_batch(
     ):
         raise ProviderToolResultBatchError(
             "char_budget must be an integer within provider result bounds"
+        )
+    if code_artifact_ledger is not None and not isinstance(
+        code_artifact_ledger,
+        ProviderCodeArtifactLedger,
+    ):
+        raise ProviderToolResultBatchError(
+            "code_artifact_ledger must be ProviderCodeArtifactLedger"
         )
 
     calls = tuple(response.tool_calls)
@@ -97,13 +118,15 @@ def provider_tool_result_batch(
         )
 
     projected: list[LLMToolResult] = []
+    registrations: list[_CodeArtifactRegistration] = []
     for call in calls:
-        payload = _payload_for_call(
+        payload, registration = _payload_for_call(
             call,
             item=result_by_id.get(call.id),
             error=error_by_id.get(call.id),
             duplicate_block=block_by_id.get(call.id),
             declared_window_complete=call.id in declared_ids,
+            code_artifact_ledger=code_artifact_ledger,
         )
         try:
             content = fit_provider_tool_result_payload(
@@ -120,6 +143,28 @@ def provider_tool_result_batch(
                 content=content,
             )
         )
+        if registration is not None:
+            registrations.append(registration)
+    if registrations:
+        if code_artifact_ledger is None:
+            raise ProviderToolResultBatchError(
+                "code artifact registrations require a runtime ledger"
+            )
+        try:
+            code_artifact_ledger.register_batch(
+                tuple(
+                    (
+                        registration.artifact,
+                        registration.source_id,
+                        registration.provider_call_id,
+                    )
+                    for registration in registrations
+                )
+            )
+        except ProviderCodeArtifactLedgerError as exc:
+            raise ProviderToolResultBatchError(
+                "provider code artifacts failed atomic registration"
+            ) from exc
     return tuple(projected)
 
 
@@ -130,7 +175,8 @@ def _payload_for_call(
     error: ToolErrorMetadata | None,
     duplicate_block: ProviderToolDuplicateBlock | None,
     declared_window_complete: bool,
-) -> dict[str, Any]:
+    code_artifact_ledger: ProviderCodeArtifactLedger | None,
+) -> tuple[dict[str, Any], _CodeArtifactRegistration | None]:
     if duplicate_block is not None:
         return {
             "success": False,
@@ -139,7 +185,7 @@ def _payload_for_call(
             "error": duplicate_block.error_message,
             "previous_call_id": duplicate_block.previous_provider_call_id,
             "suggested_recovery": duplicate_block.suggested_recovery,
-        }
+        }, None
     if item is None:
         return {
             "success": False,
@@ -149,7 +195,7 @@ def _payload_for_call(
                 "The project stopped this batch before executing this call; "
                 "retry it in a later round."
             ),
-        }
+        }, None
 
     success = item.get("success")
     if type(success) is not bool:
@@ -193,6 +239,38 @@ def _payload_for_call(
             "provider tool result failed artifact projection"
         ) from exc
 
+    registration: _CodeArtifactRegistration | None = None
+    if result_projection.get("kind") == "code_artifact":
+        if code_artifact_ledger is None:
+            raise ProviderToolResultBatchError(
+                "code artifact results require a runtime artifact ledger"
+            )
+        try:
+            reference = code_artifact_ledger.prepare(
+                item.get("result"),
+                source_id=source_id,
+                provider_call_id=call.id,
+            )
+        except ProviderCodeArtifactLedgerError as exc:
+            raise ProviderToolResultBatchError(
+                "provider code artifact failed registration preflight"
+            ) from exc
+        expected_reference = reference.model_dump(mode="json")
+        if not _code_projection_reference_matches(
+            artifact_ref,
+            expected_reference,
+        ):
+            raise ProviderToolResultBatchError(
+                "provider code artifact projection reference does not match"
+            )
+        artifact_ref = expected_reference
+        registration = _CodeArtifactRegistration(
+            artifact=item.get("result"),
+            source_id=source_id,
+            provider_call_id=call.id,
+            reference=reference,
+        )
+
     payload = {
         "success": success,
         "tool": tool_name,
@@ -214,7 +292,27 @@ def _payload_for_call(
         key: value
         for key, value in payload.items()
         if value is not None
-    }
+    }, registration
+
+
+def _code_projection_reference_matches(
+    projected: Any,
+    expected: Mapping[str, Any],
+) -> bool:
+    if not isinstance(projected, Mapping):
+        return False
+    return all(
+        projected.get(field) == expected.get(field)
+        for field in (
+            "kind",
+            "source_id",
+            "provider_call_id",
+            "sha256",
+            "bytes",
+            "chars",
+            "language",
+        )
+    )
 
 
 def _validated_duplicate_blocks(

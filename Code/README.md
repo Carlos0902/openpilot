@@ -121,3 +121,6 @@ The code-artifact ledger separately owns bounded generated-code bodies for one
 runtime. Its frozen reference binds source and provider call IDs, checksum,
 sizes, and language; exact re-registration is idempotent, while lineage rebinds
 and mismatched or stale references fail closed without file I/O.
+Code-result batching uses the ledger's pure prepare step before payload fitting,
+then commits all bodies through one atomic bounded registration. Code results
+without a ledger fail instead of emitting references that no writer can resolve.

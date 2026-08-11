@@ -3091,3 +3091,26 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: result projection does not yet register code artifacts
   into the ledger, and the writer adapter does not yet resolve references into
   scoped patch input.
+
+### Atomic code-artifact registration during result batching
+
+- Observed failure: provider result batching could emit a valid-looking
+  `code_artifact` reference without registering its body, leaving a later
+  writer unable to resolve it. Registering calls one at a time would also leave
+  partial authority when a later artifact or payload failed.
+- Validation evidence: the regression suite fails because result batching has
+  no ledger integration on the stacked base; 12 tests pass after implementation
+  for mandatory ledgers, resolvable body-free payloads, non-authoritative file
+  paths, idempotent reprojection, pure prepare, capacity failure, reference
+  mismatch before mutation, multi-artifact atomicity, conflicting bodies,
+  invalid ledgers, non-code compatibility, and source immutability. The complete
+  provider-focused set passes 344, and the complete repository suite passes
+  1,440 in an isolated detached worktree, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add pure reference preparation and bounded atomic batch
+  registration to the ledger, then make result batching preflight every code
+  reference, fit every payload, and commit all bodies only after those checks
+  succeed. Strict resolution fields replace any extra projection-only fields.
+- Remaining limitation: the patch-writer admission adapter does not yet resolve
+  the authorized reference into generated code, and provider rounds are not yet
+  orchestrated end to end.

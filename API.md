@@ -257,6 +257,11 @@ authorized references and 6,400,000 aggregate code characters, while each body
 remains capped at 200,000 characters. Resolution requires every typed reference
 field and the recomputed body checksum to match; stale, forged, rebound, or
 over-capacity references fail before a writer can receive the code body.
+When result batching encounters `code_artifact`, a ledger is mandatory. The
+batch derives and checks the strict reference, fits every provider payload, and
+only then atomically registers all code bodies. A later payload, capacity, or
+reference mismatch therefore leaves the ledger unchanged; non-authoritative
+projection fields such as `file_path` never enter the resolution reference.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

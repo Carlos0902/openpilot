@@ -167,6 +167,9 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   reference and revalidates every field before resolution. It is not a durable
   checkpoint artifact and therefore does not reuse `DurableArtifactReference`;
   it performs no file I/O and cannot grant mutation permission.
+  Provider result batching may derive references without mutation, validate its
+  complete model-facing payload set, and then register at most one response's
+  artifacts atomically; partial batches never become authorized body sources.
 - `RuntimePromptContextSnapshot` is a strict value owned by
   `RuntimeCheckpointMetadata`. It binds the complete context request hash and
   rendered Prompt hash to the existing `ContextSelectionMetadata` and one
