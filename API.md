@@ -175,6 +175,10 @@ identity, bounded argument decoding, typed defaults and contracts, runtime
 budget, permission, explicit read scope, and exact validation-command checks in
 that order. It creates an executable `ToolSelection` only after every boundary
 passes, blocks every mutation, and never executes the selected tool itself.
+The separate mutation entry admits only `file_patch_writer`. It requires a
+literal mutation opt-in, explicit confirmation, exact write scope, a non-empty
+task-owned validation command, and a registered `command_executor`; it returns
+a selection without performing either the patch or the validation command.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

@@ -2695,3 +2695,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: mutation admission, bounded batch accumulation,
   provider round-trip execution, and runtime event-loop integration remain
   separate changes.
+
+### Patch-only provider mutation admission
+
+- Observed failure: provider mutation requests had no composed boundary that
+  kept mutation opt-in separate from confirmation while also requiring exact
+  write scope and task-owned validation authority before selection.
+- Validation evidence: the regression test fails at import on the stacked base;
+  the focused read-only and mutation composition suites pass 29 cases after the
+  implementation, and the complete focused provider-admission set passes 93.
+  The full suite passes 1,201 tests, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add a separate non-executing mutation entry that admits only
+  `file_patch_writer`, requires literal opt-in and confirmation, checks the
+  typed edit budget and exact write scope, and requires both a non-empty
+  validation command and registered `command_executor` before returning a
+  selection.
+- Remaining limitation: declared-read phase evidence, mutation receipts, exact
+  validation execution, batch accumulation, and provider round-trip integration
+  remain separate changes.

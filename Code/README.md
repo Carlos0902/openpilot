@@ -76,3 +76,6 @@ The single-call read-only admission path composes those boundaries in one
 fail-closed sequence and returns a selection only after registry, contract,
 budget, permission, scope, and exact-validation checks pass; it never executes
 the tool and never admits mutation.
+Mutation admission is a separate patch-only entry. It requires literal opt-in,
+confirmation, exact write scope, a task-owned validation command, and a
+registered validation executor before returning a non-executed selection.

@@ -17,13 +17,22 @@ from metadata import RuntimeBudgetMetadata, ToolContractMetadata
 class _Registry:
     def __init__(self, definitions):
         self.definitions = definitions
-        self.executors = {name: object() for name in definitions}
+        self.executors = {name: _Executor() for name in definitions}
 
     def get(self, name):
         return self.definitions.get(name)
 
     def get_executor(self, name):
         return self.executors.get(name)
+
+
+class _Executor:
+    def __init__(self):
+        self.called = False
+
+    def __call__(self, _input):
+        self.called = True
+        raise AssertionError("admission must not execute tools")
 
 
 def _definition(
@@ -86,7 +95,6 @@ def _admit(call=None, registry=None, **updates):
         "prior_usage": ProviderToolBudgetUsage(),
         "user_confirmed": True,
         "allow_mutations": True,
-        "read_scope": [],
         "write_scope": ["app.py"],
         "project_path": None,
         "validation_command": "python -m compileall -q app.py",
@@ -103,7 +111,8 @@ def test_patch_mutation_is_admitted_without_execution() -> None:
     assert admission.selection is not None
     assert admission.selection.tool_name == "file_patch_writer"
     assert admission.requires_confirmation is True
-    assert registry.get_executor("file_patch_writer") is not None
+    assert registry.get_executor("file_patch_writer").called is False
+    assert registry.get_executor("command_executor").called is False
 
 
 @pytest.mark.parametrize(

@@ -193,12 +193,104 @@ def admit_provider_tool_call(
 ) -> ProviderToolAdmission:
     """Admit one provider-native read-only call without executing it."""
 
+    return _admit_provider_tool_call(
+        call,
+        task_id=task_id,
+        session_id=session_id,
+        round_index=round_index,
+        ordinal=ordinal,
+        registry=registry,
+        budget=budget,
+        prior_usage=prior_usage,
+        user_confirmed=user_confirmed,
+        allow_mutations=False,
+        mutation_entry=False,
+        read_scope=read_scope,
+        write_scope=None,
+        project_path=project_path,
+        validation_command=validation_command,
+        validation_cwd=validation_cwd,
+        validation_commands_used=validation_commands_used,
+    )
+
+
+def admit_provider_mutation_tool_call(
+    call: LLMToolCall,
+    *,
+    task_id: str,
+    session_id: str,
+    round_index: int,
+    ordinal: int,
+    registry: Any,
+    budget: RuntimeBudgetMetadata,
+    prior_usage: ProviderToolBudgetUsage,
+    user_confirmed: bool,
+    allow_mutations: bool,
+    write_scope: Sequence[str] | None,
+    project_path: str | None,
+    validation_command: str | None,
+    validation_cwd: str | None = None,
+    validation_commands_used: int = 0,
+) -> ProviderToolAdmission:
+    """Admit one patch mutation without executing or validating it."""
+
+    if type(allow_mutations) is not bool:
+        raise ProviderToolAdmissionError(
+            "allow_mutations must be a literal boolean"
+        )
+    return _admit_provider_tool_call(
+        call,
+        task_id=task_id,
+        session_id=session_id,
+        round_index=round_index,
+        ordinal=ordinal,
+        registry=registry,
+        budget=budget,
+        prior_usage=prior_usage,
+        user_confirmed=user_confirmed,
+        allow_mutations=allow_mutations,
+        mutation_entry=True,
+        read_scope=None,
+        write_scope=write_scope,
+        project_path=project_path,
+        validation_command=validation_command,
+        validation_cwd=validation_cwd,
+        validation_commands_used=validation_commands_used,
+    )
+
+
+def _admit_provider_tool_call(
+    call: LLMToolCall,
+    *,
+    task_id: str,
+    session_id: str,
+    round_index: int,
+    ordinal: int,
+    registry: Any,
+    budget: RuntimeBudgetMetadata,
+    prior_usage: ProviderToolBudgetUsage,
+    user_confirmed: bool,
+    allow_mutations: bool,
+    mutation_entry: bool,
+    read_scope: Sequence[str] | None,
+    write_scope: Sequence[str] | None,
+    project_path: str | None,
+    validation_command: str | None,
+    validation_cwd: str | None,
+    validation_commands_used: int,
+) -> ProviderToolAdmission:
+    """Compose the project-owned boundaries for one provider tool call."""
+
     if not str(task_id).strip() or not str(session_id).strip():
         raise ProviderToolAdmissionError("task_id and session_id are required")
     if round_index < 1 or ordinal < 1:
         raise ProviderToolAdmissionError("round_index and ordinal must be positive")
     if type(user_confirmed) is not bool:
         raise ProviderToolAdmissionError("user_confirmed must be a literal boolean")
+    if type(allow_mutations) is not bool or type(mutation_entry) is not bool:
+        raise ProviderToolAdmissionError(
+            "mutation admission controls must be literal booleans"
+        )
     if validation_commands_used < 0:
         raise ProviderToolAdmissionError(
             "validation_commands_used must be non-negative"
@@ -282,7 +374,7 @@ def admit_provider_tool_call(
         tool_name,
         definition,
         user_confirmed=user_confirmed,
-        allow_mutations=False,
+        allow_mutations=allow_mutations,
     )
     if permission.status == "blocked":
         confirmation_required = permission.reason_code == "confirmation_required"
@@ -307,6 +399,19 @@ def admit_provider_tool_call(
             requires_confirmation=permission.requires_confirmation,
         )
 
+    if mutation_entry and tool_name != "file_patch_writer":
+        return _blocked_provider_admission(
+            tool_call,
+            error_type="PermissionDenied",
+            error_message=(
+                "Provider mutation admission is patch-only; "
+                "file_patch_writer is required."
+            ),
+            recoverable=False,
+            suggested_recovery="Use the registered patch writer.",
+            requires_confirmation=True,
+        )
+
     capabilities = {
         str(getattr(capability, "value", capability))
         for capability in (getattr(definition, "capabilities", []) or [])
@@ -325,6 +430,53 @@ def admit_provider_tool_call(
                 recoverable=True,
                 suggested_recovery=(
                     "Use a path from the explicit read_files scope."
+                ),
+            )
+
+    if permission.mutating:
+        scope_error = provider_write_scope_error(
+            input_metadata,
+            write_scope or (),
+            project_path,
+        )
+        if scope_error:
+            return _blocked_provider_admission(
+                tool_call,
+                error_type="ProviderToolWriteScopeViolation",
+                error_message=scope_error,
+                recoverable=False,
+                suggested_recovery=(
+                    "Use a path from the explicit write_files scope."
+                ),
+                requires_confirmation=True,
+            )
+
+    if mutation_entry:
+        validation_definition = getattr(
+            registry,
+            "get",
+            lambda _name: None,
+        )("command_executor")
+        validation_executor = getattr(
+            registry,
+            "get_executor",
+            lambda _name: None,
+        )("command_executor")
+        if (
+            not str(validation_command or "").strip()
+            or validation_definition is None
+            or validation_executor is None
+        ):
+            return _blocked_provider_admission(
+                tool_call,
+                error_type="ProviderToolValidationViolation",
+                error_message=(
+                    "Provider mutation requires a non-empty task-owned "
+                    "validation command and registered command_executor."
+                ),
+                recoverable=False,
+                suggested_recovery=(
+                    "Attach the exact validation command and its executor."
                 ),
             )
 
@@ -975,6 +1127,7 @@ __all__ = [
     "ProviderToolPermissionDecision",
     "ProviderToolResourceUsage",
     "ProviderValidationCommandDecision",
+    "admit_provider_mutation_tool_call",
     "admit_provider_tool_call",
     "decode_provider_tool_arguments",
     "provider_tool_budget_decision",
