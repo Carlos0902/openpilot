@@ -66,6 +66,12 @@ OpenAI-compatible providers are configured with environment variables:
 | `OPENPILOT_LLM_TOKENIZER_PATH` | No | Local DeepSeek cache | Optional explicit provider tokenizer JSON path. |
 | `OPENPILOT_CONTEXT_MAX_PROMPT_TOKENS` | No | `4096` | Exact token budget for the memory-context slice when a provider tokenizer is available. |
 | `OPENPILOT_CONTEXT_RESERVED_PROMPT_TOKENS` | No | `128` | Explicit framing/safety reserve deducted from assembled request content budget. |
+| `OPENPILOT_PROVIDER_TOOL_EXECUTION_ENABLED` | No | `false` | Explicit opt-in for provider-native execution. |
+| `OPENPILOT_PROVIDER_TOOL_EXECUTION_BUDGET_PROFILE` | No | `canary` | Typed static budget profile: `canary`, `real_read_only`, or `real_mutation`. |
+| `OPENPILOT_PROVIDER_TOOL_EXECUTION_MAX_ROUNDS` | No | `3` | Provider-native round ceiling, bounded to 1–8. |
+| `OPENPILOT_PROVIDER_TOOL_INITIAL_CONTEXT_PROJECTION_ENABLED` | No | `false` | Separate opt-in for initial context projection. |
+| `OPENPILOT_PROVIDER_TOOL_INITIAL_CONTEXT_MUTATION_ENABLED` | No | `false` | Higher-risk mutation projection opt-in; never implied by read-only projection. |
+| `OPENPILOT_PROVIDER_TOOL_COMPLETION_OUTCOME_FEEDBACK_ENABLED` | No | `false` | Enables bounded typed completion-outcome feedback. |
 | `OPENPILOT_EMBEDDING_PROVIDER` | No | `openai-compatible` | Embedding provider label. |
 | `OPENPILOT_EMBEDDING_BASE_URL` | No | Inherits `OPENPILOT_LLM_BASE_URL` | OpenAI-compatible embedding endpoint. |
 | `OPENPILOT_EMBEDDING_API_KEY` | No | Inherits `OPENPILOT_LLM_API_KEY` | Embedding API key. |
@@ -75,6 +81,9 @@ OpenAI-compatible providers are configured with environment variables:
 CLI readiness checks treat blank `OPENPILOT_LLM_BASE_URL` and blank
 `OPENPILOT_LLM_API_KEY` as missing. Diagnostics may show whether a value is set, but
 must never print the actual API key.
+Provider lanes bind endpoint, model, capability profile, tokenizer, credential
+environment names, budget profile, and round ceiling as one immutable identity.
+Lane-specific settings do not load repository `.env` files.
 Settings search the repository-root `.env`, `Code/.env`, and the current
 working-directory `.env`, so model and tokenizer binding do not change merely
 because the CLI was launched from `Code/` instead of the repository root.

@@ -2409,3 +2409,14 @@ PYTHONPATH=Code/src pytest -q Code/tests
   body-free reasoning observations; capability is never guessed from model text.
 - Remaining limitation: native provider transport and streaming integration are
   separate changes.
+
+### Scoped provider lane identity and budgets
+
+- Observed failure: provider experiments lacked one immutable identity tying
+  credentials, endpoint, model, tokenizer, reasoning profile, and budgets.
+- Validation evidence: regression tests cover credential isolation, settings
+  drift, tokenizer mismatch, empty identity, and explicit fan-out limits.
+- Implemented fix: add bounded provider lanes and static canary/read-only/
+  mutation budget profiles; settings construction skips repository env files.
+- Remaining limitation: this change does not send provider requests or grant
+  mutation authority.
