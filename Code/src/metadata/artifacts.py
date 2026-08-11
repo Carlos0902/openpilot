@@ -4,9 +4,45 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from metadata.base import JsonValue, MetadataBase, MetadataKind
+
+MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_ID_CHARS = 256
+MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_CHARS = 200_000
+MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_BYTES = (
+    MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_CHARS * 4
+)
+
+
+class ProviderCodeArtifactReference(BaseModel):
+    """Body-free generated-code lineage accepted by a provider writer call."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        str_strip_whitespace=True,
+    )
+
+    kind: Literal["code_artifact"]
+    source_id: str = Field(
+        min_length=1,
+        max_length=MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_ID_CHARS,
+    )
+    provider_call_id: str = Field(
+        min_length=1,
+        max_length=MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_ID_CHARS,
+    )
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(
+        ge=1,
+        le=MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_BYTES,
+    )
+    chars: int = Field(
+        ge=1,
+        le=MAX_PROVIDER_CODE_ARTIFACT_REFERENCE_CHARS,
+    )
+    language: str = Field(min_length=1, max_length=64)
 
 
 class TextArtifactMetadata(MetadataBase):

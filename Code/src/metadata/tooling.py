@@ -13,6 +13,7 @@ from metadata.artifacts import (
     FileArtifactMetadata,
     SearchArtifactMetadata,
     TextArtifactMetadata,
+    ProviderCodeArtifactReference,
 )
 from metadata.base import JsonValue, MetadataBase, MetadataKind
 from metadata.project import EnvironmentOperation
@@ -52,6 +53,7 @@ class ToolInputMetadata(MetadataBase):
     insertion_hint: str | None = None
     patch_mode: str | None = None
     generated_unit: str | None = None
+    artifact_ref: ProviderCodeArtifactReference | None = None
     replacement_text: str | None = None
     patch: dict[str, JsonValue] | None = None
     line_start: int | None = None

@@ -7,6 +7,7 @@ from metadata.artifacts import (
     FileArtifactMetadata,
     SearchArtifactMetadata,
     TextArtifactMetadata,
+    ProviderCodeArtifactReference,
 )
 from metadata.agent_runtime import (
     AgentPhase,
@@ -316,6 +317,7 @@ __all__ = [
     "ProcessedDataMetadata",
     "ProjectDiagnosisMetadata",
     "ProjectFingerprint",
+    "ProviderCodeArtifactReference",
     "Recoverability",
     "RecoveryAutomationPolicy",
     "RecoveryBlocker",

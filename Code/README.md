@@ -114,3 +114,6 @@ Result batching correlates those projections with at most 32 provider response
 calls, typed recoverable errors, and duplicate blocks. It emits one bounded
 `LLMToolResult` per call in response order and treats missing execution as a
 fixed retryable batch abort without consuming ordinary local result maps.
+Provider code-artifact references are parsed as a strict frozen
+`ToolInputMetadata.artifact_ref` value. They never fall through to the generic
+attributes escape hatch and contain no generated-code body.

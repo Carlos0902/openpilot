@@ -3007,3 +3007,43 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the adapter does not register code bodies, build the
   assistant/tool continuation messages, compact history, dispatch another
   request, or own provider round state.
+
+### Typed provider code-artifact input references
+
+- Observed failure: provider `artifact_ref` arguments were not a declared
+  `ToolInputMetadata` field, so `from_mapping()` placed the mutation-relevant
+  lineage object in generic `attributes`. A free-form dictionary could then
+  influence code-body resolution across the metadata boundary.
+- Validation evidence: the regression suite fails because the reference
+  contract and typed input field are absent on the stacked base; 19 tests pass
+  after implementation for strict frozen JSON, typed mapping and round trips,
+  required kind, lowercase checksum, scalar/object validation, exact identity,
+  body-size and language boundaries, unknown-field rejection, and preservation
+  of unrelated diagnostic attributes. The complete provider-focused set passes
+  307, and the complete repository suite passes 1,403 in an isolated detached
+  worktree, followed by successful source compilation and diff validation.
+- Implemented fix: add a strict nested `ProviderCodeArtifactReference` under
+  artifact metadata, export it publicly, and declare it directly on
+  `ToolInputMetadata`. `to_params()` emits its validated dictionary while
+  invalid provider values fail before admission. The existing result projector
+  aliases the reference identity and artifact-size bounds instead of owning
+  duplicate numeric authorities.
+- Metadata impact note:
+  - Fact: body-free provider code-artifact lineage and integrity reference.
+  - Authoritative producer: the future runtime artifact ledger; consumers:
+    provider result projection, typed writer input, and the writer binding
+    adapter.
+  - Lifecycle: runtime-only nested value; control impact: artifact resolution
+    identity only, never permission, confirmation, scope, or completion.
+  - Existing contracts reviewed: `CodeArtifactMetadata`, `ToolInputMetadata`,
+    `ToolResultMetadata`, and checkpoint-owned `DurableArtifactReference`.
+  - Decision: strict nested value. The durable reference has a different owner
+    and lifecycle and lacks provider-call lineage; no duplicate code body or
+    persisted artifact source is introduced.
+  - Serialization and migration: strict Pydantic JSON; the optional field
+    defaults to `None`, preserving historical `ToolInputMetadata` reads.
+  - Tests and docs: nested-contract, input parsing, serialization, boundary,
+    and escape-hatch tests plus `API.md`, `Code/README.md`, catalog, and log.
+- Remaining limitation: provider schema/admission does not yet expose
+  `artifact_ref` as an alternative to `generated_unit`, and no ledger resolves
+  the reference into writer input in this slice.

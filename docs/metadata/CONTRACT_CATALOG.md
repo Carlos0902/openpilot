@@ -158,6 +158,11 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   `ProviderBudgetDiagnostic`, and reasoning enums. The future runner produces
   one result; downstream adapters consume it without treating diagnostics or
   message projections as a second completion, budget, or checkpoint authority.
+- `ProviderCodeArtifactReference` is a strict frozen artifact-lineage value
+  nested by `ToolInputMetadata.artifact_ref`. It carries explicit provider and
+  project call identity, checksum, bounded sizes, and language but no code body,
+  permission, approval, or write scope. It is not a `MetadataKind`; invalid
+  provider objects fail before admission instead of entering `attributes`.
 - `RuntimePromptContextSnapshot` is a strict value owned by
   `RuntimeCheckpointMetadata`. It binds the complete context request hash and
   rendered Prompt hash to the existing `ContextSelectionMetadata` and one

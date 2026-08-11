@@ -244,6 +244,12 @@ success facts before projection. Missing executions become a fixed typed batch
 abort; ordinary local result maps remain outside the provider batch. Typed
 recoverable errors and duplicate blocks retain their provider identity, and
 output order always follows the assistant response rather than execution order.
+`ToolInputMetadata.artifact_ref` is a strict
+`ProviderCodeArtifactReference`, not an untyped attribute. It requires explicit
+code-artifact kind, project/provider lineage, lowercase SHA-256, bounded
+byte/character counts, and language. Invalid, missing-kind, prefixed, uppercase,
+extra-field, or non-object references fail during typed tool-input construction
+before mutation admission or execution.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
