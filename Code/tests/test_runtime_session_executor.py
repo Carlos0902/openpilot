@@ -313,7 +313,7 @@ def test_runtime_session_enhanced_emits_durable_decomposition_and_task_cursors(t
     assert cursor_updates[0].stage == SessionStage.DECOMPOSITION_RECORDED
     assert cursor_updates[0].next_task_index == 0
     assert cursor_updates[-1].mode == "enhanced_ui"
-    assert cursor_updates[-1].stage == SessionStage.TASKS_EXECUTED
+    assert cursor_updates[-1].stage == SessionStage.COMPLETED
     assert cursor_updates[-1].next_task_index == 1
 
 

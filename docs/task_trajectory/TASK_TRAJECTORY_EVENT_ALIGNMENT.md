@@ -225,6 +225,14 @@ per-run event lock and reapplies the run projection when the event already
 exists, so a replacement process repairs an interrupted projection without
 appending a second completion event.
 
+The CRU-6 core handoff does not add a competing completion event. Its
+`CoreCompletionSourceReferences` point to the final checkpoint checksum,
+runtime-report artifact/state hash, `task_finished` event ID, task-result IDs,
+acceptance-decision IDs, and project-fingerprint hash. The unique package
+builder recomputes those identities; a mismatch returns no package. The final
+runtime result exposes the derived handoff/package build status, while the
+checkpoint, report and trajectory event remain authoritative.
+
 ### Future direction
 
 Only formalize this further if:

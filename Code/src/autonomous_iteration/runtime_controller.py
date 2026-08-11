@@ -15,6 +15,13 @@ from types import SimpleNamespace
 from typing import Any, Callable, Literal
 
 from autonomous_iteration.checkpoint_store import RuntimeCheckpointStore
+from autonomous_iteration.core_completion_handoff import (
+    compose_overall_success,
+    core_post_core_integration_enabled,
+    evaluate_core_completion_handoff,
+    runtime_state_source_hash,
+)
+from autonomous_iteration.core_completion_package import build_core_completion_package
 from autonomous_iteration.decomposition_policy import (
     DecompositionPolicyResolver,
     SingleTaskPlanBuilder,
@@ -166,13 +173,15 @@ def _project_improvement_policy(runtime: Any) -> ProjectImprovementPolicy:
         return ProjectImprovementPolicy(
             requirement=ProjectImprovementRequirement.DISABLED,
             source=ProjectImprovementPolicySource.LEGACY_CONFIG,
-            target_successes=0,
+            required_accepted_transactions=0,
+            max_accepted_transactions=0,
             max_attempts=0,
         )
     return ProjectImprovementPolicy(
         requirement=ProjectImprovementRequirement.REQUIRED,
         source=ProjectImprovementPolicySource.LEGACY_CONFIG,
-        target_successes=targets,
+        required_accepted_transactions=targets,
+        max_accepted_transactions=targets,
         max_attempts=max(
             targets,
             int(getattr(runtime, "max_iteration_attempts", targets) or targets),
@@ -1684,6 +1693,7 @@ class RuntimeReporter:
             diagnostic_conflicts=list(state.diagnostic_conflicts),
             diagnostic_risks=list(state.diagnostic_risks),
             diagnostic_decisions=list(state.diagnostic_decisions),
+            core_acceptance_decisions=list(state.core_acceptance_decisions),
             tool_history=list(state.tool_history),
             residual_risks=residual_risks,
         )
@@ -1960,7 +1970,9 @@ class _RuntimeSessionExecutor:
                     )
                 ),
             )
-            all_tasks_completed = all(t.status == TaskStatus.COMPLETED for t in decomposition.subtasks)
+            all_tasks_completed = bool(decomposition.subtasks) and all(
+                t.status == TaskStatus.COMPLETED for t in decomposition.subtasks
+            )
             stage_statuses["Execution"] = "completed" if all_tasks_completed else "failed"
             runtime.enhanced_ui.set_task_graph_state(
                 stage_statuses=stage_statuses,
@@ -2009,6 +2021,17 @@ class _RuntimeSessionExecutor:
                 success=success,
                 include_final_result=False,
                 execution_failure=execution_failure,
+            )
+            self._emit_cursor(
+                self._cursor(
+                    semantic=semantic,
+                    decomposition=decomposition,
+                    execution_order=execution_order,
+                    next_task_index=len(execution_order),
+                    results=results,
+                    decomposition_decision=decomposition_decision,
+                    mode="enhanced_ui",
+                ).model_copy(update={"stage": SessionStage.COMPLETED})
             )
             self._log(
                 "session_completed",
@@ -2481,7 +2504,9 @@ class _RuntimeSessionExecutor:
                     )
                 ),
             )
-            all_tasks_completed = all(t.status == TaskStatus.COMPLETED for t in decomposition.subtasks)
+            all_tasks_completed = bool(decomposition.subtasks) and all(
+                t.status == TaskStatus.COMPLETED for t in decomposition.subtasks
+            )
             readme_result, written_files, project_path, improvement_result = self._finalize_project_outputs(
                 goal,
                 results,
@@ -2515,6 +2540,17 @@ class _RuntimeSessionExecutor:
                 include_final_result=True,
                 final_result=final_result,
                 execution_failure=execution_failure,
+            )
+            self._emit_cursor(
+                self._cursor(
+                    semantic=semantic,
+                    decomposition=decomposition,
+                    execution_order=execution_order,
+                    next_task_index=len(execution_order),
+                    results=results,
+                    decomposition_decision=decomposition_decision,
+                    mode=session_mode,
+                ).model_copy(update={"stage": SessionStage.COMPLETED})
             )
             self._log(
                 "session_completed",
@@ -2602,7 +2638,12 @@ class _RuntimeSessionExecutor:
         ):
             written_files = runtime._collect_written_files(results)
             return None, written_files, None, None
-        readme_result = runtime._finalize_project_readme(goal, results) if all_tasks_completed else None
+        verified_handoff_lane = core_post_core_integration_enabled()
+        readme_result = (
+            runtime._finalize_project_readme(goal, results)
+            if all_tasks_completed and not verified_handoff_lane
+            else None
+        )
         written_files = runtime._collect_written_files(results)
         project_path = runtime._infer_project_path_from_files(goal, written_files) if written_files else None
         can_iterate = bool(all_tasks_completed and project_path and written_files)
@@ -2617,11 +2658,26 @@ class _RuntimeSessionExecutor:
                 "required_successful_improvements": getattr(runtime, "required_successful_improvements", None),
             },
             output_summary={
-                "will_attempt_iteration": can_iterate and improvement_policy.enabled,
+                "will_attempt_iteration": (
+                    can_iterate
+                    and improvement_policy.enabled
+                    and not verified_handoff_lane
+                ),
+                "verified_handoff_lane": verified_handoff_lane,
                 "project_improvement_policy": improvement_policy.model_dump(mode="json"),
             },
         )
-        if can_iterate and improvement_policy.enabled:
+        if not improvement_policy.enabled:
+            improvement_result = None
+            self._append_iteration_skip_note(
+                "Project improvement skipped: disabled by completion policy"
+            )
+        elif verified_handoff_lane:
+            improvement_result = None
+            self._append_iteration_skip_note(
+                "Project improvement deferred: verified core handoff requires the integration builder"
+            )
+        elif can_iterate:
             try:
                 runtime_controller = getattr(runtime, "runtime_controller", None)
                 runtime_state = getattr(runtime_controller, "state", None)
@@ -2647,10 +2703,9 @@ class _RuntimeSessionExecutor:
                 self._append_iteration_skip_note("Project improvement skipped: disabled or 0 iterations selected")
         else:
             improvement_result = None
-            if not improvement_policy.enabled:
-                self._append_iteration_skip_note("Project improvement skipped: disabled by completion policy")
-            else:
-                self._append_iteration_skip_note(self._iteration_skip_reason(all_tasks_completed, written_files, project_path))
+            self._append_iteration_skip_note(
+                self._iteration_skip_reason(all_tasks_completed, written_files, project_path)
+            )
         return readme_result, written_files, project_path, improvement_result
 
     def _iteration_skip_reason(
@@ -2690,7 +2745,9 @@ class _RuntimeSessionExecutor:
 
     def _update_stats(self, decomposition: Any, improvement_result: dict[str, Any] | None) -> tuple[bool, str | None]:
         runtime = self.runtime
-        core_success = all(t.status == TaskStatus.COMPLETED for t in decomposition.subtasks)
+        core_success = bool(decomposition.subtasks) and all(
+            t.status == TaskStatus.COMPLETED for t in decomposition.subtasks
+        )
         success = core_success
         iteration_error_msg = None
         if improvement_result is not None and not improvement_result.get("success", False):
@@ -2884,7 +2941,7 @@ class _RuntimeSessionExecutor:
             "core_success": (
                 None
                 if evidence_only
-                else all(
+                else bool(decomposition.subtasks) and all(
                     getattr(task, "status", None) == TaskStatus.COMPLETED
                     for task in decomposition.subtasks
                 )
@@ -3144,7 +3201,8 @@ class AgentRuntimeController:
         if raw_task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE:
             improvement_policy = ProjectImprovementPolicy(
                 requirement=ProjectImprovementRequirement.DISABLED,
-                target_successes=0,
+                required_accepted_transactions=0,
+                max_accepted_transactions=0,
                 max_attempts=0,
             )
         state = RuntimeStateMetadata(
@@ -5345,7 +5403,12 @@ class AgentRuntimeController:
         previous_phase = _phase_value(state.phase)
         previous_verification_status = str(state.verification_status or "")
         success = bool(result.get("success"))
-        core_success = bool(result.get("core_success", success))
+        raw_core_success = result.get("core_success")
+        core_success = (
+            raw_core_success is True
+            if core_post_core_integration_enabled()
+            else bool(success if raw_core_success is None else raw_core_success)
+        )
         evidence_only = state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
         state.core_success = None if evidence_only else core_success
         status = result.get("project_improvement_status")
@@ -5387,23 +5450,7 @@ class AgentRuntimeController:
     @staticmethod
     def _report_source_hash(state: RuntimeStateMetadata) -> str:
         """Hash task outcome facts while excluding resume bookkeeping."""
-        payload = state.to_json_dict()
-        for field_name in (
-            "recovery_status",
-            "recovery_reason_code",
-            "active_resume_attempt_id",
-        ):
-            payload.pop(field_name, None)
-        budget = payload.get("budget")
-        if isinstance(budget, dict):
-            budget.pop("recovery_rounds_used", None)
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        return runtime_state_source_hash(state)
 
     def _inject_finalization_fault(
         self,
@@ -5426,6 +5473,7 @@ class AgentRuntimeController:
             reason=reason,
             safe_boundary=boundary,
             finalization_cursor=cursor,
+            target_files=list(state.modified_files),
         ):
             raise RuntimeError(f"finalization checkpoint is not durable: {boundary.value}")
 
@@ -5666,8 +5714,37 @@ class AgentRuntimeController:
                 },
                 session_id=str(getattr(self.runtime, "session_id", "") or ""),
             )
+        integration_enabled = core_post_core_integration_enabled()
+        package_build = (
+            build_core_completion_package(
+                checkpoint=self._last_persisted_checkpoint,
+                report=report,
+            )
+            if integration_enabled
+            else None
+        )
+        handoff = (
+            package_build.handoff
+            if package_build is not None
+            else evaluate_core_completion_handoff(
+                checkpoint=self._last_persisted_checkpoint,
+                report=report,
+            )
+        )
+        if integration_enabled:
+            overall_success = compose_overall_success(
+                core_success=state.core_success is True,
+                policy=state.project_improvement_policy,
+                improvement_status=state.project_improvement_status,
+            )
+        else:
+            overall_success = bool(session_result.get("success"))
         result = {
-            "success": bool(session_result.get("success")),
+            "success": overall_success,
+            "overall_success": overall_success,
+            "core_success": state.core_success,
+            "project_improvement_status": state.project_improvement_status,
+            "core_completion_handoff": handoff.model_dump(mode="json"),
             "goal": state.goal,
             "agent_runtime_state": state.to_json_dict(),
             "runtime_report": report.to_json_dict(),
@@ -5680,6 +5757,10 @@ class AgentRuntimeController:
                 else {}
             ),
         }
+        if package_build is not None:
+            result["core_completion_package_build"] = package_build.model_dump(mode="json")
+            if package_build.package is not None:
+                result["core_completion_package"] = package_build.package.model_dump(mode="json")
         for key in (
             "failure_reason",
             "failure_stage",

@@ -114,21 +114,23 @@ class ProjectIterationHelper:
             policy = ProjectImprovementPolicy(
                 requirement=ProjectImprovementRequirement.DISABLED,
                 source=ProjectImprovementPolicySource.USER_SELECTED,
-                target_successes=0,
+                required_accepted_transactions=0,
+                max_accepted_transactions=0,
                 max_attempts=0,
             )
         else:
             policy = ProjectImprovementPolicy(
                 requirement=ProjectImprovementRequirement.REQUIRED,
                 source=ProjectImprovementPolicySource.USER_SELECTED,
-                target_successes=iterations,
+                required_accepted_transactions=iterations,
+                max_accepted_transactions=iterations,
                 max_attempts=attempts,
             )
         autopilot.project_improvement_policy = policy
-        autopilot.required_successful_improvements = policy.target_successes
+        autopilot.required_successful_improvements = policy.max_accepted_transactions
         autopilot.enable_iterative_improvement = policy.enabled
         autopilot.max_iteration_attempts = policy.max_attempts
-        autopilot.iterative_improvement.required_successful_improvements = policy.target_successes
+        autopilot.iterative_improvement.required_successful_improvements = policy.max_accepted_transactions
         autopilot.iterative_improvement.max_iteration_attempts = policy.max_attempts
         if autopilot.enhanced_ui:
             autopilot.enhanced_ui.log_activity(

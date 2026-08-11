@@ -85,7 +85,8 @@ def execute_response_evidence_task(
         project_improvement_policy=ProjectImprovementPolicy(
             requirement=ProjectImprovementRequirement.DISABLED,
             source=project_improvement_policy.source,
-            target_successes=0,
+            required_accepted_transactions=0,
+            max_accepted_transactions=0,
             max_attempts=0,
         ),
         runtime_diagnostics_hooks=diagnostics_hooks,

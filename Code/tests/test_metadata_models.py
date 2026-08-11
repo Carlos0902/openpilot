@@ -101,7 +101,6 @@ from metadata import (
     ToolResultMetadata,
     VerificationCommandSpec,
     VerificationPlanMetadata,
-    VerificationStatus,
     ValidationIssueMetadata,
     WarningCheckResultMetadata,
     WarningItemMetadata,
@@ -116,8 +115,10 @@ def test_project_improvement_policy_has_one_typed_completion_authority() -> None
 
     assert automatic.requirement == ProjectImprovementRequirement.OPTIONAL
     assert automatic.source == ProjectImprovementPolicySource.AUTOMATIC_DEFAULT
-    assert automatic.target_successes == 2
-    assert automatic.max_attempts == 4
+    assert automatic.target_successes == 1
+    assert automatic.required_accepted_transactions == 0
+    assert automatic.max_accepted_transactions == 1
+    assert automatic.max_attempts == 1
     assert automatic.enabled is True
     assert automatic.controls_top_level_success is False
     assert ProjectImprovementPolicy.model_validate_json(automatic.model_dump_json()) == automatic

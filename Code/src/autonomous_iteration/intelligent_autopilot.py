@@ -155,7 +155,8 @@ class IntelligentAutopilot:
                 project_improvement_policy = ProjectImprovementPolicy(
                     requirement=ProjectImprovementRequirement.DISABLED,
                     source=ProjectImprovementPolicySource.LEGACY_CONFIG,
-                    target_successes=0,
+                    required_accepted_transactions=0,
+                    max_accepted_transactions=0,
                     max_attempts=0,
                 )
             else:
@@ -164,9 +165,14 @@ class IntelligentAutopilot:
                     and required_successful_improvements == 2
                     and max_iteration_attempts == 4
                 )
-                target_attempts = max(
-                    max_iteration_attempts,
-                    AutonomousIterationAgent.minimum_attempt_budget(required_successful_improvements),
+                accepted_target = 1 if is_automatic_default else required_successful_improvements
+                target_attempts = (
+                    1
+                    if is_automatic_default
+                    else max(
+                        max_iteration_attempts,
+                        AutonomousIterationAgent.minimum_attempt_budget(accepted_target),
+                    )
                 )
                 project_improvement_policy = ProjectImprovementPolicy(
                     requirement=(
@@ -179,12 +185,15 @@ class IntelligentAutopilot:
                         if is_automatic_default
                         else ProjectImprovementPolicySource.LEGACY_CONFIG
                     ),
-                    target_successes=required_successful_improvements,
+                    required_accepted_transactions=(
+                        0 if is_automatic_default else accepted_target
+                    ),
+                    max_accepted_transactions=accepted_target,
                     max_attempts=target_attempts,
                 )
         self.project_improvement_policy = project_improvement_policy
         self.enable_iterative_improvement = project_improvement_policy.enabled
-        self.required_successful_improvements = project_improvement_policy.target_successes
+        self.required_successful_improvements = project_improvement_policy.max_accepted_transactions
         self.max_iteration_attempts = project_improvement_policy.max_attempts
         self.prompt_for_project_improvement_iterations = prompt_for_project_improvement_iterations
         self.allow_reference_search = allow_reference_search

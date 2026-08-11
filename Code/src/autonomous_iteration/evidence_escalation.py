@@ -397,7 +397,8 @@ class EvidenceEscalationController:
             verification_status="not_required",
             project_improvement_policy=ProjectImprovementPolicy(
                 requirement=ProjectImprovementRequirement.DISABLED,
-                target_successes=0,
+                required_accepted_transactions=0,
+                max_accepted_transactions=0,
                 max_attempts=0,
             ),
             session_constraints=current_ingress.session_constraints,

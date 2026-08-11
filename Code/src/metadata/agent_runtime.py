@@ -527,6 +527,106 @@ class ProjectImprovementStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    REVIEWING = "reviewing"
+    PLANNED = "planned"
+    EXECUTING = "executing"
+    VALIDATING = "validating"
+    VALUE_EVALUATING = "value_evaluating"
+    ROLLING_BACK = "rolling_back"
+    ACCEPTED = "accepted"
+    NO_WORTHWHILE_IMPROVEMENT = "no_worthwhile_improvement"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    NEUTRAL = "neutral"
+    NEGATIVE = "negative"
+    INCONCLUSIVE = "inconclusive"
+    ROLLED_BACK = "rolled_back"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+
+
+class CoreAcceptanceStatus(str, Enum):
+    """Typed disposition for one active root acceptance requirement."""
+
+    PASSED = "passed"
+    WAIVED = "waived"
+    UNSATISFIED = "unsatisfied"
+
+
+class CoreAcceptanceAuthority(str, Enum):
+    """Authority that established an acceptance disposition."""
+
+    RUNTIME_VERIFICATION = "runtime_verification"
+    USER = "user"
+    GOAL_POLICY = "goal_policy"
+
+
+class CoreAcceptanceWaiverReason(str, Enum):
+    """Bounded reasons that may lawfully waive root acceptance."""
+
+    USER_EXPLICITLY_WAIVED = "user_explicitly_waived"
+    GOAL_POLICY_WAIVED = "goal_policy_waived"
+
+
+class CoreAcceptanceDecision(BaseModel):
+    """Source-linked core decision for one active acceptance constraint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    acceptance_id: str = Field(min_length=1)
+    status: CoreAcceptanceStatus
+    authority: CoreAcceptanceAuthority
+    source_ref: str = Field(min_length=1, max_length=512)
+    evidence_refs: tuple[str, ...] = Field(default=(), max_length=32)
+    waiver_reason_code: CoreAcceptanceWaiverReason | None = None
+
+    @model_validator(mode="after")
+    def _decision_has_required_authority_and_evidence(self) -> "CoreAcceptanceDecision":
+        if any(not item.strip() or len(item) > 512 for item in self.evidence_refs):
+            raise ValueError("core acceptance evidence references must be non-empty and bounded")
+        if self.status == CoreAcceptanceStatus.PASSED:
+            if not self.evidence_refs:
+                raise ValueError("passed core acceptance requires evidence")
+            if self.waiver_reason_code is not None:
+                raise ValueError("passed core acceptance cannot have a waiver reason")
+        elif self.status == CoreAcceptanceStatus.WAIVED:
+            if self.authority not in {
+                CoreAcceptanceAuthority.USER,
+                CoreAcceptanceAuthority.GOAL_POLICY,
+            }:
+                raise ValueError("core acceptance waiver authority is invalid")
+            if self.waiver_reason_code is None:
+                raise ValueError("waived core acceptance requires a reason code")
+        elif self.waiver_reason_code is not None:
+            raise ValueError("unsatisfied core acceptance cannot have a waiver reason")
+        return self
+
+
+class CoreCompletionReadinessReason(str, Enum):
+    """Non-compensating result of validating core completion source owners."""
+
+    READY = "ready"
+    SOURCES_UNAVAILABLE = "sources_unavailable"
+    NOT_PROJECT_TASK = "not_project_task"
+    CORE_INCOMPLETE = "core_incomplete"
+    EMPTY_TASK_PLAN = "empty_task_plan"
+    TASK_RESULTS_INCOMPLETE = "task_results_incomplete"
+    VERIFICATION_INCOMPLETE = "verification_incomplete"
+    ACCEPTANCE_UNRESOLVED = "acceptance_unresolved"
+    SIDE_EFFECT_UNRESOLVED = "side_effect_unresolved"
+    FINALIZATION_INCOMPLETE = "finalization_incomplete"
+    REPORT_SOURCE_MISMATCH = "report_source_mismatch"
+    PROJECT_IDENTITY_INCOMPLETE = "project_identity_incomplete"
+    ENVIRONMENT_IDENTITY_INCOMPLETE = "environment_identity_incomplete"
+    BLOCKING_RESIDUAL_RISK = "blocking_residual_risk"
+    SOURCE_BOUNDS_EXCEEDED = "source_bounds_exceeded"
+
+
+class PostCoreEligibilityReason(str, Enum):
+    """Reason a ready core result is or is not eligible for post-core."""
+
+    ELIGIBLE = "eligible"
+    CORE_NOT_READY = "core_not_ready"
+    POLICY_DISABLED = "policy_disabled"
+    READ_ONLY_OR_NO_OUTPUT = "read_only_or_no_output"
 
 
 class ProjectImprovementPolicy(BaseModel):
@@ -536,19 +636,97 @@ class ProjectImprovementPolicy(BaseModel):
 
     requirement: ProjectImprovementRequirement = ProjectImprovementRequirement.OPTIONAL
     source: ProjectImprovementPolicySource = ProjectImprovementPolicySource.AUTOMATIC_DEFAULT
-    target_successes: int = Field(default=2, ge=0)
-    max_attempts: int = Field(default=4, ge=0)
+    target_successes: StrictInt = Field(default=1, ge=0)
+    required_accepted_transactions: StrictInt = Field(default=0, ge=0)
+    max_accepted_transactions: StrictInt = Field(default=1, ge=0)
+    max_attempts: StrictInt = Field(default=1, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_policy_counts(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        requirement = str(
+            getattr(
+                migrated.get("requirement", ProjectImprovementRequirement.OPTIONAL),
+                "value",
+                migrated.get("requirement", ProjectImprovementRequirement.OPTIONAL),
+            )
+        )
+        has_legacy = "target_successes" in migrated
+        has_required = "required_accepted_transactions" in migrated
+        has_maximum = "max_accepted_transactions" in migrated
+        count_fields = (
+            "target_successes",
+            "required_accepted_transactions",
+            "max_accepted_transactions",
+            "max_attempts",
+        )
+        if any(
+            field in migrated
+            and (
+                isinstance(migrated[field], bool)
+                or not isinstance(migrated[field], int)
+            )
+            for field in count_fields
+        ):
+            raise ValueError("project improvement policy counts require literal integers")
+        if has_required != has_maximum:
+            raise ValueError("policy_count_conflict: both new accepted-transaction counts are required")
+        if has_required:
+            maximum = migrated["max_accepted_transactions"]
+            if has_legacy and migrated["target_successes"] != maximum:
+                raise ValueError("policy_count_conflict: target_successes differs from max_accepted_transactions")
+            migrated["target_successes"] = maximum
+        elif has_legacy:
+            maximum = migrated["target_successes"]
+            migrated["required_accepted_transactions"] = (
+                maximum
+                if requirement == ProjectImprovementRequirement.REQUIRED.value
+                else 0
+            )
+            migrated["max_accepted_transactions"] = maximum
+        else:
+            if requirement == ProjectImprovementRequirement.DISABLED.value:
+                required, maximum = 0, 0
+            elif requirement == ProjectImprovementRequirement.REQUIRED.value:
+                required, maximum = 1, 1
+            else:
+                required, maximum = 0, 1
+            migrated["required_accepted_transactions"] = required
+            migrated["max_accepted_transactions"] = maximum
+            migrated["target_successes"] = maximum
+        if "max_attempts" not in migrated:
+            migrated["max_attempts"] = migrated["max_accepted_transactions"]
+        return migrated
 
     @model_validator(mode="after")
     def _counts_match_requirement(self) -> "ProjectImprovementPolicy":
         if self.requirement == ProjectImprovementRequirement.DISABLED:
-            if self.target_successes != 0 or self.max_attempts != 0:
-                raise ValueError("disabled project improvement requires zero targets and attempts")
+            if any(
+                (
+                    self.required_accepted_transactions,
+                    self.max_accepted_transactions,
+                    self.max_attempts,
+                    self.target_successes,
+                )
+            ):
+                raise ValueError("disabled project improvement requires zero counts and attempts")
             return self
-        if self.target_successes <= 0:
-            raise ValueError("enabled project improvement requires at least one target success")
-        if self.max_attempts < self.target_successes:
-            raise ValueError("max_attempts must be at least target_successes")
+        if self.requirement == ProjectImprovementRequirement.OPTIONAL:
+            if self.required_accepted_transactions != 0:
+                raise ValueError("optional project improvement requires zero hard accepted transactions")
+        elif self.required_accepted_transactions <= 0:
+            raise ValueError("required project improvement requires at least one accepted transaction")
+        if self.max_accepted_transactions <= 0:
+            raise ValueError("enabled project improvement requires at least one allowed accepted transaction")
+        if self.max_accepted_transactions < self.required_accepted_transactions:
+            raise ValueError("max accepted transactions must be at least required accepted transactions")
+        if self.max_attempts < self.max_accepted_transactions:
+            raise ValueError("max_attempts must be at least max_accepted_transactions")
+        if self.target_successes != self.max_accepted_transactions:
+            raise ValueError("policy_count_conflict: legacy target must match max accepted transactions")
         return self
 
     @property
@@ -2330,6 +2508,10 @@ class RuntimeStateMetadata(MetadataBase):
         default=None,
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
+    core_acceptance_decisions: list[CoreAcceptanceDecision] = Field(
+        default_factory=list,
+        max_length=64,
+    )
     verification_status: VerificationStatus = VerificationStatus.NOT_STARTED
     risk_level: str = "low"
     core_success: bool | None = None
@@ -2404,6 +2586,9 @@ class RuntimeStateMetadata(MetadataBase):
                 )
         elif self.diagnostic_progress_signature is not None:
             raise ValueError("diagnostic progress signature requires decision history")
+        acceptance_ids = [item.acceptance_id for item in self.core_acceptance_decisions]
+        if len(acceptance_ids) != len(set(acceptance_ids)):
+            raise ValueError("core acceptance decision IDs must be unique")
         return self
 
     def add_fact(self, fact: str) -> None:
@@ -2759,6 +2944,168 @@ class DurableArtifactReference(BaseModel):
     kind: str
     integrity_checksum: str
     bytes: int = Field(ge=0)
+
+
+class CoreCompletionSourceReferences(BaseModel):
+    """Bounded references to authoritative core completion sources."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(min_length=1)
+    root_task_id: str = Field(min_length=1)
+    checkpoint_id: str = Field(min_length=1)
+    checkpoint_checksum: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    runtime_state_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    report_artifact: DurableArtifactReference
+    run_finalized_event_id: str = Field(min_length=1)
+    project_fingerprint_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    task_result_ids: tuple[str, ...] = Field(min_length=1, max_length=256)
+    acceptance_decision_ids: tuple[str, ...] = Field(default=(), max_length=64)
+    modified_files: tuple[str, ...] = Field(default=(), max_length=512)
+
+    @model_validator(mode="after")
+    def _references_are_non_empty_and_bounded(self) -> "CoreCompletionSourceReferences":
+        values = (
+            *self.task_result_ids,
+            *self.acceptance_decision_ids,
+            *self.modified_files,
+        )
+        if any(not item.strip() or len(item) > 4096 for item in values):
+            raise ValueError("core completion source identifiers must be non-empty and bounded")
+        return self
+
+
+class CoreCompletionHandoffView(BaseModel):
+    """Read-only core source readiness and separate post-core eligibility."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    schema_version: Literal["cru-6-core-source-v1"] = "cru-6-core-source-v1"
+    ready: StrictBool
+    readiness_reason: CoreCompletionReadinessReason
+    post_core_eligible: StrictBool
+    eligibility_reason: PostCoreEligibilityReason
+    source_references: CoreCompletionSourceReferences | None = None
+
+    @model_validator(mode="after")
+    def _status_matches_references(self) -> "CoreCompletionHandoffView":
+        if self.ready != (self.readiness_reason == CoreCompletionReadinessReason.READY):
+            raise ValueError("core readiness boolean and reason disagree")
+        if self.ready != (self.source_references is not None):
+            raise ValueError("ready core handoff requires complete source references")
+        if self.post_core_eligible and not self.ready:
+            raise ValueError("post-core eligibility requires ready core sources")
+        if self.post_core_eligible != (
+            self.eligibility_reason == PostCoreEligibilityReason.ELIGIBLE
+        ):
+            raise ValueError("post-core eligibility boolean and reason disagree")
+        if not self.ready and self.eligibility_reason != PostCoreEligibilityReason.CORE_NOT_READY:
+            raise ValueError("unready core sources require core_not_ready eligibility")
+        return self
+
+
+class CoreCompletionPackageBuildStatus(str, Enum):
+    """Outcome of the unique derived package builder."""
+
+    BUILT = "built"
+    CORE_NOT_READY = "core_not_ready"
+    POST_CORE_INELIGIBLE = "post_core_ineligible"
+    SOURCE_PROJECTION_INVALID = "source_projection_invalid"
+
+
+class CoreCompletionBudgetSummary(BaseModel):
+    """Bounded core usage projection; RuntimeBudget remains authoritative."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_calls_used: int = Field(ge=0)
+    file_reads_used: int = Field(ge=0)
+    file_edits_used: int = Field(ge=0)
+    file_creates_used: int = Field(ge=0)
+    verification_attempts_used: int = Field(ge=0)
+    recovery_rounds_used: int = Field(ge=0)
+    replan_rounds_used: int = Field(ge=0)
+    provider_completion_tokens_used: int = Field(ge=0)
+
+
+class CoreCompletionPackageView(BaseModel):
+    """Unique read-only package consumed by post-core admission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    schema_version: Literal["core-completion-package-v1"] = "core-completion-package-v1"
+    package_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    ready: Literal[True] = True
+    post_core_eligible: Literal[True] = True
+    source_references: CoreCompletionSourceReferences
+    goal: str = Field(min_length=1, max_length=4000)
+    execution_mode: Literal[RuntimeExecutionMode.MUTATION_ALLOWED] = (
+        RuntimeExecutionMode.MUTATION_ALLOWED
+    )
+    verification_status: Literal[
+        VerificationStatus.PASSED,
+        VerificationStatus.NOT_REQUIRED,
+    ]
+    project_root: str = Field(min_length=1, max_length=4096)
+    environment_id: str | None = Field(default=None, min_length=1, max_length=512)
+    covered_task_ids: tuple[str, ...] = Field(min_length=1, max_length=256)
+    modified_files: tuple[str, ...] = Field(min_length=1, max_length=512)
+    acceptance_decision_ids: tuple[str, ...] = Field(default=(), max_length=64)
+    verification_commands: tuple[str, ...] = Field(default=(), max_length=64)
+    diagnostic_decision_ids: tuple[str, ...] = Field(default=(), max_length=128)
+    budget_summary: CoreCompletionBudgetSummary
+
+    @model_validator(mode="after")
+    def _package_is_source_linked_and_content_addressed(self) -> "CoreCompletionPackageView":
+        if self.covered_task_ids != self.source_references.task_result_ids:
+            raise ValueError("package task IDs differ from core source references")
+        if self.modified_files != self.source_references.modified_files:
+            raise ValueError("package modified files differ from core source references")
+        if self.acceptance_decision_ids != self.source_references.acceptance_decision_ids:
+            raise ValueError("package acceptance IDs differ from core source references")
+        projected_values = (
+            *self.verification_commands,
+            *self.diagnostic_decision_ids,
+        )
+        if any(not item.strip() or len(item) > 4096 for item in projected_values):
+            raise ValueError("package source projections must be non-empty and bounded")
+        payload = self.model_dump(mode="json", exclude={"package_id"})
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        expected = "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        if self.package_id != expected:
+            raise ValueError("core completion package checksum mismatch")
+        return self
+
+
+class CoreCompletionPackageBuildResult(BaseModel):
+    """Typed fail-closed result from the unique package builder."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    status: CoreCompletionPackageBuildStatus
+    handoff: CoreCompletionHandoffView
+    package: CoreCompletionPackageView | None = None
+
+    @model_validator(mode="after")
+    def _status_matches_package_and_handoff(self) -> "CoreCompletionPackageBuildResult":
+        if self.status == CoreCompletionPackageBuildStatus.BUILT:
+            if self.package is None or not self.handoff.post_core_eligible:
+                raise ValueError("built package requires eligible core handoff")
+            if self.package.source_references != self.handoff.source_references:
+                raise ValueError("built package source references differ from handoff")
+        elif self.package is not None:
+            raise ValueError("non-built package result cannot contain a package")
+        if self.status == CoreCompletionPackageBuildStatus.CORE_NOT_READY and self.handoff.ready:
+            raise ValueError("core_not_ready result requires unready handoff")
+        if self.status == CoreCompletionPackageBuildStatus.POST_CORE_INELIGIBLE and (
+            not self.handoff.ready or self.handoff.post_core_eligible
+        ):
+            raise ValueError("post_core_ineligible result requires ready ineligible handoff")
+        if self.status == CoreCompletionPackageBuildStatus.SOURCE_PROJECTION_INVALID and (
+            not self.handoff.post_core_eligible
+        ):
+            raise ValueError("source_projection_invalid requires eligible source facts")
+        return self
 
 
 class ContextCompactionBinding(BaseModel):
@@ -3120,5 +3467,6 @@ class RuntimeReportMetadata(MetadataBase):
     diagnostic_conflicts: list[ActiveDiagnosticConflict] = Field(default_factory=list)
     diagnostic_risks: list[ActiveDiagnosticRisk] = Field(default_factory=list)
     diagnostic_decisions: list[ActiveDiagnosticDecision] = Field(default_factory=list)
+    core_acceptance_decisions: list[CoreAcceptanceDecision] = Field(default_factory=list)
     tool_history: list[dict[str, JsonValue]] = Field(default_factory=list)
     residual_risks: list[str] = Field(default_factory=list)

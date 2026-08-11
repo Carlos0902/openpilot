@@ -11,6 +11,7 @@ from autonomous_iteration.project_improvement_runtime import ProjectImprovementR
 from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
 from autonomous_iteration.models import EvaluationResult
 from autonomous_iteration.runtime_controller import AgentRuntimeController, _RuntimeSessionExecutor
+from autonomous_iteration.core_completion_handoff import compose_overall_success
 from autonomous_iteration.task_models import Task, TaskDecompositionResult, TaskExecutionResult, TaskStatus
 from core.exceptions import ContextAssemblyBudgetError, OpenPilotError
 from metadata import (
@@ -18,6 +19,8 @@ from metadata import (
     FailureMetadata,
     ResultStatus,
     RuntimeStateMetadata,
+    ProjectImprovementPolicy,
+    ProjectImprovementStatus,
     ToolExecutionEnvelopeMetadata,
     ToolInputMetadata,
     ToolResultMetadata,
@@ -454,3 +457,131 @@ def test_required_improvement_failure_is_preserved_in_result_and_runtime_state(t
     assert state.core_success is True
     assert state.project_improvement_status == "interrupted"
     assert state.completion_reason == result["failure_reason"]
+
+
+def test_new_automatic_policy_uses_zero_hard_one_accepted_one_attempt() -> None:
+    policy = ProjectImprovementPolicy()
+
+    assert policy.requirement == "optional"
+    assert policy.source == "automatic_default"
+    assert policy.required_accepted_transactions == 0
+    assert policy.max_accepted_transactions == 1
+    assert policy.max_attempts == 1
+    assert policy.target_successes == 1
+
+
+@pytest.mark.parametrize(
+    ("payload", "required", "maximum", "attempts"),
+    [
+        (
+            {
+                "requirement": "optional",
+                "source": "automatic_default",
+                "target_successes": 2,
+                "max_attempts": 4,
+            },
+            0,
+            2,
+            4,
+        ),
+        (
+            {
+                "requirement": "required",
+                "source": "user_selected",
+                "target_successes": 2,
+                "max_attempts": 4,
+            },
+            2,
+            2,
+            4,
+        ),
+        (
+            {
+                "requirement": "disabled",
+                "source": "runtime_config",
+                "target_successes": 0,
+                "max_attempts": 0,
+            },
+            0,
+            0,
+            0,
+        ),
+    ],
+)
+def test_legacy_policy_counts_migrate_source_sensitively(
+    payload: dict[str, object],
+    required: int,
+    maximum: int,
+    attempts: int,
+) -> None:
+    policy = ProjectImprovementPolicy.model_validate(payload)
+
+    assert policy.required_accepted_transactions == required
+    assert policy.max_accepted_transactions == maximum
+    assert policy.max_attempts == attempts
+    assert policy.target_successes == maximum
+
+
+def test_new_and_legacy_policy_count_conflicts_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="policy_count_conflict"):
+        ProjectImprovementPolicy(
+            requirement="optional",
+            target_successes=2,
+            required_accepted_transactions=0,
+            max_accepted_transactions=1,
+            max_attempts=2,
+        )
+    with pytest.raises(ValidationError, match="optional project improvement requires zero"):
+        ProjectImprovementPolicy(
+            requirement="optional",
+            required_accepted_transactions=1,
+            max_accepted_transactions=1,
+            max_attempts=1,
+        )
+    with pytest.raises(ValidationError, match="at least required"):
+        ProjectImprovementPolicy(
+            requirement="required",
+            required_accepted_transactions=2,
+            max_accepted_transactions=1,
+            max_attempts=2,
+        )
+    with pytest.raises(ValidationError, match="literal integers"):
+        ProjectImprovementPolicy(
+            requirement="optional",
+            required_accepted_transactions=False,
+            max_accepted_transactions=True,
+            max_attempts=1,
+        )
+
+
+def test_new_stage_statuses_round_trip_and_accepted_satisfies_required_policy() -> None:
+    adapter = TypeAdapter(ProjectImprovementStatus)
+    expected = {
+        "reviewing",
+        "planned",
+        "executing",
+        "validating",
+        "value_evaluating",
+        "rolling_back",
+        "accepted",
+        "no_worthwhile_improvement",
+        "attempts_exhausted",
+        "neutral",
+        "negative",
+        "inconclusive",
+        "rolled_back",
+        "reconciliation_required",
+    }
+
+    assert {adapter.validate_python(value).value for value in expected} == expected
+    policy = ProjectImprovementPolicy(
+        requirement="required",
+        required_accepted_transactions=1,
+        max_accepted_transactions=1,
+        max_attempts=1,
+    )
+    assert compose_overall_success(
+        core_success=True,
+        policy=policy,
+        improvement_status=ProjectImprovementStatus.ACCEPTED,
+    ) is True
