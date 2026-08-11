@@ -117,6 +117,9 @@ fixed retryable batch abort without consuming ordinary local result maps.
 Provider code-artifact references are parsed as a strict frozen
 `ToolInputMetadata.artifact_ref` value. They never fall through to the generic
 attributes escape hatch and contain no generated-code body.
+The patch-writer provider schema exposes that typed reference as an `add_symbol`
+alternative to inline generated code. All existing mutation permission, scope,
+budget, confirmation, and validation gates remain unchanged.
 The code-artifact ledger separately owns bounded generated-code bodies for one
 runtime. Its frozen reference binds source and provider call IDs, checksum,
 sizes, and language; exact re-registration is idempotent, while lineage rebinds

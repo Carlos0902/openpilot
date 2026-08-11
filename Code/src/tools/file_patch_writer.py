@@ -29,7 +29,10 @@ FILE_PATCH_WRITER_DEFINITION = ToolDefinition(
         required_input_fields=["file_path"],
         input_defaults={"encoding": "utf-8", "operation_kind": "modify_symbol"},
         conditional_requirements=[
-            {"when": {"operation_kind": "add_symbol"}, "required": ["generated_unit"]},
+            {
+                "when": {"operation_kind": "add_symbol"},
+                "required_any_of": [["generated_unit"], ["artifact_ref"]],
+            },
             {"when": {"operation_kind": "modify_symbol"}, "required_any_of": [["replacement_text"], ["patch"]]},
         ],
     ),

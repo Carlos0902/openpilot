@@ -3114,3 +3114,27 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the patch-writer admission adapter does not yet resolve
   the authorized reference into generated code, and provider rounds are not yet
   orchestrated end to end.
+
+### Patch-writer artifact-reference contract admission
+
+- Observed failure: `ToolInputMetadata` could parse a strict artifact reference,
+  but the registered `file_patch_writer` contract still required inline
+  `generated_unit` for `add_symbol`. Provider schema projection omitted
+  `artifact_ref`, and mutation admission rejected the safe handoff before a
+  resolver could run.
+- Validation evidence: the regression tests fail on the stacked base because
+  the schema lacks `artifact_ref` and admission reports missing
+  `generated_unit`; 12 tests pass after implementation for object-schema
+  projection, exact add-symbol alternatives, typed admission, inline backward
+  compatibility, missing-input and malformed-reference rejection, no execution,
+  and independent confirmation, opt-in, scope, and validation boundaries.
+  The complete provider-focused set passes 356, and the complete repository
+  suite passes 1,452 in an isolated detached worktree, followed by successful
+  source compilation and diff validation.
+- Implemented fix: change only the `add_symbol` conditional contract from one
+  required inline field to a typed `generated_unit`/`artifact_ref` alternative.
+  Existing definition projection and contract admission enforce it without
+  resolving a body or changing any mutation authority.
+- Remaining limitation: admitted references are not yet resolved into verified
+  `generated_unit`, post-processing scope is not bound here, and no tool is
+  executed in this slice.

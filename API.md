@@ -250,6 +250,12 @@ code-artifact kind, project/provider lineage, lowercase SHA-256, bounded
 byte/character counts, and language. Invalid, missing-kind, prefixed, uppercase,
 extra-field, or non-object references fail during typed tool-input construction
 before mutation admission or execution.
+The provider-visible `file_patch_writer` contract accepts a typed
+`artifact_ref` as an alternative to inline `generated_unit` only for
+`operation_kind=add_symbol`. This changes the admitted body source, not mutation
+authority: literal opt-in, explicit confirmation, exact write scope, budget,
+and task-owned validation requirements remain mandatory and are checked before
+selection; admission still performs no artifact resolution or execution.
 Provider code-artifact handoff uses a strict frozen runtime reference containing
 explicit `code_artifact` kind, project/provider lineage, SHA-256 checksum,
 byte/character counts, and language. A bounded ledger stores at most 1,024
