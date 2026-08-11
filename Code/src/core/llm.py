@@ -676,6 +676,7 @@ class LLMClient:
         created = None
         usage: Any = None
         hidden_reasoning_fields: dict[str, int] = {}
+        reasoning_parts: list[str] = []
 
         for chunk in stream:
             if wall_clock_timeout is not None and time.monotonic() - started_at >= wall_clock_timeout:
@@ -697,6 +698,9 @@ class LLMClient:
                 hidden_reasoning_fields,
                 self._hidden_reasoning_field_lengths(delta),
             )
+            reasoning_delta = self._stream_delta_reasoning_content(delta)
+            if reasoning_delta:
+                reasoning_parts.append(reasoning_delta)
             text_delta = self._stream_delta_content(delta)
             if text_delta:
                 content_parts.append(text_delta)
@@ -714,7 +718,10 @@ class LLMClient:
                 )
 
         content = "".join(content_parts)
-        message = SimpleNamespace(content=content)
+        message = SimpleNamespace(
+            content=content,
+            reasoning_content="".join(reasoning_parts) or None,
+        )
         choice = SimpleNamespace(message=message, finish_reason=finish_reason)
         response = SimpleNamespace(
             choices=[choice],
@@ -757,6 +764,16 @@ class LLMClient:
         if isinstance(value, list):
             return "\n".join(part for item in value if (part := self._content_part_text(item)))
         return ""
+
+    def _stream_delta_reasoning_content(self, delta: Any) -> str:
+        if delta is None:
+            return ""
+        value = (
+            delta.get("reasoning_content")
+            if isinstance(delta, dict)
+            else getattr(delta, "reasoning_content", None)
+        )
+        return value if isinstance(value, str) else ""
 
     def _hidden_reasoning_field_lengths(self, delta: Any) -> dict[str, int]:
         fields = ("reasoning_content", "thinking", "reasoning")

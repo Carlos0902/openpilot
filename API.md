@@ -134,6 +134,8 @@ and records bounded, credential-redacted attempt evidence. After an
 environment-proxy network failure, one additional direct attempt is permitted
 and labeled separately. Native
 streaming remains rejected until a separate streaming contract exists.
+OpenAI-compatible streaming preserves provider `reasoning_content` separately
+from visible text; reasoning fragments never become user-visible deltas.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally

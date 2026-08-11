@@ -51,3 +51,5 @@ Known native Anthropic and Gemini profiles route through their registered
 single-attempt transports. `LLMClient` owns finite retry and bounded redacted
 attempt evidence, including one labeled direct attempt after an environment
 proxy failure, while native streaming remains explicitly unsupported.
+OpenAI-compatible streams retain reasoning fragments as separate response state
+without emitting them as visible text.

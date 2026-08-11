@@ -2507,3 +2507,14 @@ PYTHONPATH=Code/src pytest -q Code/tests
   classified proxy failure and record its distinct reason and outcome.
 - Remaining limitation: native streaming and streamed reasoning/tool-call
   aggregation remain separate changes.
+
+### Streamed reasoning preservation
+
+- Observed failure: the streaming collector counted hidden reasoning fields but
+  discarded their content from the normalized response.
+- Validation evidence: two offline regressions fail on the stacked base because
+  `reasoning_content` is absent; focused and full suites pass after the fix.
+- Implemented fix: concatenate streamed reasoning fragments into the separate
+  normalized message field while keeping visible delta events content-only.
+- Remaining limitation: streamed tool-call fragment aggregation and native
+  streaming remain separate changes.
