@@ -223,6 +223,13 @@ results and requires an exact one-to-one ID match with at most 32 assistant tool
 calls. Results may arrive out of order but tool messages follow assistant call
 order; each tool-result body is capped at 1,600 characters. Missing, extra,
 duplicate, overlong, or unbounded-sequence inputs fail before message creation.
+Provider tool-result payloads use the same single 1,600-character authority,
+with an allowed floor of 640. Literal `success` and non-empty `tool` are
+required. Oversized previews are shortened by deterministic binary search;
+complete declared-window evidence keeps its semantic completion marker, while
+larger non-text payloads fall back to bounded diagnostics and compact artifact
+references without exposing raw content. Input traversal is itself capped at 16
+levels, 1,024 collection items, and 200,000 aggregate string characters.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

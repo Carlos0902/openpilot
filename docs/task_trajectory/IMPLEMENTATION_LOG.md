@@ -2927,3 +2927,24 @@ PYTHONPATH=Code/src pytest -q Code/tests
   local results preserve their historical dictionary shape.
 - Remaining limitation: this change does not project result payloads, create
   `LLMToolResult` values, execute provider rounds, or integrate the runner.
+
+### Bounded provider tool-result payloads
+
+- Observed failure: result projection had no reusable strict JSON fitter, and
+  the 1,600-character wire limit was duplicated inside wire exchange rather
+  than owned by one payload boundary.
+- Validation evidence: the regression suite fails because the payload module is
+  absent on the stacked base; 19 tests pass after implementation for exact
+  payloads, preview compaction, complete-window semantics, minimal fallback,
+  compact artifact references, bounded failure text, determinism, exact limits,
+  literal controls, non-JSON values, and exact depth/item/input-character
+  boundaries. The complete focused provider set passes 239, and the complete
+  repository suite passes 1,335 in an isolated detached worktree.
+- Implemented fix: add a pure payload fitter with a 640–1,600 character range,
+  strict `success`/`tool` inputs, deterministic JSON, binary-search preview
+  fitting, bounded diagnostics, compact artifact fallback, and bounded input
+  traversal. Wire exchange now reuses its maximum instead of defining a second
+  authority.
+- Remaining limitation: this change does not derive payloads from event-loop
+  results, persist artifacts, construct full result batches, or run provider
+  rounds.

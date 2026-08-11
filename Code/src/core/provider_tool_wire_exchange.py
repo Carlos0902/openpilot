@@ -10,8 +10,9 @@ from core.provider_tool_batch_admission import (
     MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE,
 )
 from core.provider_tool_duplicate_partition import ProviderToolDuplicateBlock
+from core.provider_tool_result_payload import MAX_PROVIDER_TOOL_RESULT_CHARS
 
-MAX_PROVIDER_WIRE_TOOL_RESULT_CHARS = 1_600
+MAX_PROVIDER_WIRE_TOOL_RESULT_CHARS = MAX_PROVIDER_TOOL_RESULT_CHARS
 
 
 class ProviderToolWireExchangeError(ValueError):

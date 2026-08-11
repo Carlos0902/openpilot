@@ -104,3 +104,6 @@ projects the existing frozen coverage contract without performing file I/O.
 Wire exchange converts typed duplicate blocks and exact matching tool results
 into one assistant message followed by provider-call-ordered tool messages,
 with a 32-call and 1,600-character-per-result limit.
+The shared result-payload fitter is the sole character-limit authority. It
+returns valid deterministic JSON, preserves typed completion/error facts, and
+compacts preview/artifact data without mutating the source payload.
