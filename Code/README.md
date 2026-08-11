@@ -139,8 +139,10 @@ budget, confirmation, and validation gates remain unchanged.
 The post-admission artifact binder resolves only admitted patch-writer
 references, replaces untrusted inline code with the ledger body, and mirrors the
 same bound input into `ToolCallMetadata` and `ToolSelection`. Blocked calls never
-touch the ledger, and authorized post-processing scope is copied without
-expansion. The patch-writer executor then requires both derived sidecar targets
+touch the ledger. Both inline and artifact-backed admitted writers validate and
+copy an explicit authorized post-processing scope without expansion; an inline
+writer with no supplied scope remains unchanged. The patch-writer executor then
+requires both derived sidecar targets
 (the file index and directory sketch) to appear in that scope before refreshing
 either one. Partial, malformed, duplicate, or over-64-path scopes skip the
 entire derived refresh; unscoped local patch calls keep their existing refresh

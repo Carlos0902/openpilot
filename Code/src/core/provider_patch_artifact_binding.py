@@ -35,32 +35,36 @@ def bind_provider_patch_artifact(
         return admission
 
     input_metadata = admission.tool_call.input_metadata
-    if (
-        admission.tool_call.tool_name != "file_patch_writer"
-        or input_metadata.artifact_ref is None
-    ):
+    if admission.tool_call.tool_name != "file_patch_writer":
         return admission
-    if not isinstance(code_artifact_ledger, ProviderCodeArtifactLedger):
-        raise ProviderPatchArtifactBindingError(
-            "admitted patch artifact requires ProviderCodeArtifactLedger"
+    updates: dict[str, Any] = {}
+    if input_metadata.artifact_ref is not None:
+        if not isinstance(code_artifact_ledger, ProviderCodeArtifactLedger):
+            raise ProviderPatchArtifactBindingError(
+                "admitted patch artifact requires ProviderCodeArtifactLedger"
+            )
+        scope = _validated_post_processing_scope(
+            authorized_post_processing_write_scope
         )
-    scope = _validated_post_processing_scope(
-        authorized_post_processing_write_scope
-    )
-    try:
-        generated_unit = code_artifact_ledger.resolve(
-            input_metadata.artifact_ref
+        try:
+            updates["generated_unit"] = code_artifact_ledger.resolve(
+                input_metadata.artifact_ref
+            )
+        except ProviderCodeArtifactLedgerError as exc:
+            raise ProviderPatchArtifactBindingError(
+                "admitted patch artifact reference could not be resolved"
+            ) from exc
+    else:
+        scope = _validated_post_processing_scope(
+            authorized_post_processing_write_scope
         )
-    except ProviderCodeArtifactLedgerError as exc:
-        raise ProviderPatchArtifactBindingError(
-            "admitted patch artifact reference could not be resolved"
-        ) from exc
 
-    updates: dict[str, Any] = {"generated_unit": generated_unit}
     if scope is not None:
         runtime_handles = dict(input_metadata.runtime_handles)
         runtime_handles["_post_processing_write_scope"] = scope
         updates["runtime_handles"] = runtime_handles
+    if not updates:
+        return admission
     bound_input = input_metadata.model_copy(update=updates)
     tool_call = admission.tool_call.model_copy(
         update={"input_metadata": bound_input}

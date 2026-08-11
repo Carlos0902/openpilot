@@ -278,10 +278,12 @@ selection; admission still performs no artifact resolution or execution.
 After admission, patch-artifact binding resolves only a typed ledger reference
 on an already-admitted `file_patch_writer` call. The verified body replaces any
 provider-supplied `generated_unit` in both the tool-call and selection views.
-Blocked admissions and inline-only writers return unchanged. An optional
-`authorized_post_processing_write_scope` is copied exactly into excluded
-runtime handles after bounded validation; the binder never derives, adds, or
-widens a path and performs no tool execution or file I/O. At execution time,
+Blocked admissions return unchanged. Inline writers without a supplied
+post-processing scope also remain unchanged, while inline and artifact-backed
+writers both validate and copy an explicit
+`authorized_post_processing_write_scope` into excluded runtime handles. The
+binder never derives, adds, or widens a path and performs no tool execution or
+file I/O. At execution time,
 the patch writer derives its index sidecar and directory-sketch targets and
 refreshes them only when both are present in that explicit scope. A missing
 derived target, malformed scope, duplicate path, or scope above 64 paths skips

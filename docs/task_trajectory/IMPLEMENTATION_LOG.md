@@ -3344,3 +3344,39 @@ PYTHONPATH=Code/src pytest -q Code/tests
     no migration is required.
 - Remaining limitation: mutation execution, artifact binding, exact validation
   deferral, and generated-unit redaction require later isolated slices.
+
+### Inline patch post-processing scope binding
+
+- Observed failure: the post-admission binder returned every inline
+  `file_patch_writer` unchanged before validating or copying its explicit
+  post-processing scope. The executor then treated that provider mutation as an
+  unscoped local call and could refresh index/sketch sidecars implicitly.
+- Validation evidence: four regression cases fail on the stacked base because
+  inline patches neither bind valid scope nor reject generator, duplicate, and
+  over-64-path scopes; five tests pass after implementation, including blocked
+  admission short-circuiting. The adjacent binder/executor scope set passes 26,
+  the complete provider-focused set passes 419, and the complete repository
+  suite passes 1,515 in an isolated detached worktree, followed by successful
+  source compilation and diff validation.
+- Implemented fix: keep artifact resolution conditional on `artifact_ref`, but
+  move admitted patch scope validation and runtime-handle copying onto both
+  inline and artifact-backed paths. Inline calls without a supplied scope retain
+  their prior identity; blocked calls still bypass ledger and scope validation.
+- Metadata impact note:
+  - Fact: exact authorized post-processing paths for an admitted patch writer.
+  - Authoritative producer: task-owned write authority supplied to
+    `bind_provider_patch_artifact`; consumers are the existing patch-writer
+    execution checks only.
+  - Lifecycle and control impact: runtime-only derived-write restriction. It
+    does not grant primary mutation, confirmation, validation, completion, or
+    artifact authority.
+  - Existing contracts reviewed: `ProviderToolAdmission`,
+    `ToolInputMetadata.runtime_handles`, `ProviderCodeArtifactReference`, and
+    the 64-path provider scope limit.
+  - Decision: extend the existing binder path instead of creating a second
+    scope carrier or provider-specific writer.
+  - Serialization and migration: runtime handles remain excluded and no
+    persisted contract changes.
+- Remaining limitation: mutation admissions still are not executed through the
+  shared provider lifecycle; batch preparation and validation deferral remain
+  separate slices.
