@@ -2982,3 +2982,28 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: code artifact bodies are not yet registered for writer
   resolution, and event-loop results are not yet correlated into a complete
   `LLMToolResult` batch or provider continuation.
+
+### Correlated provider tool-result batches
+
+- Observed failure: event-loop result maps, typed recoverable errors, duplicate
+  blocks, and missing batch executions had no independent strict adapter into
+  one bounded `LLMToolResult` per assistant call. The aggregate runner used a
+  dictionary comprehension that could silently overwrite duplicate provider
+  IDs and mixed correlation with stateful round control.
+- Validation evidence: the regression suite fails because the result-batch
+  module is absent on the stacked base; 27 tests pass after implementation for
+  out-of-order correlation, fixed aborts, typed errors, duplicate blocks,
+  declared windows, duplicate/extra IDs, tool mismatch, literal success,
+  omitted null diagnostics, local-result isolation, exact 32-call limits,
+  contradictory states, source immutability, bounded controls, empty-batch
+  budget validation, and missing execution/error evidence. The complete
+  provider-focused set passes 288, and the complete repository suite passes
+  1,384 in an isolated detached worktree, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add one pure batch adapter that validates all response,
+  event-loop, error, duplicate, and declared-window identities before emitting
+  results. It reuses the artifact projector and sole payload fitter, preserves
+  assistant call order, and performs no execution or provider request.
+- Remaining limitation: the adapter does not register code bodies, build the
+  assistant/tool continuation messages, compact history, dispatch another
+  request, or own provider round state.

@@ -237,6 +237,13 @@ partial previews, and complete declared windows, and rejects artifacts or file
 lists above the shared 200,000-character input bound. Code artifacts expose a
 handoff instruction and body-free reference only; projection does not store the
 artifact, execute a tool, grant evidence completion, or perform file I/O.
+Provider result batching then correlates at most 32 response calls with
+event-loop results by the preserved provider call ID. It rejects duplicate,
+extra, mismatched-tool, contradictory duplicate/execution, and non-literal
+success facts before projection. Missing executions become a fixed typed batch
+abort; ordinary local result maps remain outside the provider batch. Typed
+recoverable errors and duplicate blocks retain their provider identity, and
+output order always follows the assistant response rather than execution order.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

@@ -110,3 +110,7 @@ compacts preview/artifact data without mutating the source payload.
 Result artifact projection is separately pure and bounded. It converts text,
 file, and code artifacts into at most 480-character model-facing previews plus
 hash-based project/provider lineage, without storing bodies or performing I/O.
+Result batching correlates those projections with at most 32 provider response
+calls, typed recoverable errors, and duplicate blocks. It emits one bounded
+`LLMToolResult` per call in response order and treats missing execution as a
+fixed retryable batch abort without consuming ordinary local result maps.
