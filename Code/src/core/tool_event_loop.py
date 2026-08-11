@@ -173,6 +173,27 @@ class ToolEventLoopRunner:
         self.event_emitter = ToolEventEmitter(self.runtime, log_hook=self.owner._log)
         self._seen_signatures: dict[str, int] = {}
         self._local_completion_budget = RuntimeBudgetMetadata()
+        self._provider_executed = False
+
+    def run_provider_tool_calls(
+        self,
+        task: Any,
+        admissions: list[Any] | tuple[Any, ...],
+        *,
+        round_index: int = 1,
+    ) -> ToolEventLoopRunResult:
+        """Execute a bounded read-only batch that passed provider admission."""
+
+        from core.provider_readonly_execution import (
+            execute_readonly_provider_admissions,
+        )
+
+        return execute_readonly_provider_admissions(
+            self,
+            task,
+            admissions,
+            round_index=round_index,
+        )
 
     def run(self, task: Any, initial_prompt: str) -> ToolEventLoopRunResult:
         task_id = str(getattr(task, "id", "unknown"))
@@ -1544,6 +1565,7 @@ class ToolEventLoopRunner:
             tool_contexts=self.tool_contexts,
             final_output=last_output,
             final_error=final_error,
+            provider_executed=self._provider_executed,
         )
         self.owner._log(
             "tool_event_loop_completed",

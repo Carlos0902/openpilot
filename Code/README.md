@@ -94,6 +94,12 @@ read-only calls. It requires unique project/provider IDs and exact current
 task, session, and round identity, rejects unbounded shapes and admitted
 mutations, and returns an immutable tuple without emitting events, applying
 state, or invoking an executor.
+The read-only provider execution bridge then reuses the normal tool lifecycle:
+prepared checkpoint, execution, observed checkpoint, state application,
+diagnostics, events, and result maps. Blocked or unprepared calls cannot
+execute, and unobserved results cannot update state. Provider/project identity
+and provider-executed provenance remain attached to success and failure
+evidence; mutation support stays closed in this layer.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

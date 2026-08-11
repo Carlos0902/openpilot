@@ -71,9 +71,13 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def _call(arguments: str = '{"file_path":"README.md"}') -> LLMToolCall:
+def _call(
+    arguments: str = '{"file_path":"README.md"}',
+    *,
+    call_id: str = "provider-call-1",
+) -> LLMToolCall:
     return LLMToolCall(
-        id="provider-call-1",
+        id=call_id,
         function=LLMToolFunctionCall(
             name="file_reader",
             arguments=arguments,
@@ -104,13 +108,13 @@ def _result(*, success: bool = True):
     )
 
 
-def _runtime(executor, *, observe=None):
+def _runtime(executor, *, prepare=None, observe=None):
     state = RuntimeStateMetadata(goal="provider read execution")
     controller = SimpleNamespace(
         state=state,
         state_updater=StateUpdater(),
         replay_tool_result=lambda *_args: None,
-        prepare_tool_call=lambda *_args: True,
+        prepare_tool_call=prepare or (lambda *_args: True),
         observe_tool_result=observe or (lambda *_args: True),
     )
     return SimpleNamespace(
@@ -122,9 +126,15 @@ def _runtime(executor, *, observe=None):
     )
 
 
-def _admissions(runtime, *, task_id: str, call: LLMToolCall | None = None):
+def _admissions(
+    runtime,
+    *,
+    task_id: str,
+    call: LLMToolCall | None = None,
+    calls: list[LLMToolCall] | None = None,
+):
     return admit_provider_tool_calls(
-        [call or _call()],
+        calls or [call or _call()],
         task_id=task_id,
         session_id="session",
         round_index=1,
@@ -160,6 +170,37 @@ def test_readonly_bridge_executes_admitted_call_and_accounts_state() -> None:
     assert result.tool_results[0]["provider_call_id"] == "provider-call-1"
     assert runtime.runtime_controller.state.budget.tool_calls_used == 1
     assert runtime.runtime_controller.state.budget.file_reads_used == 1
+
+
+def test_readonly_bridge_preserves_response_order_and_accumulates_budget() -> None:
+    executed = []
+
+    class Executor:
+        def execute_single(self, selection, context=None):
+            executed.append(selection.step_id)
+            return _result()
+
+    runtime = _runtime(Executor())
+    result = ToolEventLoopRunner(_Owner(runtime)).run_provider_tool_calls(
+        Task(id="task-order", description="read twice"),
+        _admissions(
+            runtime,
+            task_id="task-order",
+            calls=[
+                _call(call_id="provider-call-1"),
+                _call(call_id="provider-call-2"),
+            ],
+        ),
+    )
+
+    assert result.success is True
+    assert executed == ["step_1_1", "step_1_2"]
+    assert [item["provider_call_id"] for item in result.tool_results] == [
+        "provider-call-1",
+        "provider-call-2",
+    ]
+    assert runtime.runtime_controller.state.budget.tool_calls_used == 2
+    assert runtime.runtime_controller.state.budget.file_reads_used == 2
 
 
 def test_readonly_bridge_never_executes_blocked_admission() -> None:
@@ -204,6 +245,29 @@ def test_readonly_bridge_observation_failure_does_not_apply_state() -> None:
     assert result.loop_metadata.final_error.details["provider_call_id"] == (
         "provider-call-1"
     )
+    assert runtime.runtime_controller.state.budget.tool_calls_used == 0
+
+
+def test_readonly_bridge_prepare_failure_prevents_execution() -> None:
+    executed = []
+
+    class Executor:
+        def execute_single(self, selection, context=None):
+            executed.append(selection)
+            return _result()
+
+    runtime = _runtime(
+        Executor(),
+        prepare=lambda *_args: False,
+    )
+    result = ToolEventLoopRunner(_Owner(runtime)).run_provider_tool_calls(
+        Task(id="task-prepare", description="read"),
+        _admissions(runtime, task_id="task-prepare"),
+    )
+
+    assert result.success is False
+    assert result.loop_metadata.final_error.error_type == "CheckpointPrepareFailed"
+    assert executed == []
     assert runtime.runtime_controller.state.budget.tool_calls_used == 0
 
 

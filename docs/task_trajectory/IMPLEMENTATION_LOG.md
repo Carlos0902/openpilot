@@ -3308,3 +3308,39 @@ PYTHONPATH=Code/src pytest -q Code/tests
     records change.
 - Remaining limitation: the shared event loop still has no read-only provider
   execution entry; mutation execution remains closed and separate.
+
+### Read-only provider execution lifecycle bridge
+
+- Observed failure: preflighted read-only admissions still had no shared-loop
+  entry, so they could not pass through prepared/observed checkpoint hooks,
+  normal state accounting, diagnostics, or typed lifecycle events.
+- Validation evidence: four lifecycle regressions fail on the stacked base
+  because `run_provider_tool_calls` is absent; six tests pass after
+  implementation for successful execution and budget accounting, blocked-call
+  non-execution, prepare failure, observation failure without state application,
+  execution failure, preserved provider identity, response order, and
+  multi-call budget accumulation. The complete provider-focused set passes 414,
+  and the complete repository suite passes 1,510 in an isolated detached
+  worktree, followed by successful source compilation and diff validation.
+- Implemented fix: add a provider-specific read-only execution module plus a
+  thin method on the shared runner. It first invokes the pure batch preflight,
+  then processes calls in response order through existing checkpoint,
+  executor, state, diagnostics, event, error, and result helpers. The enclosing
+  `ToolLoopMetadata` inherits provider-executed provenance.
+- Metadata impact note:
+  - Facts: existing call correlation, provider provenance, lifecycle events,
+    tool results/errors, and runtime budget counters.
+  - Authoritative producers: provider admission owns allowed inputs; the batch
+    preflight owns execution eligibility; existing event-loop/controller
+    helpers own lifecycle and state facts.
+  - Lifecycle and control impact: read-only execution only. Mutation admissions
+    fail during preflight before this module is entered.
+  - Existing contracts reviewed: `ProviderToolAdmission`,
+    `ToolEventLoopRunResult`, `ToolLoopMetadata`, `ToolExecutionEnvelopeMetadata`,
+    and controller checkpoint/state-update hooks.
+  - Decision: keep provider orchestration in a focused core module and add only
+    a thin shared-runner entry, avoiding further growth of the generic loop.
+  - Serialization and migration: existing metadata/result shapes are reused;
+    no migration is required.
+- Remaining limitation: mutation execution, artifact binding, exact validation
+  deferral, and generated-unit redaction require later isolated slices.

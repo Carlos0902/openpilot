@@ -197,6 +197,14 @@ non-empty current task/session identity and a positive round, rejects duplicate
 provider or project call IDs and cross-task/session/round values, and refuses an
 admitted mutation in either the tool-call or selection view. It returns the
 same admissions as an immutable tuple and never emits events or executes tools.
+The read-only execution bridge consumes that preflighted tuple in response
+order and reuses the shared prepared-checkpoint, executor,
+observed-checkpoint, state-update, diagnostics, event, and result lifecycle.
+Blocked calls and failed prepare checkpoints never reach the executor;
+observation failure prevents state application. Successful and failed calls
+retain distinct project/provider IDs, and the enclosing tool-loop result is
+marked provider-executed. Mutation, artifact binding, validation deferral, and
+generated-unit redaction remain outside this bridge.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only
