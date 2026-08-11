@@ -2386,3 +2386,14 @@ PYTHONPATH=Code/src pytest -q Code/tests
   `authority_hash` that excludes only `processed_through_turn` for prompt views.
 - Remaining limitation: any actual constraint revision or revoke still changes
   authority identity by design.
+
+### Checkpoint ingress run identity validation
+
+- Observed failure: a checkpoint accepted ingress state whose `run_id` differed
+  from the checkpoint session identity.
+- Validation evidence: the regression test fails on the stacked base and the
+  focused checkpoint suite passes after validation is added.
+- Implemented fix: reject mismatched nested ingress run identity during typed
+  checkpoint validation.
+- Remaining limitation: conversation identity remains separate by design and is
+  validated through the existing constraint-ledger relationship.
