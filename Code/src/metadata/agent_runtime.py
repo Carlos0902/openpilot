@@ -392,7 +392,18 @@ class SessionConstraintState(BaseModel):
 
     @property
     def canonical_hash(self) -> str:
+        """Hash the complete persisted snapshot, including the ingress cursor."""
+
         payload = self.model_dump(mode="json")
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @property
+    def authority_hash(self) -> str:
+        """Hash active constraint authority without the ordinary turn cursor."""
+
+        payload = self.model_dump(mode="json")
+        payload.pop("processed_through_turn", None)
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
