@@ -186,6 +186,11 @@ Provider batches are capped at 32 calls and reject duplicate provider call IDs.
 Calls retain response order and receive deterministic project IDs; only admitted
 calls accumulate typed call, read, edit, create, and validation usage for later
 calls in the same batch, so blocked requests cannot consume authority.
+The shared tool-event emitter accepts provider and project call identity as
+separate inputs when constructing a call. Every lifecycle event inherits the
+typed call's `provider_executed` fact, while ordinary local calls and events
+remain false by default. This propagation records provenance only; it does not
+admit or execute a provider request.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

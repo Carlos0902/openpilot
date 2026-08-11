@@ -3240,3 +3240,36 @@ PYTHONPATH=Code/src pytest -q Code/tests
     historical migration.
 - Remaining limitation: the provider round runner still needs to pass the
   admitted scope through artifact binding and invoke generated-unit redaction.
+
+### Provider tool-event provenance propagation
+
+- Observed failure: the shared event emitter could not accept an external
+  provider call ID or mark a constructed call as provider-executed. Even a
+  separately constructed provider call produced lifecycle events whose
+  `provider_executed` field silently fell back to false.
+- Validation evidence: two regression tests fail on the stacked base because
+  `create_tool_call` rejects the provider identity arguments; three tests pass
+  after implementation for dual call identity, event inheritance, and local
+  default compatibility. The complete provider-focused set passes 392,
+  and the complete repository suite passes 1,488 in an isolated detached
+  worktree, followed by successful source compilation and diff validation.
+- Implemented fix: extend only the emitter's call-construction boundary with
+  existing typed provider identity fields, and derive event provenance from the
+  authoritative `ToolCallMetadata` value rather than a second caller-supplied
+  flag. No tool is admitted or executed in this slice.
+- Metadata impact note:
+  - Facts: external provider call correlation and whether a lifecycle event
+    belongs to provider-native execution.
+  - Authoritative producer: provider execution creates `ToolCallMetadata`;
+    `ToolEventEmitter` copies its existing values into emitted events.
+  - Lifecycle and control impact: runtime provenance only. These facts do not
+    grant permission, scope, mutation, budget, validation, completion, or
+    replay authority.
+  - Existing contracts reviewed: `ToolCallMetadata`, `ToolEventMetadata`,
+    `ToolErrorMetadata`, and `ToolEventEmitter`; no field or metadata kind was
+    added.
+  - Serialization and migration: existing fields retain their schema and local
+    defaults, so no migration is required.
+- Remaining limitation: admitted provider calls are not yet executed through
+  the shared event loop, and loop-level provenance/redaction still requires the
+  provider execution bridge.

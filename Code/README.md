@@ -84,6 +84,11 @@ registered validation executor before returning a non-executed selection.
 Batch admission lives in a separate module, caps one response at 32 unique
 provider calls, and accumulates typed resource use only after a call is
 admitted. It preserves provider order and never executes returned selections.
+The shared event emitter can construct a tool call with both deterministic
+project identity and external provider identity. Emitted lifecycle events
+inherit the call's `provider_executed` provenance, while local calls remain
+non-provider by default; this layer records identity but performs no admission
+or execution.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.
