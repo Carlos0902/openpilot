@@ -85,3 +85,6 @@ admitted. It preserves provider order and never executes returned selections.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.
+The final result envelope separately composes existing LLM, tool-loop, budget,
+attempt, evidence, and reasoning values and rejects contradictory completion or
+lineage states.

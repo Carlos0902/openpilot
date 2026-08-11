@@ -148,6 +148,12 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   authority into a persisted tree. A future runner produces them; runtime
   integration and trajectory adapters may consume projections, but the values
   do not execute tools or own checkpoints.
+- `ProviderToolRoundTripResult` is a strict frozen runtime envelope, not a new
+  public metadata kind. It nests the existing attempt/evidence values and reuses
+  `LLMResponse`, `LLMMessage`, `ToolEventLoopRunResult`,
+  `ProviderBudgetDiagnostic`, and reasoning enums. The future runner produces
+  one result; downstream adapters consume it without treating diagnostics or
+  message projections as a second completion, budget, or checkpoint authority.
 - `RuntimePromptContextSnapshot` is a strict value owned by
   `RuntimeCheckpointMetadata`. It binds the complete context request hash and
   rendered Prompt hash to the existing `ContextSelectionMetadata` and one

@@ -188,6 +188,11 @@ contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only
 rounds, and finalization requests have explicit bounds and set invariants. These
 contracts do not execute tools, persist checkpoints, or grant authority.
+The final round-trip result is a separate frozen envelope over existing LLM
+responses/messages, tool-loop results, attempt/evidence values, typed provider
+budget diagnostics, and reasoning observations. Success is the inverse of error
+presence; attempt lineage and evidence counters cannot exceed `rounds_used`;
+messages, attempts, loops, and diagnostic collections are bounded.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

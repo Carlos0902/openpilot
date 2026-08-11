@@ -6,9 +6,19 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from core.llm import LLMMessage, LLMResponse
+from core.tool_event_loop import ToolEventLoopRunResult
+from metadata import (
+    JsonValue,
+    ProviderBudgetDiagnostic,
+    ReasoningDecisionComplexity,
+    ReasoningMode,
+)
+
 MAX_PROVIDER_ROUND_TRIP_ROUNDS = 32
 MAX_PROVIDER_TOOL_ATTEMPTS = 1024
 MAX_PROVIDER_EVIDENCE_PATHS = 64
+MAX_PROVIDER_ROUND_TRIP_MESSAGES = 1024
 
 ProviderPath = Annotated[str, Field(min_length=1, max_length=4096)]
 ProviderEvidenceKey = Annotated[str, Field(min_length=1, max_length=512)]
@@ -151,6 +161,80 @@ class ProviderToolEvidenceCoverage(BaseModel):
         return self
 
 
+class ProviderToolRoundTripResult(BaseModel):
+    """Runtime-only provider conversation and typed execution evidence."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        arbitrary_types_allowed=True,
+        str_strip_whitespace=True,
+    )
+
+    success: bool
+    final_response: LLMResponse | None = None
+    messages: tuple[LLMMessage, ...] = Field(
+        default=(),
+        max_length=MAX_PROVIDER_ROUND_TRIP_MESSAGES,
+    )
+    tool_loop_results: tuple[ToolEventLoopRunResult, ...] = Field(
+        default=(),
+        max_length=MAX_PROVIDER_ROUND_TRIP_ROUNDS,
+    )
+    rounds_used: int = Field(ge=0, le=MAX_PROVIDER_ROUND_TRIP_ROUNDS)
+    error_message: str | None = Field(default=None, min_length=1, max_length=2000)
+    attempts: tuple[ProviderToolAttempt, ...] = Field(
+        default=(),
+        max_length=MAX_PROVIDER_TOOL_ATTEMPTS,
+    )
+    evidence_coverage: ProviderToolEvidenceCoverage = Field(
+        default_factory=ProviderToolEvidenceCoverage
+    )
+    request_diagnostics: tuple[dict[str, JsonValue], ...] = Field(
+        default=(),
+        max_length=MAX_PROVIDER_ROUND_TRIP_ROUNDS,
+    )
+    budget_diagnostics: tuple[ProviderBudgetDiagnostic, ...] = Field(
+        default=(),
+        max_length=MAX_PROVIDER_ROUND_TRIP_ROUNDS,
+    )
+    handoff_diagnostics: tuple[dict[str, JsonValue], ...] = Field(
+        default=(),
+        max_length=MAX_PROVIDER_TOOL_ATTEMPTS,
+    )
+    outcome_feedback_enabled: bool = False
+    reasoning_complexity: ReasoningDecisionComplexity = (
+        ReasoningDecisionComplexity.STANDARD
+    )
+    reasoning_mode: ReasoningMode | None = None
+
+    @model_validator(mode="after")
+    def _completion_facts_are_consistent(self) -> "ProviderToolRoundTripResult":
+        if self.success == (self.error_message is not None):
+            raise ValueError("success must be the inverse of error-message presence")
+        if self.attempts:
+            last_attempt_round = max(item.round_index for item in self.attempts)
+            if last_attempt_round > self.rounds_used:
+                raise ValueError("attempt round cannot exceed rounds_used")
+            prior_provider_ids: set[str] = set()
+            for attempt in self.attempts:
+                if (
+                    attempt.duplicate_of is not None
+                    and attempt.duplicate_of not in prior_provider_ids
+                ):
+                    raise ValueError(
+                        "duplicate attempts must reference an earlier result attempt"
+                    )
+                prior_provider_ids.add(attempt.provider_call_id)
+        if len(self.tool_loop_results) > self.rounds_used:
+            raise ValueError("tool-loop result count cannot exceed rounds_used")
+        if self.evidence_coverage.duplicate_only_rounds > self.rounds_used:
+            raise ValueError("duplicate-only rounds cannot exceed rounds_used")
+        if self.evidence_coverage.finalization_requests > self.rounds_used:
+            raise ValueError("finalization requests cannot exceed rounds_used")
+        return self
+
+
 def _require_unique(values, label: str) -> None:
     if len(values) != len(set(values)):
         raise ValueError(f"{label} must be unique")
@@ -158,10 +242,12 @@ def _require_unique(values, label: str) -> None:
 
 __all__ = [
     "MAX_PROVIDER_EVIDENCE_PATHS",
+    "MAX_PROVIDER_ROUND_TRIP_MESSAGES",
     "MAX_PROVIDER_ROUND_TRIP_ROUNDS",
     "MAX_PROVIDER_TOOL_ATTEMPTS",
     "ProviderDeclaredReadWindow",
     "ProviderPageReadCount",
     "ProviderToolAttempt",
     "ProviderToolEvidenceCoverage",
+    "ProviderToolRoundTripResult",
 ]

@@ -2765,3 +2765,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: this change defines no runner state machine, duplicate
   partitioning, final result envelope, evidence collection, tool execution, or
   runtime integration.
+
+### Provider round-trip result envelope
+
+- Observed failure: attempt/evidence facts had no strict final runtime envelope,
+  so contradictory success/error states, out-of-range attempt lineage, excess
+  evidence counters, and unbounded conversation collections remained legal.
+- Validation evidence: the regression suite fails because
+  `ProviderToolRoundTripResult` is absent on the stacked base; 10 result tests
+  cover nested JSON round trips, completion consistency, earlier-attempt
+  lineage, round/evidence relationships, message and attempt limits, and
+  unknown fields. The complete focused provider set passes 132. The full suite
+  passes 1,240 tests, followed by successful source compilation and diff
+  validation.
+- Implemented fix: add a separate frozen result envelope that composes existing
+  LLM responses/messages, tool-loop results, attempt/evidence contracts, typed
+  budget diagnostics, and reasoning observations. It bounds repeated runtime
+  collections and rejects contradictory completion facts.
+- Metadata impact note:
+  - Fact: one final provider round-trip outcome and its bounded runtime evidence.
+  - Authoritative producer: the future provider round-trip runner; consumers:
+    runtime task integration and derived trajectory/report projections.
+  - Lifecycle: runtime-only with optional derived event evidence. Control impact:
+    completion and recovery observation, but no permission or execution grant.
+  - Existing contracts reviewed: `LLMResponse`, `LLMMessage`,
+    `ToolEventLoopRunResult`, `ToolLoopMetadata`, `ProviderBudgetDiagnostic`,
+    `ProviderToolAttempt`, `ProviderToolEvidenceCoverage`, and reasoning enums.
+  - Decision: strict owned core envelope; no new `MetadataKind`, no duplicated
+    provider response, tool-loop, budget, or checkpoint authority.
+  - Serialization and migration: bounded Pydantic JSON projection; no historical
+    migration because no production producer or persisted field exists yet.
+  - Tests and docs: result/JSON/invalid-state tests plus `API.md`,
+    `Code/README.md`, the metadata catalog, and this implementation log.
+- Remaining limitation: this change defines no runner state machine, request
+  diagnostics producer, tool execution, persistence, or runtime integration.
