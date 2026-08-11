@@ -3380,3 +3380,43 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: mutation admissions still are not executed through the
   shared provider lifecycle; batch preparation and validation deferral remain
   separate slices.
+
+### Provider mutation execution batch preparation
+
+- Observed failure: no whole-batch boundary combined execution identity,
+  admitted mutation type, verified artifact resolution, and mandatory derived
+  write scope before mutation lifecycle state could begin. Preparing entries
+  one at a time risked returning partial bound views when a later reference was
+  unknown.
+- Validation evidence: the regression suite fails on the stacked base because
+  the mutation preparation module is absent; six tests pass after
+  implementation for inline scope binding, verified artifact resolution, empty
+  explicit scope, missing-scope rejection, atomic later-reference failure,
+  blocked-call short-circuiting, and mismatched call/selection tool identity.
+  The adjacent batch/binder set passes 34, and the complete provider-focused
+  set passes 425. The complete repository suite passes 1,521 in an isolated
+  detached worktree, followed by successful source compilation and diff
+  validation.
+- Implemented fix: generalize the existing pure execution-batch validator behind
+  its read-only wrapper, then add an atomic mutation preparation function. It
+  permits only admitted `file_patch_writer`, requires an explicit
+  post-processing scope for every admitted mutation, and returns copied bound
+  admissions only after all entries prepare successfully.
+- Metadata impact note:
+  - Facts: existing admission identity/tool status, verified generated body,
+    and exact post-processing scope.
+  - Authoritative producers: provider admission owns mutation authority; the
+    code ledger owns artifact bodies; the task owns the derived-write scope;
+    preparation only composes copied execution inputs.
+  - Lifecycle and control impact: pre-execution preparation only. Success does
+    not execute a writer, apply state, emit events, or satisfy validation.
+  - Existing contracts reviewed: `ProviderToolAdmission`,
+    `ProviderCodeArtifactLedger`, `ProviderCodeArtifactReference`, execution
+    batch identity bounds, and `ToolInputMetadata.runtime_handles`.
+  - Decision: extend the shared pure batch validator with a literal internal
+    mutation mode and keep binding in a dedicated mutation preparation module;
+    add no metadata kind or second body/scope authority.
+  - Serialization and migration: copied runtime handles remain excluded and no
+    persisted schema changes.
+- Remaining limitation: the shared loop still needs a mutation lifecycle entry,
+  exact validation deferral, and post-execution generated-unit redaction.

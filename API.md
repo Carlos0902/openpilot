@@ -197,6 +197,14 @@ non-empty current task/session identity and a positive round, rejects duplicate
 provider or project call IDs and cross-task/session/round values, and refuses an
 admitted mutation in either the tool-call or selection view. It returns the
 same admissions as an immutable tuple and never emits events or executes tools.
+Mutation-batch preparation reuses the same bounded identity preflight with
+literal mutation allowance, requires admitted call/selection views to name the
+same tool, and supports `file_patch_writer` only. Every admitted mutation must
+receive an explicit post-processing scope (an empty list explicitly disables
+derived writes). Inline code receives that scope; artifact-backed code is first
+resolved through the runtime ledger and then receives it. Preparation builds
+copied admissions atomically, while blocked calls bypass ledger/scope
+validation; it still performs no tool execution or state mutation.
 The read-only execution bridge consumes that preflighted tuple in response
 order and reuses the shared prepared-checkpoint, executor,
 observed-checkpoint, state-update, diagnostics, event, and result lifecycle.

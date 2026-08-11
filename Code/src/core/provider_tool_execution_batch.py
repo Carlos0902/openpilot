@@ -24,6 +24,25 @@ def validated_readonly_provider_execution_batch(
 ) -> tuple[ProviderToolAdmission, ...]:
     """Return one bounded identity-consistent batch with no admitted mutation."""
 
+    return validated_provider_execution_batch(
+        admissions,
+        task_id=task_id,
+        session_id=session_id,
+        round_index=round_index,
+        allow_mutations=False,
+    )
+
+
+def validated_provider_execution_batch(
+    admissions: Any,
+    *,
+    task_id: str,
+    session_id: str,
+    round_index: int,
+    allow_mutations: bool,
+) -> tuple[ProviderToolAdmission, ...]:
+    """Return one bounded identity-consistent admitted execution batch."""
+
     if not isinstance(task_id, str) or not task_id.strip():
         raise ProviderToolExecutionBatchError("task_id must be a non-empty string")
     if not isinstance(session_id, str) or not session_id.strip():
@@ -33,6 +52,10 @@ def validated_readonly_provider_execution_batch(
     if type(round_index) is not int or round_index < 1:
         raise ProviderToolExecutionBatchError(
             "round_index must be a positive integer"
+        )
+    if type(allow_mutations) is not bool:
+        raise ProviderToolExecutionBatchError(
+            "allow_mutations must be a literal boolean"
         )
     if not isinstance(admissions, (list, tuple)):
         raise ProviderToolExecutionBatchError(
@@ -69,6 +92,17 @@ def validated_readonly_provider_execution_batch(
     if any(
         item.status == "admitted"
         and (
+            item.selection is None
+            or item.selection.tool_name != item.tool_call.tool_name
+        )
+        for item in admissions
+    ):
+        raise ProviderToolExecutionBatchError(
+            "admitted provider call and selection must name the same tool"
+        )
+    if any(
+        item.status == "admitted"
+        and (
             item.tool_call.tool_name in FILE_MUTATION_TOOLS
             or (
                 item.selection is not None
@@ -76,7 +110,7 @@ def validated_readonly_provider_execution_batch(
             )
         )
         for item in admissions
-    ):
+    ) and not allow_mutations:
         raise ProviderToolExecutionBatchError(
             "read-only provider execution batch cannot contain mutation admissions"
         )
@@ -85,5 +119,6 @@ def validated_readonly_provider_execution_batch(
 
 __all__ = [
     "ProviderToolExecutionBatchError",
+    "validated_provider_execution_batch",
     "validated_readonly_provider_execution_batch",
 ]

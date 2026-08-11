@@ -94,6 +94,12 @@ read-only calls. It requires unique project/provider IDs and exact current
 task, session, and round identity, rejects unbounded shapes and admitted
 mutations, and returns an immutable tuple without emitting events, applying
 state, or invoking an executor.
+Mutation execution preparation uses the same identity/cardinality validator,
+requires matching call/selection tool names, permits only admitted
+`file_patch_writer`, and requires an explicit derived-write scope. It binds that
+scope for inline patches and resolves artifact-backed bodies through the code
+ledger before binding. Any later failure leaves every source admission
+unchanged; blocked calls do not validate unused ledger or scope inputs.
 The read-only provider execution bridge then reuses the normal tool lifecycle:
 prepared checkpoint, execution, observed checkpoint, state application,
 diagnostics, events, and result maps. Blocked or unprepared calls cannot

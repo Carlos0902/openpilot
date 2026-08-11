@@ -216,6 +216,9 @@ def test_execution_batch_rejects_mutation_in_either_admission_view() -> None:
     admission = _admissions(_call())[0]
     mutation = admission.model_copy(
         update={
+            "tool_call": admission.tool_call.model_copy(
+                update={"tool_name": "file_patch_writer"}
+            ),
             "selection": admission.selection.model_copy(
                 update={"tool_name": "file_patch_writer"}
             ),
