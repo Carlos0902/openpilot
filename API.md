@@ -263,6 +263,15 @@ Blocked admissions and inline-only writers return unchanged. An optional
 `authorized_post_processing_write_scope` is copied exactly into excluded
 runtime handles after bounded validation; the binder never derives, adds, or
 widens a path and performs no tool execution or file I/O.
+Before provider event-loop evidence is retained, generated-unit redaction
+removes complete code bodies from result-map inputs and every typed event,
+invocation, error, and nested call/error projection. Result maps keep only the
+character count and SHA-256 digest; typed inputs keep the same diagnostics in
+excluded runtime handles. The redactor accepts at most 1,024 entries per
+collection and 200,000 characters per body, preflights every collection and
+body before replacing the retained views, and leaves artifact references and
+unrelated evidence unchanged. Malformed, unbounded, or oversized evidence
+fails atomically without executing a tool or performing I/O.
 Provider code-artifact handoff uses a strict frozen runtime reference containing
 explicit `code_artifact` kind, project/provider lineage, SHA-256 checksum,
 byte/character counts, and language. A bounded ledger stores at most 1,024

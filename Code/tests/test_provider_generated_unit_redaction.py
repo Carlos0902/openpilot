@@ -311,4 +311,3 @@ def test_rejects_unbounded_collection_without_mutation() -> None:
         match="tool_results must be a bounded list",
     ):
         redact_provider_generated_units(loop_result)
-

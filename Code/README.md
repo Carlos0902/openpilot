@@ -125,6 +125,14 @@ references, replaces untrusted inline code with the ledger body, and mirrors the
 same bound input into `ToolCallMetadata` and `ToolSelection`. Blocked calls never
 touch the ledger, and authorized post-processing scope is copied without
 expansion.
+Generated-unit evidence redaction is a separate post-execution boundary. It
+atomically removes complete code bodies from result maps and all retained typed
+event projections, including nested call and error copies, while preserving
+artifact lineage and unrelated fields. Public result maps retain only bounded
+character-count and SHA-256 diagnostics; typed diagnostics live in excluded
+runtime handles. Collections and bodies reuse the provider attempt and code
+artifact limits, and malformed or oversized evidence fails before any retained
+view is replaced.
 The code-artifact ledger separately owns bounded generated-code bodies for one
 runtime. Its frozen reference binds source and provider call IDs, checksum,
 sizes, and language; exact re-registration is idempotent, while lineage rebinds

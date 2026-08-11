@@ -3163,3 +3163,43 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the provider round runner does not yet invoke the
   binder, event-loop result redaction is separate, and post-processing tools
   must still enforce the supplied scope at execution time.
+
+### Generated-unit redaction for retained provider evidence
+
+- Observed failure: after a verified code body was bound into a patch-writer
+  input, the complete `generated_unit` could remain in result maps and typed
+  event-loop projections. Nested event call/error copies could preserve another
+  body even if the event's direct input was cleared.
+- Validation evidence: the regression suite fails on the stacked base because
+  the redaction boundary is absent; 12 tests pass after implementation for map,
+  event, invocation, error, and nested-copy redaction, exact hashes and counts,
+  lineage preservation, exact body and collection limits, atomic rejection of
+  malformed or oversized inputs, unbounded collection rejection, idempotence,
+  and body-free serialization. The complete provider-focused set passes 380,
+  and the complete repository suite passes 1,476 in an isolated detached
+  worktree, followed by successful source compilation and diff validation.
+- Implemented fix: add one post-execution redactor that preflights at most 1,024
+  items per retained collection and 200,000 characters per generated body,
+  constructs body-free replacement views, and only then updates the run result.
+  Result maps retain public count/hash diagnostics; typed inputs place the same
+  diagnostics in excluded runtime handles without changing artifact references
+  or unrelated evidence.
+- Metadata impact note:
+  - Fact: bounded integrity diagnostics for a removed generated-code body.
+  - Authoritative producer: `redact_provider_generated_units`; consumers are
+    diagnostics and retained evidence serialization only.
+  - Lifecycle and control impact: runtime-only evidence sanitization; the
+    diagnostics do not grant mutation, routing, permission, validation,
+    completion, persistence, or artifact-resolution authority.
+  - Existing contracts reviewed: `ToolInputMetadata`, `ToolCallMetadata`,
+    `ToolErrorMetadata`, `ToolEventMetadata`, `ToolLoopMetadata`,
+    `ToolEventLoopRunResult`, and `ProviderCodeArtifactReference`.
+  - Decision: reuse excluded runtime handles for typed diagnostics and existing
+    result-map compatibility keys; add no metadata kind, authority field, or
+    second code-body owner.
+  - Serialization and migration: typed runtime diagnostics remain excluded;
+    retained maps contain only scalar count/hash values, and no historical
+    persisted contract requires migration.
+- Remaining limitation: the provider round runner does not yet invoke this
+  redactor, and execution-time post-processing scope enforcement remains a
+  separate slice.
