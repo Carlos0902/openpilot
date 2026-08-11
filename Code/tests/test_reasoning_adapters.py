@@ -162,4 +162,3 @@ def test_empty_length_response_remains_explicit_failure_evidence() -> None:
     assert observation.reasoning_content_present is True
     assert observation.visible_content_empty is True
     assert observation.finish_reason == "length"
-
