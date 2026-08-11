@@ -2518,3 +2518,15 @@ PYTHONPATH=Code/src pytest -q Code/tests
   normalized message field while keeping visible delta events content-only.
 - Remaining limitation: streamed tool-call fragment aggregation and native
   streaming remain separate changes.
+
+### Streamed tool-call aggregation
+
+- Observed failure: the streaming collector discarded provider tool-call
+  fragments, so streamed autonomous requests could not continue tool execution.
+- Validation evidence: four offline regressions fail on the stacked base for
+  missing calls, index ordering, malformed containers, and negative indexes;
+  focused and full suites pass after the fix.
+- Implemented fix: accumulate fragments by provider index, concatenate function
+  name and argument text, finalize calls in index order, and validate the
+  existing typed call contract before returning the response.
+- Remaining limitation: native streaming remains a separate change.

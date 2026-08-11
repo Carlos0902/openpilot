@@ -136,6 +136,9 @@ and labeled separately. Native
 streaming remains rejected until a separate streaming contract exists.
 OpenAI-compatible streaming preserves provider `reasoning_content` separately
 from visible text; reasoning fragments never become user-visible deltas.
+Streaming tool-call fragments are joined by their provider index, validated into
+the typed call contract, and finalized in index order. Malformed containers,
+negative indexes, or incomplete final shapes fail closed.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally

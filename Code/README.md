@@ -53,3 +53,5 @@ attempt evidence, including one labeled direct attempt after an environment
 proxy failure, while native streaming remains explicitly unsupported.
 OpenAI-compatible streams retain reasoning fragments as separate response state
 without emitting them as visible text.
+Streamed tool-call fragments are aggregated by index and validated before the
+normalized response is returned.

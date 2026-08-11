@@ -677,6 +677,7 @@ class LLMClient:
         usage: Any = None
         hidden_reasoning_fields: dict[str, int] = {}
         reasoning_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
 
         for chunk in stream:
             if wall_clock_timeout is not None and time.monotonic() - started_at >= wall_clock_timeout:
@@ -701,6 +702,7 @@ class LLMClient:
             reasoning_delta = self._stream_delta_reasoning_content(delta)
             if reasoning_delta:
                 reasoning_parts.append(reasoning_delta)
+            self._merge_stream_delta_tool_calls(tool_call_parts, delta)
             text_delta = self._stream_delta_content(delta)
             if text_delta:
                 content_parts.append(text_delta)
@@ -718,9 +720,11 @@ class LLMClient:
                 )
 
         content = "".join(content_parts)
+        tool_calls = self._finalize_stream_tool_calls(tool_call_parts)
         message = SimpleNamespace(
             content=content,
             reasoning_content="".join(reasoning_parts) or None,
+            tool_calls=tool_calls or None,
         )
         choice = SimpleNamespace(message=message, finish_reason=finish_reason)
         response = SimpleNamespace(
@@ -731,15 +735,20 @@ class LLMClient:
             created=created,
             provider_details={"hidden_reasoning_fields": hidden_reasoning_fields},
         )
+        done_details = (
+            {"hidden_reasoning_fields": hidden_reasoning_fields}
+            if hidden_reasoning_fields
+            else {}
+        )
+        if tool_calls:
+            done_details["tool_call_count"] = len(tool_calls)
         stream_callback(
             LLMStreamEvent(
                 event_type="done",
                 visible_text_preview=content[-1200:],
                 chars_received=len(content),
                 finish_reason=finish_reason,
-                provider_details={"hidden_reasoning_fields": hidden_reasoning_fields}
-                if hidden_reasoning_fields
-                else {},
+                provider_details=done_details,
             )
         )
         return response
@@ -774,6 +783,89 @@ class LLMClient:
             else getattr(delta, "reasoning_content", None)
         )
         return value if isinstance(value, str) else ""
+
+    def _merge_stream_delta_tool_calls(
+        self,
+        accumulated: dict[int, dict[str, Any]],
+        delta: Any,
+    ) -> None:
+        raw_calls = (
+            delta.get("tool_calls")
+            if isinstance(delta, dict)
+            else getattr(delta, "tool_calls", None)
+        )
+        if not raw_calls:
+            return
+        if not isinstance(raw_calls, (list, tuple)):
+            raise UnsupportedReasoningPolicyError(
+                "provider streaming tool_calls must be a list"
+            )
+
+        for position, raw_call in enumerate(raw_calls):
+            if isinstance(raw_call, dict):
+                index = raw_call.get("index", position)
+                call_id = raw_call.get("id")
+                call_type = raw_call.get("type", "function")
+                function = raw_call.get("function")
+            else:
+                index = getattr(raw_call, "index", position)
+                call_id = getattr(raw_call, "id", None)
+                call_type = getattr(raw_call, "type", "function")
+                function = getattr(raw_call, "function", None)
+            try:
+                index = int(index)
+            except (TypeError, ValueError) as exc:
+                raise UnsupportedReasoningPolicyError(
+                    "provider streaming tool_call index must be a non-negative integer"
+                ) from exc
+            if index < 0:
+                raise UnsupportedReasoningPolicyError(
+                    "provider streaming tool_call index must be non-negative"
+                )
+
+            entry = accumulated.setdefault(
+                index,
+                {"id": "", "type": "function", "name": "", "arguments": ""},
+            )
+            if call_id:
+                entry["id"] = str(call_id)
+            if call_type:
+                entry["type"] = str(call_type)
+            if isinstance(function, dict):
+                name = function.get("name")
+                arguments = function.get("arguments")
+            else:
+                name = getattr(function, "name", None)
+                arguments = getattr(function, "arguments", None)
+            if name:
+                entry["name"] += str(name)
+            if arguments:
+                entry["arguments"] += str(arguments)
+
+    def _finalize_stream_tool_calls(
+        self,
+        accumulated: dict[int, dict[str, Any]],
+    ) -> list[LLMToolCall]:
+        calls: list[LLMToolCall] = []
+        for index in sorted(accumulated):
+            entry = accumulated[index]
+            try:
+                calls.append(
+                    LLMToolCall(
+                        id=entry["id"],
+                        type=entry["type"],
+                        index=index,
+                        function=LLMToolFunctionCall(
+                            name=entry["name"],
+                            arguments=entry["arguments"],
+                        ),
+                    )
+                )
+            except Exception as exc:
+                raise UnsupportedReasoningPolicyError(
+                    f"provider streaming tool_call shape is unsupported: {exc}"
+                ) from exc
+        return calls
 
     def _hidden_reasoning_field_lengths(self, delta: Any) -> dict[str, int]:
         fields = ("reasoning_content", "thinking", "reasoning")
