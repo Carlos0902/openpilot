@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from openai import APITimeoutError, OpenAI, OpenAIError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config import LLMSettings
 from core.reasoning import render_reasoning_transport, resolve_reasoning_policy
@@ -45,16 +45,124 @@ def normalized_provider_endpoint(base_url: str) -> str:
 
 
 class LLMMessage(BaseModel):
-    """A single chat message."""
+    """A chat message, including provider tool round-trip fields."""
 
-    role: Literal["system", "user", "assistant"]
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str = ""
+    reasoning_content: str | None = None
+    tool_calls: list["LLMToolCall"] = Field(default_factory=list)
+    tool_call_id: str | None = None
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Keep the legacy compact projection for ordinary messages.
+
+        Round-trip fields are rendered explicitly by :func:`render_llm_message`.
+        Omitting absent optional fields here prevents existing context and
+        legacy chat adapters that call ``model_dump()`` from paying for absent
+        tool state or changing their wire shape, while retaining an explicit
+        empty assistant ``content`` required by tool-call wire protocols.
+        Callers can still override serialization options explicitly when they
+        need a full diagnostic projection.
+        """
+
+        compact_defaults = "exclude_defaults" not in kwargs
+        kwargs.setdefault("exclude_none", True)
+        dumped = super().model_dump(*args, **kwargs)
+        if compact_defaults and not dumped.get("tool_calls"):
+            dumped.pop("tool_calls", None)
+        return dumped
+
+    @model_validator(mode="after")
+    def _role_fields_are_valid(self) -> "LLMMessage":
+        if self.role in {"system", "user"} and (
+            self.reasoning_content is not None or self.tool_calls or self.tool_call_id
+        ):
+            raise ValueError(f"{self.role} messages cannot carry tool/reasoning fields")
+        if self.role == "assistant" and self.tool_call_id is not None:
+            raise ValueError("assistant messages cannot carry tool_call_id")
+        if self.role == "tool":
+            if not self.tool_call_id:
+                raise ValueError("tool messages require tool_call_id")
+            if self.reasoning_content is not None or self.tool_calls:
+                raise ValueError("tool messages cannot carry assistant reasoning/tool fields")
+        return self
+
+
+class LLMToolFunction(BaseModel):
+    """Provider-neutral function definition sent in a tools request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class LLMToolDefinition(BaseModel):
+    """One OpenAI-compatible function tool definition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"] = "function"
+    function: LLMToolFunction
+
+
+class LLMToolFunctionCall(BaseModel):
+    """Function name and JSON argument string returned by a provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    arguments: str = ""
+
+
+class LLMToolCall(BaseModel):
+    """One assistant-side provider tool call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    type: Literal["function"] = "function"
+    function: LLMToolFunctionCall
+    index: int | None = Field(default=None, ge=0)
+
+
+class LLMToolResult(BaseModel):
+    """One tool result that must match an assistant call ID."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(min_length=1)
     content: str
+
+
+def render_llm_message(message: LLMMessage) -> dict[str, Any]:
+    """Render a message without leaking internal null/default fields."""
+
+    rendered: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.reasoning_content is not None:
+        rendered["reasoning_content"] = message.reasoning_content
+    if message.tool_calls:
+        rendered["tool_calls"] = [call.model_dump(mode="json", exclude_none=True) for call in message.tool_calls]
+    if message.tool_call_id is not None:
+        rendered["tool_call_id"] = message.tool_call_id
+    return rendered
+
+
+def render_llm_tools(tools: list[LLMToolDefinition]) -> list[dict[str, Any]]:
+    """Render a strict tool definition list for OpenAI-compatible providers."""
+
+    return [tool.model_dump(mode="json") for tool in tools]
 
 
 class LLMRequest(BaseModel):
     """Provider-neutral chat completion request."""
 
     messages: list[LLMMessage]
+    tools: list[LLMToolDefinition] = Field(default_factory=list)
+    tool_choice: Literal["auto", "none", "required"] | None = None
     response_format: Literal["text", "json_object"] = "text"
     temperature: float | None = None
     max_tokens: int | None = None
@@ -64,6 +172,17 @@ class LLMRequest(BaseModel):
     context_selection: ContextSelectionMetadata | None = None
     reasoning_policy: ReasoningPolicy = Field(default_factory=ReasoningPolicy)
 
+    @model_validator(mode="after")
+    def _tool_names_are_unique(self) -> "LLMRequest":
+        names = [tool.function.name for tool in self.tools]
+        if len(names) != len(set(names)):
+            raise ValueError("LLMRequest tools must have unique function names")
+        if self.tool_choice in {"auto", "required"} and not self.tools:
+            raise ValueError("LLMRequest tool_choice requires tools")
+        if self.tool_choice == "none" and not self.tools:
+            raise ValueError("LLMRequest tool_choice=none requires tools")
+        return self
+
 
 class LLMResponse(BaseModel):
     """Provider-neutral chat completion response."""
@@ -71,6 +190,8 @@ class LLMResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     content: str
+    reasoning_content: str | None = None
+    tool_calls: list[LLMToolCall] = Field(default_factory=list)
     parsed_json: dict[str, Any] | list[Any] | None = None
     model: str
     provider: str
