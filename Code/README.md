@@ -120,6 +120,11 @@ attributes escape hatch and contain no generated-code body.
 The patch-writer provider schema exposes that typed reference as an `add_symbol`
 alternative to inline generated code. All existing mutation permission, scope,
 budget, confirmation, and validation gates remain unchanged.
+The post-admission artifact binder resolves only admitted patch-writer
+references, replaces untrusted inline code with the ledger body, and mirrors the
+same bound input into `ToolCallMetadata` and `ToolSelection`. Blocked calls never
+touch the ledger, and authorized post-processing scope is copied without
+expansion.
 The code-artifact ledger separately owns bounded generated-code bodies for one
 runtime. Its frozen reference binds source and provider call IDs, checksum,
 sizes, and language; exact re-registration is idempotent, while lineage rebinds

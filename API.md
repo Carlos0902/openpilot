@@ -256,6 +256,13 @@ The provider-visible `file_patch_writer` contract accepts a typed
 authority: literal opt-in, explicit confirmation, exact write scope, budget,
 and task-owned validation requirements remain mandatory and are checked before
 selection; admission still performs no artifact resolution or execution.
+After admission, patch-artifact binding resolves only a typed ledger reference
+on an already-admitted `file_patch_writer` call. The verified body replaces any
+provider-supplied `generated_unit` in both the tool-call and selection views.
+Blocked admissions and inline-only writers return unchanged. An optional
+`authorized_post_processing_write_scope` is copied exactly into excluded
+runtime handles after bounded validation; the binder never derives, adds, or
+widens a path and performs no tool execution or file I/O.
 Provider code-artifact handoff uses a strict frozen runtime reference containing
 explicit `code_artifact` kind, project/provider lineage, SHA-256 checksum,
 byte/character counts, and language. A bounded ledger stores at most 1,024

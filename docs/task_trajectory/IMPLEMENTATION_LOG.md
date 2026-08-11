@@ -3138,3 +3138,28 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: admitted references are not yet resolved into verified
   `generated_unit`, post-processing scope is not bound here, and no tool is
   executed in this slice.
+
+### Post-admission patch artifact binding
+
+- Observed failure: mutation admission could accept a typed code-artifact
+  reference, but the admitted `ToolCallMetadata` and `ToolSelection` still had
+  no verified `generated_unit`. Passing provider-supplied inline code through
+  unchanged would bypass the ledger body, while resolving blocked calls could
+  turn a denied request into a runner-level failure.
+- Validation evidence: the regression suite fails because the binding module is
+  absent on the stacked base; 12 tests pass after implementation for verified
+  resolution in both admission views, replacement of provider inline text,
+  exact 64-path post-processing scope, inline-call identity, blocked-call
+  short-circuiting, required and unknown ledgers, source immutability, invalid
+  scope shapes, and invalid object types. The complete provider-focused set
+  passes 368, and the complete repository suite passes 1,464 in an isolated
+  detached worktree, followed by successful source compilation and diff
+  validation.
+- Implemented fix: add one post-admission binder that acts only on admitted
+  `file_patch_writer` calls with typed references, resolves the body through the
+  bounded ledger, and returns copied admission models with verified code. It
+  copies an explicitly named authorized post-processing scope into excluded
+  runtime handles without deriving or widening any path.
+- Remaining limitation: the provider round runner does not yet invoke the
+  binder, event-loop result redaction is separate, and post-processing tools
+  must still enforce the supplied scope at execution time.
