@@ -145,6 +145,11 @@ mutation mode, result budget, and ledger type, then returns one frozen bundle.
 Mutable response/admission values are deep-copied to close the preflight-to-use
 gap. It does not dispatch, execute, project results, compose wire messages, or
 grant permission.
+The execution composer accepts only that preflight bundle, dispatches exactly
+one existing bridge, then reuses bounded result and wire projection. Its frozen
+success value carries loop/result/wire evidence; stage-typed failures redact
+underlying exception text and retain completed post-execution evidence so an
+applied mutation remains recoverable and observable.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

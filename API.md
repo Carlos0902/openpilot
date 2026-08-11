@@ -261,6 +261,14 @@ validates the provider result budget and artifact-ledger type, and returns an
 immutable input bundle with deep-copied response and admission values. It
 performs no admission, dispatch, execution, result projection, wire composition,
 state update, or file I/O.
+Single-round execution consumes only that preflight bundle. It invokes exactly
+one existing read or mutation bridge, projects one bounded result per provider
+call, and composes the matching assistant/tool wire tuple. Its immutable runtime
+result contains the completed loop, projected results, and wire messages.
+Failures identify `preflight`, `execution`, `result_projection`, or
+`wire_composition` without copying underlying exception text. Result/wire
+failures retain the completed loop, and wire failures also retain projected
+results, so an applied mutation cannot be mistaken for an unobserved write.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

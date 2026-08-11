@@ -3697,3 +3697,44 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: a separate single-round composer still needs to consume
   this bundle, preserve post-execution evidence on projection failure, and then
   feed a bounded multi-round conversation controller.
+
+### Preflighted single-round provider execution
+
+- Observed failure: after static preflight was separated, no bounded owner yet
+  consumed that bundle through execution, result projection, and wire
+  composition. Reimplementing those calls in the future conversation loop would
+  duplicate bridge selection and could discard evidence when a post-write
+  projection failed.
+- Validation evidence: the regression suite first fails because no execution
+  composer exists. Six focused tests pass after implementation for a complete
+  read round, mutation ledger/scope forwarding, unpreflighted input rejection,
+  projection and wire stage errors, retained post-execution evidence, and
+  credential-safe execution failures. The execution and preflight set passes 17,
+  the adjacent execution/preflight/dispatch/result/wire set passes 66, and the
+  complete provider-focused set passes 498. The complete repository suite
+  passes 1,594 in an isolated detached worktree, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add a small four-stage composer that accepts only
+  `ProviderSingleRoundInputs`, invokes the existing dispatcher once, then reuses
+  result batching and wire exchange. Success returns a frozen loop/result/wire
+  value. Projection failures retain the completed loop; wire failures retain the
+  loop and projected results; user-facing error text is fixed and redacted.
+- Metadata impact note:
+  - Facts: existing preflighted response/admissions, tool-loop execution result,
+    provider result batch, and wire exchange only.
+  - Authoritative producers: preflight owns the immutable input snapshot;
+    execution owns loop evidence; existing projection modules own result and
+    wire shapes.
+  - Lifecycle and control impact: one side-effecting runtime orchestration step.
+    It adds no authority and cannot bypass admission, dispatch, mutation scope,
+    checkpoint, executor, result budget, or wire identity checks.
+  - Existing contracts reviewed: `ProviderSingleRoundInputs`, execution
+    dispatch, `ToolEventLoopRunResult`, result batching, wire exchange, artifact
+    ledger, public metadata inventory, and metadata development conventions.
+  - Decision: compose existing boundaries in one core module with frozen runtime
+    values rather than add a persisted metadata kind or another execution path.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: the bounded multi-round conversation controller still
+  needs to request/admit calls, consume this round result, update attempt and
+  evidence state, and route mutation validation/finalization transitions.

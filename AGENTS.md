@@ -85,6 +85,10 @@ update this file together with `API.md`.
   ledger type before execution. The preflight result is immutable and grants no
   new authority; it must snapshot mutable response/admission inputs so later
   execution cannot reinterpret caller-mutated raw collections.
+- Single-round execution must consume that preflight bundle, invoke exactly one
+  existing execution bridge, then reuse bounded result and wire projection. A
+  post-execution projection failure must retain completed loop evidence (and
+  projected results when available) without exposing provider exception text.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
