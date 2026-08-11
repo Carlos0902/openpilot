@@ -553,6 +553,29 @@ def test_admitted_reuse_requires_production_artifact_identity() -> None:
         )
 
 
+def test_compaction_evidence_collections_are_bounded() -> None:
+    with pytest.raises(ValueError):
+        ContextCompactionAttempt(
+            attempt_ordinal=1,
+            source_candidate_ids=[f"dialog-{index}" for index in range(65)],
+            source_fingerprint="sha256:" + "1" * 64,
+            algorithm="deterministic_observation_mask_v1",
+        )
+
+    with pytest.raises(ValueError):
+        ContextCompactionReuseAdmission(
+            admission_id="reuse-too-wide",
+            status=ContextCompactionReuseAdmissionStatus.ADMITTED,
+            source_candidate_ids=[f"dialog-{index}" for index in range(65)],
+            source_fingerprint="sha256:" + "2" * 64,
+            source_binding_hash="sha256:" + "3" * 64,
+            artifact_id="artifact-1",
+            artifact_kind="context_compaction",
+            artifact_integrity_checksum="sha256:" + "4" * 64,
+            generated_summary_fingerprint="sha256:" + "5" * 64,
+        )
+
+
 def test_context_quality_values_round_trip_without_runtime_metadata_owner() -> None:
     expectation = ContextQualityExpectation(
         expected_selected_candidate_ids=["required"],
