@@ -225,7 +225,11 @@ class LLMClient:
     def _make_cache_key(self, request: LLMRequest) -> str:
         """Generate a cache key from the request."""
         temp = request.temperature if request.temperature is not None else self.settings.temperature
-        resolved = resolve_reasoning_policy(request.reasoning_policy, self.settings)
+        resolved = resolve_reasoning_policy(
+            request.reasoning_policy,
+            self.settings,
+            structured_output=request.response_format == "json_object",
+        )
         provider_endpoint = normalized_provider_endpoint(
             str(getattr(self.settings, "base_url", "") or "")
         )
@@ -300,7 +304,11 @@ class LLMClient:
 
         self.settings.require_ready()
         client = self._make_openai_client()
-        resolved_reasoning = resolve_reasoning_policy(request.reasoning_policy, self.settings)
+        resolved_reasoning = resolve_reasoning_policy(
+            request.reasoning_policy,
+            self.settings,
+            structured_output=request.response_format == "json_object",
+        )
 
         last_error = None
         repair_messages = list(request.messages)

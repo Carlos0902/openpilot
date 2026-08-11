@@ -41,3 +41,6 @@ mode (disabled by default); ambiguous, general, and multi-file decisions retain
 the provider default. Recovery-cache identity binds provider, model, sanitized
 endpoint (including a non-default port), capability profile, and resolved
 reasoning semantics.
+Structured JSON requests disable provider-default reasoning only for capability
+profiles that explicitly support disabling it; generic endpoints remain
+provider-controlled.

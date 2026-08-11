@@ -119,6 +119,9 @@ known profile automatically. Unknown/custom endpoints use the conservative
 generic profile unless explicitly configured, and unsupported requests either
 reject or resolve to provider default according to the typed policy. Model-name
 substring matching is not a capability source.
+For structured JSON requests, a provider-default policy is mapped to explicit
+reasoning disable only when the selected capability profile declares that
+control; otherwise the provider default remains omitted.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally

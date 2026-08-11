@@ -2442,3 +2442,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Implemented fix: add ordered provider-neutral continuation helpers, a strict
   DeepSeek wrapper, and argv-only validation command equivalence.
 - Remaining limitation: these helpers neither execute tools nor run commands.
+
+### Structured output reasoning resolution
+
+- Observed failure: `LLMClient` resolved provider-default reasoning without the
+  request's structured-output fact, so known providers could spend the JSON
+  completion budget on hidden reasoning despite supporting explicit disable.
+- Validation evidence: the client-level regression test fails on the stacked
+  base because the transport payload omits the supported disable field; focused
+  and full suites pass after the fix.
+- Implemented fix: bind `response_format=json_object` into both request execution
+  and cache-key reasoning resolution, while leaving generic profiles unchanged.
+- Remaining limitation: this does not add provider-native routing or streaming
+  tool-call aggregation; those remain separate changes.
