@@ -2364,3 +2364,14 @@ PYTHONPATH=Code/src pytest -q Code/tests
   binding hash.
 - Remaining limitation: this change records and validates evidence only. It does
   not enable reusable summaries in model-facing prompts.
+
+### Bounded provider completion outcome evidence
+
+- Observed failure: empty, truncated, and failed provider attempts could not be
+  represented as typed budget evidence or safely influence one retry allowance.
+- Validation evidence: the regression commit fails while importing the missing
+  outcome and diagnostic contracts; focused and full suites pass after the fix.
+- Implemented fix: add an opt-in outcome signal, a bounded one-step recovery
+  bonus, and per-attempt diagnostics that preserve unknown usage.
+- Remaining limitation: this change records budget evidence only; provider
+  transport integration remains a separate change.
