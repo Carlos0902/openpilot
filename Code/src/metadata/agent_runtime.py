@@ -1203,7 +1203,7 @@ class ContextCompactionAttempt(BaseModel):
     )
 
     attempt_ordinal: StrictInt = Field(ge=1)
-    source_candidate_ids: list[str] = Field(min_length=1)
+    source_candidate_ids: list[str] = Field(min_length=1, max_length=64)
     source_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source_chars: StrictInt = Field(default=0, ge=0)
     algorithm: Literal[
@@ -1234,7 +1234,7 @@ class ContextCompactionAttempt(BaseModel):
     generated_summary_chars: StrictInt | None = Field(default=None, ge=1)
     trial_assembly_status: ContextAssemblyStatus | None = None
     trial_candidate_decision: ContextCandidateDecision | None = None
-    displaced_candidate_ids: list[str] = Field(default_factory=list)
+    displaced_candidate_ids: list[str] = Field(default_factory=list, max_length=64)
     selection_outcome: ContextCompactionSelectionOutcome = (
         ContextCompactionSelectionOutcome.NOT_APPLICABLE
     )
@@ -1375,7 +1375,7 @@ class ContextCompactionRecord(BaseModel):
 
     compaction_id: str = Field(min_length=1)
     source_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    source_candidate_ids: list[str] = Field(min_length=1)
+    source_candidate_ids: list[str] = Field(min_length=1, max_length=64)
     algorithm: Literal[
         "deterministic_dialog_extract_v1",
         "deterministic_observation_mask_v1",
@@ -1511,11 +1511,11 @@ class ContextCompactionReuseAdmission(BaseModel):
     admission_id: str = Field(min_length=1)
     status: ContextCompactionReuseAdmissionStatus
     rejection_reason: ContextCompactionReuseRejectionReason | None = None
-    source_candidate_ids: list[str] = Field(min_length=1)
+    source_candidate_ids: list[str] = Field(min_length=1, max_length=64)
     source_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source_binding_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    required_candidate_ids: list[str] = Field(default_factory=list)
-    recent_suffix_ids: list[str] = Field(default_factory=list)
+    required_candidate_ids: list[str] = Field(default_factory=list, max_length=64)
+    recent_suffix_ids: list[str] = Field(default_factory=list, max_length=64)
     session_constraints_hash: str | None = Field(
         default=None,
         pattern=r"^sha256:[0-9a-f]{64}$",
@@ -1772,10 +1772,17 @@ class ContextSelectionMetadata(MetadataBase):
     latest_dialog_timestamp: str | None = None
     assembly_status: ContextAssemblyStatus = ContextAssemblyStatus.READY
     candidate_decisions: list[ContextCandidateDecision] = Field(default_factory=list)
-    compaction_attempts: list[ContextCompactionAttempt] = Field(default_factory=list)
-    compaction_reuse_admissions: list[ContextCompactionReuseAdmission] = Field(default_factory=list)
+    compaction_attempts: list[ContextCompactionAttempt] = Field(
+        default_factory=list,
+        max_length=64,
+    )
+    compaction_reuse_admissions: list[ContextCompactionReuseAdmission] = Field(
+        default_factory=list,
+        max_length=64,
+    )
     compaction_reuse_shadow_failures: list[ContextCompactionReuseShadowFailure] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=64,
     )
     omitted_required_candidate_ids: list[str] = Field(default_factory=list)
     governance_blocked_candidate_ids: list[str] = Field(default_factory=list)
