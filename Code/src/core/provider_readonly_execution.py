@@ -20,6 +20,7 @@ from metadata import (
     ToolExecutionEnvelopeMetadata,
     ToolResultMetadata,
 )
+from tools.mutation_descriptor import FILE_MUTATION_TOOLS
 
 
 def execute_readonly_provider_admissions(
@@ -39,6 +40,28 @@ def execute_readonly_provider_admissions(
         session_id=session_id,
         round_index=round_index,
     )
+    return execute_prepared_provider_admissions(
+        runner,
+        task,
+        batch,
+        round_index=round_index,
+        mutation_mode=False,
+    )
+
+
+def execute_prepared_provider_admissions(
+    runner: Any,
+    task: Any,
+    admissions: tuple[ProviderToolAdmission, ...],
+    *,
+    round_index: int,
+    mutation_mode: bool,
+):
+    """Execute one already-preflighted provider batch in response order."""
+
+    task_id = str(getattr(task, "id", "unknown"))
+    session_id = runner.owner._session_id()
+    batch = tuple(admissions)
     runner._provider_executed = True
     if not batch:
         return runner._finish(
@@ -52,6 +75,21 @@ def execute_readonly_provider_admissions(
         )
 
     last_output: ToolResultMetadata | None = None
+    request_projection = [
+        {
+            "tool_name": (
+                item.selection.tool_name
+                if item.selection is not None
+                else item.tool_call.tool_name
+            ),
+            "input_metadata": (
+                item.selection.input_metadata.to_params()
+                if item.selection is not None
+                else item.tool_call.input_metadata.to_params()
+            ),
+        }
+        for item in batch
+    ]
     for index, admission in enumerate(batch):
         tool_call, tool_context = _prepare_tool_call(runner, admission)
         input_metadata = tool_call.input_metadata
@@ -112,6 +150,22 @@ def execute_readonly_provider_admissions(
             tool_context=tool_context,
             round_index=round_index,
         )
+        if mutation_mode and selection.tool_name in FILE_MUTATION_TOOLS:
+            guard_error = runner._guard_project_state_change_if_needed(
+                task,
+                tool_call,
+                selection,
+            )
+            if guard_error is not None:
+                return _finish_error(
+                    runner,
+                    task_id=task_id,
+                    session_id=session_id,
+                    round_index=round_index,
+                    last_output=last_output,
+                    tool_call=tool_call,
+                    tool_error=guard_error,
+                )
         input_payload = input_metadata.to_params()
         _show_tool_running(
             runner,
@@ -133,6 +187,23 @@ def execute_readonly_provider_admissions(
         if diagnostics:
             diagnostics.on_tool_started(tool_call=tool_call)
         controller = getattr(runner.runtime, "runtime_controller", None)
+        set_pending_verification = getattr(
+            controller,
+            "set_pending_verification",
+            None,
+        )
+        if (
+            mutation_mode
+            and selection.tool_name in FILE_MUTATION_TOOLS
+            and callable(set_pending_verification)
+        ):
+            set_pending_verification(
+                runner._pending_verification_plan(
+                    request_projection,
+                    index,
+                    selection,
+                )
+            )
         replay = getattr(controller, "replay_tool_result", None)
         exec_result = replay(tool_call, selection) if callable(replay) else None
         prepare = getattr(controller, "prepare_tool_call", None)
@@ -248,6 +319,26 @@ def execute_readonly_provider_admissions(
                     task_id=task_id,
                     session_id=session_id,
                 )
+            if mutation_mode and selection.tool_name in FILE_MUTATION_TOOLS:
+                verification_error = runner._verify_state_change_if_needed(
+                    task=task,
+                    task_id=task_id,
+                    session_id=session_id,
+                    source_selection=selection,
+                    round_index=round_index,
+                    last_output=last_output,
+                    defer_provider_validation=True,
+                )
+                if verification_error is not None:
+                    return runner._finish(
+                        task_id,
+                        session_id,
+                        False,
+                        round_index,
+                        last_output,
+                        verification_error,
+                        verification_error.error_message,
+                    )
             continue
 
         failure = _execution_failure(runner, exec_result, tool_call)
@@ -464,4 +555,7 @@ def _owner_hook(runner: Any, name: str, *args: Any) -> None:
         hook(*args)
 
 
-__all__ = ["execute_readonly_provider_admissions"]
+__all__ = [
+    "execute_prepared_provider_admissions",
+    "execute_readonly_provider_admissions",
+]

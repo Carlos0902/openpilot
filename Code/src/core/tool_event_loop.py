@@ -195,6 +195,32 @@ class ToolEventLoopRunner:
             round_index=round_index,
         )
 
+    def run_provider_mutation_tool_calls(
+        self,
+        task: Any,
+        admissions: list[Any] | tuple[Any, ...],
+        *,
+        round_index: int = 1,
+        code_artifact_ledger: Any = None,
+        authorized_post_processing_write_scope: Any = None,
+    ) -> ToolEventLoopRunResult:
+        """Prepare and execute a bounded admitted provider mutation batch."""
+
+        from core.provider_mutation_execution import (
+            execute_provider_mutation_admissions,
+        )
+
+        return execute_provider_mutation_admissions(
+            self,
+            task,
+            admissions,
+            round_index=round_index,
+            code_artifact_ledger=code_artifact_ledger,
+            authorized_post_processing_write_scope=(
+                authorized_post_processing_write_scope
+            ),
+        )
+
     def run(self, task: Any, initial_prompt: str) -> ToolEventLoopRunResult:
         task_id = str(getattr(task, "id", "unknown"))
         session_id = self.owner._session_id()
@@ -1189,6 +1215,7 @@ class ToolEventLoopRunner:
         source_selection: ToolSelection,
         round_index: int,
         last_output: ToolResultMetadata | None,
+        defer_provider_validation: bool = False,
     ) -> FailureMetadata | None:
         if source_selection.tool_name not in {"file_writer", "file_patch_writer", "file_delete_tool", "command_executor"}:
             return None
@@ -1196,6 +1223,11 @@ class ToolEventLoopRunner:
         state = getattr(controller, "state", None)
         verifier = getattr(controller, "verifier", None)
         if state is None or verifier is None:
+            return None
+        if (
+            defer_provider_validation
+            and str(getattr(task, "validation_command", "") or "").strip()
+        ):
             return None
         if getattr(state, "verification_status", "") != "required":
             return None

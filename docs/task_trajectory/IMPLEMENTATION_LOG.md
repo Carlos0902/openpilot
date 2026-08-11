@@ -3420,3 +3420,45 @@ PYTHONPATH=Code/src pytest -q Code/tests
     persisted schema changes.
 - Remaining limitation: the shared loop still needs a mutation lifecycle entry,
   exact validation deferral, and post-execution generated-unit redaction.
+
+### Provider mutation execution lifecycle bridge
+
+- Observed failure: prepared mutation admissions had no shared-loop entry, so
+  verified bodies and scopes could not reach the executor through edit guard,
+  checkpoint durability, state accounting, and provider lifecycle evidence.
+  The generic verifier could also substitute its own command before the exact
+  task-owned provider validation call.
+- Validation evidence: six regressions fail on the stacked base because
+  `run_provider_mutation_tool_calls` is absent; six tests pass after
+  implementation for inline execution, artifact resolution before execution,
+  prepare denial, observation failure without state application, exact-command
+  verifier deferral, and blocked-call non-execution with unused invalid binding
+  inputs. The adjacent read/mutation lifecycle set passes 18, and the complete
+  provider-focused set passes 431. The complete repository suite passes 1,527
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add a thin mutation entry that runs atomic batch preparation
+  and then reuses the existing provider execution lifecycle. Mutation mode adds
+  only the existing edit guard, pending-verification projection, and post-write
+  verifier decision; a non-empty task validation command defers the generic
+  verifier to the separately admitted exact provider command.
+- Metadata impact note:
+  - Facts: existing prepared mutation inputs, provider lifecycle events,
+    checkpoint outcomes, state budget counters, and pending verification.
+  - Authoritative producers: admission and mutation batch preparation own
+    authority/input binding; the shared controller/event loop owns execution and
+    state facts.
+  - Lifecycle and control impact: real patch execution. No mutation can enter
+    without prior typed admission, explicit scope, confirmation, validation
+    command, prepared checkpoint, and successful batch preparation.
+  - Existing contracts reviewed: `ProviderToolAdmission`, mutation batch
+    preparation, edit guard, controller checkpoint hooks,
+    `VerificationPlanMetadata`, and `ToolEventLoopRunResult`.
+  - Decision: reuse the read execution state machine with an internal mutation
+    mode instead of duplicating a second lifecycle engine; expose a separate
+    mutation entry so read-only callers cannot accidentally widen authority.
+  - Serialization and migration: existing event/result metadata is reused and
+    no persisted schema changes.
+- Remaining limitation: generated code remains present in returned loop
+  evidence until the separate redaction integration runs; round-trip dispatch
+  does not yet call either execution entry.

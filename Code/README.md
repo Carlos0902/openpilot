@@ -100,6 +100,12 @@ requires matching call/selection tool names, permits only admitted
 scope for inline patches and resolves artifact-backed bodies through the code
 ledger before binding. Any later failure leaves every source admission
 unchanged; blocked calls do not validate unused ledger or scope inputs.
+The mutation bridge runs that prepared batch through the shared lifecycle with
+the existing edit guard, pending-verification, prepared checkpoint, executor,
+observed checkpoint, state update, diagnostics, and event/result hooks. When
+the task already owns an exact validation command, generic verifier execution
+is deferred to the separately admitted provider command. Generated-unit
+redaction and round-trip dispatch remain later boundaries.
 The read-only provider execution bridge then reuses the normal tool lifecycle:
 prepared checkpoint, execution, observed checkpoint, state application,
 diagnostics, events, and result maps. Blocked or unprepared calls cannot

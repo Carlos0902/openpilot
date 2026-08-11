@@ -205,6 +205,13 @@ derived writes). Inline code receives that scope; artifact-backed code is first
 resolved through the runtime ledger and then receives it. Preparation builds
 copied admissions atomically, while blocked calls bypass ledger/scope
 validation; it still performs no tool execution or state mutation.
+The mutation execution bridge invokes that preparation first, then reuses the
+same provider lifecycle as read execution with mutation-only edit guard and
+pending-verification hooks. A failed prepared checkpoint prevents the writer;
+an unobserved result cannot update state. After a successful writer, a
+task-owned exact validation command suppresses the generic verifier so the
+separately admitted provider validation call remains authoritative. This bridge
+does not redact retained generated code or itself mark validation complete.
 The read-only execution bridge consumes that preflighted tuple in response
 order and reuses the shared prepared-checkpoint, executor,
 observed-checkpoint, state-update, diagnostics, event, and result lifecycle.
