@@ -82,3 +82,6 @@ registered validation executor before returning a non-executed selection.
 Batch admission lives in a separate module, caps one response at 32 unique
 provider calls, and accumulates typed resource use only after a call is
 admitted. It preserves provider order and never executes returned selections.
+Round-trip attempt and evidence-coverage values are strict frozen core
+contracts. They preserve provider correlation and bounded read/page evidence
+without creating a new persisted metadata owner.

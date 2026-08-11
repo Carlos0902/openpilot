@@ -142,6 +142,12 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   unknown usage and transport failure, without becoming a second budget owner.
   Outcome feedback remains opt-in and can grant at most the configured one-step
   recovery bonus.
+- `ProviderToolAttempt` and `ProviderToolEvidenceCoverage` are strict frozen
+  runtime values under `core`, not new public metadata kinds. They reuse
+  provider call IDs and bounded source evidence without copying tool or runtime
+  authority into a persisted tree. A future runner produces them; runtime
+  integration and trajectory adapters may consume projections, but the values
+  do not execute tools or own checkpoints.
 - `RuntimePromptContextSnapshot` is a strict value owned by
   `RuntimeCheckpointMetadata`. It binds the complete context request hash and
   rendered Prompt hash to the existing `ContextSelectionMetadata` and one

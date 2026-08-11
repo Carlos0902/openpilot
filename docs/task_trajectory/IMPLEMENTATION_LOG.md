@@ -2732,3 +2732,36 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the batch does not enforce provider round-trip phase
   order, execute selections, record mutation receipts, or continue the model;
   those remain separate changes.
+
+### Provider round-trip attempt and evidence contracts
+
+- Observed failure: the source round-trip design represented normalized attempts
+  and evidence coverage as mutable/unvalidated dataclass collections, leaving
+  contradictory attempt outcomes and inconsistent repeated evidence legal.
+- Validation evidence: the regression test fails at import on the stacked base;
+  16 attempt/evidence tests cover JSON round trips, contradictory states,
+  duplicate evidence, page-cap consistency, exact collection boundaries, and
+  unknown fields; the complete focused provider set passes 122. The full suite
+  passes 1,230 tests, followed by successful source compilation and diff
+  validation.
+- Implemented fix: add strict frozen core contracts for provider attempts,
+  declared read windows, page-read counts, and evidence coverage, with bounded
+  paths, windows, observed keys, duplicate-only rounds, and finalization counts.
+- Metadata impact note:
+  - Fact: normalized attempt outcomes and bounded evidence coverage.
+  - Authoritative producer: the future provider round-trip runner; consumers:
+    runtime task integration and trajectory/report projections.
+  - Lifecycle: runtime-only with optional derived event evidence. Control impact:
+    recovery observation, but no permission or completion grant.
+  - Existing contracts reviewed: `ToolCallMetadata`, `ToolErrorMetadata`,
+    `ToolLoopMetadata`, `LLMResponseMetadata`, `RuntimeBudgetMetadata`,
+    `ProviderBudgetDiagnostic`, `LLMResponse`, and `ToolEventLoopRunResult`.
+  - Decision: strict owned core values that reuse existing contracts; no new
+    `MetadataKind` and no second provider, tool, budget, or checkpoint authority.
+  - Serialization and migration: bounded Pydantic JSON projection; no historical
+    migration because no production producer or persisted field exists yet.
+  - Tests and docs: contract/JSON/invalid-state tests plus `API.md`,
+    `Code/README.md`, the metadata catalog, and this implementation log.
+- Remaining limitation: this change defines no runner state machine, duplicate
+  partitioning, final result envelope, evidence collection, tool execution, or
+  runtime integration.

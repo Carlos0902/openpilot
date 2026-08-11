@@ -183,6 +183,11 @@ Provider batches are capped at 32 calls and reject duplicate provider call IDs.
 Calls retain response order and receive deterministic project IDs; only admitted
 calls accumulate typed call, read, edit, create, and validation usage for later
 calls in the same batch, so blocked requests cannot consume authority.
+Provider round-trip attempt and evidence observations use frozen runtime
+contracts. Attempt success/error facts must be consistent; normalized
+signatures, paths, declared windows, page counts, evidence keys, duplicate-only
+rounds, and finalization requests have explicit bounds and set invariants. These
+contracts do not execute tools, persist checkpoints, or grant authority.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
