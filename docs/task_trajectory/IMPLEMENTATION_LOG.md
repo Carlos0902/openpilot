@@ -2891,3 +2891,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
     the metadata catalog, and this implementation log.
 - Remaining limitation: no tool-result adapter, evidence extraction, runner
   policy, persistence, or runtime integration is added here.
+
+### Bounded provider tool wire exchange
+
+- Observed failure: typed duplicate blocks and provider tool results had no
+  reusable bounded projection into the assistant/tool continuation message
+  sequence required by provider-native round trips.
+- Validation evidence: the regression suite fails because the wire-exchange
+  module is absent on the stacked base; 14 tests pass after implementation for
+  fixed duplicate JSON, assistant field preservation, response-call ordering,
+  exact 32-call and 1,600-character boundaries, ID mismatch, invalid values,
+  unbounded iterables, and empty exchanges. The complete focused provider set
+  passes 205. The full suite passes 1,313 tests, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add a pure duplicate-block adapter plus exact wire exchange.
+  It validates all call/result identities and sizes before producing one
+  assistant message and provider-call-ordered tool messages; it performs no
+  execution or provider request.
+- Remaining limitation: successful execution-result projection, artifact
+  handoff, historical message compaction, request dispatch, and runner control
+  flow remain separate changes.

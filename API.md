@@ -215,6 +215,11 @@ page-read cap no greater than 64. It derives the frozen evidence-coverage value;
 duplicate observations are idempotent, over-cap page reads fail closed, and path
 recording remains inside a known project root and never reads or creates the
 target file.
+Provider wire exchange projects typed duplicate blocks into bounded JSON tool
+results and requires an exact one-to-one ID match with at most 32 assistant tool
+calls. Results may arrive out of order but tool messages follow assistant call
+order; each tool-result body is capped at 1,600 characters. Missing, extra,
+duplicate, overlong, or unbounded-sequence inputs fail before message creation.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
