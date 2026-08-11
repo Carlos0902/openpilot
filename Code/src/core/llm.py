@@ -38,6 +38,8 @@ from metadata import (
 )
 from utils.json_utils import safe_parse_json
 
+MAX_NATIVE_TRANSPORT_RETRIES = 5
+
 
 def normalized_provider_endpoint(base_url: str) -> str:
     """Return a credential-free endpoint identity while preserving meaningful ports."""
@@ -368,11 +370,11 @@ class LLMClient:
                 else {}
             )
             if native_transport is not None:
-                response = native_transport.send_once(
-                    self.settings,
+                response = self._create_native_completion_with_transport_retry(
+                    native_transport,
                     request.model_copy(update={"messages": repair_messages}),
                     resolved_reasoning,
-                    trust_env=True,
+                    **transport_kwargs,
                 )
             elif stream_callback is not None:
                 response = self._create_streaming_completion_with_transport_retry(
@@ -893,6 +895,116 @@ class LLMClient:
             error.context["transport_retry_history"] = history
             raise error from last_error
         raise LLMProviderError("Provider request failed without an error.", retryable=True, category=ErrorCategory.RETRYABLE)
+
+    def _create_native_completion_with_transport_retry(
+        self,
+        transport: Any,
+        request: LLMRequest,
+        resolved_reasoning: Any,
+        *,
+        transport_retries: int | None = None,
+    ) -> Any:
+        """Run a finite number of native-provider attempts with bounded evidence."""
+
+        retries = (
+            getattr(self.settings, "transport_retries", 0)
+            if transport_retries is None
+            else transport_retries
+        )
+        retries = int(retries)
+        if not 0 <= retries <= MAX_NATIVE_TRANSPORT_RETRIES:
+            raise ValueError(
+                "native transport retries must be between 0 and "
+                f"{MAX_NATIVE_TRANSPORT_RETRIES}"
+            )
+        attempts = retries + 1
+        delay = max(0.0, float(getattr(self.settings, "retry_initial_delay", 0.0)))
+        max_delay = max(delay, float(getattr(self.settings, "retry_max_delay", delay)))
+        history: list[dict[str, Any]] = []
+        self._last_transport_retry_history = history
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                response = transport.send_once(
+                    self.settings,
+                    request,
+                    resolved_reasoning,
+                    trust_env=True,
+                )
+                history.append(
+                    {"attempt": attempt, "status": "success", "retryable": False}
+                )
+                provider_details = getattr(response, "provider_details", None)
+                if isinstance(provider_details, dict):
+                    provider_details["transport_retry_history"] = list(history)
+                return response
+            except LLMProviderError as exc:
+                last_error = exc
+                category = exc.category
+                retryable = bool(exc.context.get("retryable", False))
+            except Exception as exc:
+                last_error = exc
+                category = self._classify_provider_error(exc)
+                retryable = category in {
+                    ErrorCategory.NETWORK,
+                    ErrorCategory.TIMEOUT,
+                    ErrorCategory.RETRYABLE,
+                }
+
+            history.append(
+                {
+                    "attempt": attempt,
+                    "status": "failed",
+                    "category": category.value,
+                    "retryable": retryable,
+                    "error_type": type(last_error).__name__ if last_error else None,
+                    "error": self._bounded_provider_error_text(last_error),
+                }
+            )
+            if not retryable or attempt >= attempts:
+                break
+            if delay > 0:
+                time.sleep(min(delay, max_delay))
+                delay = min(delay * 2 if delay else 0, max_delay)
+
+        if isinstance(last_error, (httpx.TimeoutException, LLMTimeoutError)):
+            error = LLMTimeoutError(
+                str(last_error), timeout_seconds=self.settings.timeout_seconds
+            )
+            error.context["transport_retry_history"] = history
+            raise error from last_error
+        if isinstance(last_error, LLMProviderError):
+            last_error.context["transport_retry_history"] = history
+            raise last_error
+        if last_error is not None:
+            category = self._classify_provider_error(last_error)
+            error = LLMProviderError(
+                f"{category}: {last_error}",
+                retryable=False,
+                category=category,
+            )
+            error.context["transport_retry_history"] = history
+            raise error from last_error
+        raise LLMProviderError(
+            "Native provider request failed without an error.",
+            retryable=True,
+            category=ErrorCategory.RETRYABLE,
+        )
+
+    def _bounded_provider_error_text(self, exc: Exception | None) -> str:
+        if exc is None:
+            return ""
+        text = str(exc)
+        raw_api_key = getattr(self.settings, "api_key", "") or ""
+        api_key = (
+            raw_api_key.get_secret_value()
+            if hasattr(raw_api_key, "get_secret_value")
+            else str(raw_api_key)
+        )
+        if api_key:
+            text = text.replace(api_key, "[REDACTED]")
+        return text[:500]
 
     def _should_retry_without_env_proxy(self, exc: Exception) -> bool:
         category = self._classify_provider_error(exc)

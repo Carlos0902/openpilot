@@ -2480,5 +2480,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
   suites pass after the fix.
 - Implemented fix: route non-OpenAI transport families through the explicit
   native registry and reject native streaming before transport.
-- Remaining limitation: native retry/proxy-fallback evidence, native streaming,
+- Remaining limitation: native retry evidence, proxy fallback, native streaming,
   and streamed reasoning/tool-call aggregation remain separate changes.
+
+### Bounded native transport retry evidence
+
+- Observed failure: native provider routing performed only one attempt and did
+  not expose typed evidence explaining retryable or terminal failures.
+- Validation evidence: two offline regressions fail on the stacked base for the
+  missing retry helper; focused and full suites pass after implementation.
+- Implemented fix: apply the configured finite retry count around single-shot
+  native transports, stop immediately on terminal provider errors, retain
+  bounded attempt history, reject overrides above five retries, and redact the
+  configured credential from error text.
+- Remaining limitation: environment-proxy fallback and native streaming remain
+  separate changes.

@@ -89,3 +89,16 @@ def test_native_retry_stops_after_terminal_provider_error() -> None:
 
     assert attempts == 1
     assert len(exc_info.value.context["transport_retry_history"]) == 1
+
+
+def test_native_retry_rejects_unbounded_override() -> None:
+    client = LLMClient(_settings(retries=0), enable_cache=False)
+    request, resolved = _request_and_policy(client)
+
+    with pytest.raises(ValueError, match="between 0 and 5"):
+        client._create_native_completion_with_transport_retry(
+            SimpleNamespace(send_once=lambda *_args, **_kwargs: _response()),
+            request,
+            resolved,
+            transport_retries=6,
+        )
