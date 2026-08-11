@@ -7,6 +7,7 @@ completion evidence.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -76,6 +77,7 @@ def _normalized_response(
 class NativeLLMTransport:
     family: ReasoningTransportFamily
     adapter_id: str
+    max_response_bytes = 2_000_000
 
     def build_request(
         self,
@@ -99,13 +101,27 @@ class NativeLLMTransport:
         built = self.build_request(settings, request, resolved)
         client_kwargs: dict[str, Any] = {
             "timeout": settings.timeout_seconds,
-            "follow_redirects": True,
+            "follow_redirects": False,
         }
         if not trust_env:
             client_kwargs["trust_env"] = False
         try:
             with httpx.Client(**client_kwargs) as client:
-                response = client.post(built.url, headers=built.headers, json=built.payload)
+                with client.stream(
+                    "POST",
+                    built.url,
+                    headers=built.headers,
+                    json=built.payload,
+                ) as response:
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        if len(body) + len(chunk) > self.max_response_bytes:
+                            raise LLMProviderError(
+                                "native provider response exceeds the byte limit",
+                                status_code=response.status_code,
+                                category=ErrorCategory.TERMINAL,
+                            )
+                        body.extend(chunk)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise LLMProviderError(
                 f"native transport network failure: {exc}",
@@ -119,15 +135,16 @@ class NativeLLMTransport:
 
         if response.status_code >= 400:
             category = _http_error_category(response.status_code)
+            error_text = bytes(body[:500]).decode("utf-8", errors="replace")
             raise LLMProviderError(
-                f"native provider returned HTTP {response.status_code}: {response.text[:500]}",
+                f"native provider returned HTTP {response.status_code}: {error_text}",
                 status_code=response.status_code,
                 retryable=category in {ErrorCategory.RETRYABLE, ErrorCategory.NETWORK},
                 category=category,
             )
         try:
-            raw = response.json()
-        except ValueError as exc:
+            raw = json.loads(body)
+        except (UnicodeDecodeError, ValueError) as exc:
             raise LLMProviderError(
                 "native provider returned a non-JSON response",
                 status_code=response.status_code,
