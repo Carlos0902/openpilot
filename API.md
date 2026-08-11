@@ -96,6 +96,10 @@ ownership. A native call performs one HTTP attempt, never follows redirects,
 and rejects response bodies larger than 2,000,000 bytes before JSON parsing.
 Retry, caching, and JSON repair remain `LLMClient` responsibilities and are not
 enabled by the transport contract alone.
+Tool continuations preserve the assistant call IDs, result order, and optional
+provider reasoning state exactly. Validation commands are compared as parsed
+argv; shell wrappers, pipes, redirections, substitutions, and appended commands
+are not treated as equivalent authority.
 
 `LLMRequest`:
 

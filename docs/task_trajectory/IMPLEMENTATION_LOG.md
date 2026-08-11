@@ -2432,3 +2432,13 @@ PYTHONPATH=Code/src pytest -q Code/tests
   native HTTP performs one non-redirecting attempt with a 2,000,000-byte cap.
 - Remaining limitation: `LLMClient` routing, retry, caching, and JSON repair are
   separate changes.
+
+### Tool continuation and validation command contracts
+
+- Observed failure: provider tool continuations lacked one reusable identity
+  check, and validation text comparison could accidentally widen command scope.
+- Validation evidence: focused tests cover missing/duplicate/drifted call IDs,
+  DeepSeek reasoning state, quoting, wrappers, pipes, redirects, and bad quotes.
+- Implemented fix: add ordered provider-neutral continuation helpers, a strict
+  DeepSeek wrapper, and argv-only validation command equivalence.
+- Remaining limitation: these helpers neither execute tools nor run commands.
