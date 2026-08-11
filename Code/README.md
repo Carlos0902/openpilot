@@ -88,3 +88,6 @@ without creating a new persisted metadata owner.
 The final result envelope separately composes existing LLM, tool-loop, budget,
 attempt, evidence, and reasoning values and rejects contradictory completion or
 lineage states.
+Provider tool-call signatures use bounded canonical arguments, project-root path
+normalization, and SHA-256 identity so provider call IDs cannot control replay or
+duplicate detection.

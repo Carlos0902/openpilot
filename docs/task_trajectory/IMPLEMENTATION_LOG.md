@@ -2799,3 +2799,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
     `Code/README.md`, the metadata catalog, and this implementation log.
 - Remaining limitation: this change defines no runner state machine, request
   diagnostics producer, tool execution, persistence, or runtime integration.
+
+### Canonical provider tool-call signatures
+
+- Observed failure: duplicate/replay detection lived inside the oversized source
+  runner and lacked a reusable bounded identity function; relative and absolute
+  project paths could otherwise describe the same call with different text.
+- Validation evidence: the regression suite fails because the signature module
+  is absent on the stacked base; nine tests pass after implementation for path,
+  object-key and `file_paths` normalization, ordered non-path lists, provider ID
+  independence, malformed arguments, project-root separation, and depth/item
+  limits and bounded malformed-payload hashing. The complete focused provider
+  set passes 141. The full suite passes 1,249 tests, followed by successful
+  source compilation and diff validation.
+- Implemented fix: add a pure SHA-256 signature helper over the tool name and
+  canonical argument object. It resolves path fields against the project root,
+  preserves ordinary list order, sorts `file_paths`, and replaces malformed raw
+  arguments with a hash of only the bounded prefix plus total length.
+- Remaining limitation: this change does not own an attempt ledger, partition
+  duplicates, collect evidence, execute tools, or run provider rounds.

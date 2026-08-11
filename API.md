@@ -193,6 +193,13 @@ responses/messages, tool-loop results, attempt/evidence values, typed provider
 budget diagnostics, and reasoning observations. Success is the inverse of error
 presence; attempt lineage and evidence counters cannot exceed `rounds_used`;
 messages, attempts, loops, and diagnostic collections are bounded.
+Provider tool-call replay identity is a SHA-256 hash of the registered tool name
+and canonical argument object, never the provider call ID. Object keys and
+`file_paths` order normalize deterministically; project-relative file and
+directory paths resolve against the known project root. Canonicalization is
+bounded to 16 nested levels and 1,024 collection items, while malformed payloads
+use only a hash of the bounded 200,000-character prefix and the original
+character count.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
