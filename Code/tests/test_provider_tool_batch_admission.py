@@ -189,6 +189,23 @@ def test_batch_rejects_more_than_static_call_limit() -> None:
         _admit(calls)
 
 
+def test_batch_accepts_exact_static_call_limit() -> None:
+    calls = [
+        _call("file_reader", {"file_path": "a.py"}, f"provider-{index}")
+        for index in range(MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE)
+    ]
+    admissions = _admit(
+        calls,
+        budget=RuntimeBudgetMetadata(
+            max_tool_calls=MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE,
+            max_file_reads=MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE,
+        ),
+    )
+
+    assert len(admissions) == MAX_PROVIDER_TOOL_CALLS_PER_RESPONSE
+    assert all(item.status == "admitted" for item in admissions)
+
+
 @pytest.mark.parametrize(
     "updates",
     [

@@ -79,3 +79,6 @@ the tool and never admits mutation.
 Mutation admission is a separate patch-only entry. It requires literal opt-in,
 confirmation, exact write scope, a task-owned validation command, and a
 registered validation executor before returning a non-executed selection.
+Batch admission lives in a separate module, caps one response at 32 unique
+provider calls, and accumulates typed resource use only after a call is
+admitted. It preserves provider order and never executes returned selections.

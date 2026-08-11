@@ -2714,3 +2714,21 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: declared-read phase evidence, mutation receipts, exact
   validation execution, batch accumulation, and provider round-trip integration
   remain separate changes.
+
+### Bounded provider tool-call batch admission
+
+- Observed failure: provider calls could be admitted one at a time, but a
+  response-level batch had no static cardinality bound, duplicate-ID rejection,
+  deterministic ordinal binding, or accumulated typed resource usage.
+- Validation evidence: the regression test fails at import on the stacked base;
+  the batch plus single-call composition suites pass 42 cases after the
+  implementation, including the exact 32-call boundary; the complete focused
+  provider-admission set passes 106. The full suite passes 1,214 tests,
+  followed by successful source compilation and diff validation.
+- Implemented fix: add a separate non-executing batch module that rejects more
+  than 32 calls and duplicate provider IDs, dispatches read-only and patch-only
+  calls through their existing entry points, and accumulates calls, reads,
+  edits, creates, and validation usage only for admitted selections.
+- Remaining limitation: the batch does not enforce provider round-trip phase
+  order, execute selections, record mutation receipts, or continue the model;
+  those remain separate changes.

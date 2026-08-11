@@ -179,6 +179,10 @@ The separate mutation entry admits only `file_patch_writer`. It requires a
 literal mutation opt-in, explicit confirmation, exact write scope, a non-empty
 task-owned validation command, and a registered `command_executor`; it returns
 a selection without performing either the patch or the validation command.
+Provider batches are capped at 32 calls and reject duplicate provider call IDs.
+Calls retain response order and receive deterministic project IDs; only admitted
+calls accumulate typed call, read, edit, create, and validation usage for later
+calls in the same batch, so blocked requests cannot consume authority.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
