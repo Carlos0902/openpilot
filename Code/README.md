@@ -91,3 +91,5 @@ lineage states.
 Provider tool-call signatures use bounded canonical arguments, project-root path
 normalization, and SHA-256 identity so provider call IDs cannot control replay or
 duplicate detection.
+The attempt ledger separately enforces unique provider IDs, first-signature
+ownership, explicit duplicate lineage, and the existing 1,024-attempt cap.

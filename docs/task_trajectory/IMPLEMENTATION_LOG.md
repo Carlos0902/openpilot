@@ -2818,3 +2818,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
   arguments with a hash of only the bounded prefix plus total length.
 - Remaining limitation: this change does not own an attempt ledger, partition
   duplicates, collect evidence, execute tools, or run provider rounds.
+
+### Bounded provider tool-attempt ledger
+
+- Observed failure: normalized attempts had a strict value contract but no
+  runtime owner for first-signature identity, provider-call uniqueness, bounded
+  retention, or duplicate lineage.
+- Validation evidence: the regression suite fails because the ledger module is
+  absent on the stacked base; 14 tests pass after implementation for first and
+  failed attempt ownership, duplicate recording, invalid lineage, provider-ID
+  reuse, exact capacity, overflow, invalid values, and configured limits. The
+  complete focused provider set passes 155. The full suite passes 1,263 tests,
+  followed by successful source compilation and diff validation.
+- Implemented fix: add a runtime-only ledger capped by the existing 1,024
+  attempt limit. It retains typed immutable attempts, owns the first attempt per
+  normalized signature, rejects provider ID reuse, and requires later repeats
+  to reference that first provider call explicitly.
+- Remaining limitation: this change does not partition provider response calls,
+  create preblocked tool results, collect evidence, execute tools, or run the
+  provider state machine.

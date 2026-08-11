@@ -200,6 +200,10 @@ directory paths resolve against the known project root. Canonicalization is
 bounded to 16 nested levels and 1,024 collection items, while malformed payloads
 use only a hash of the bounded 200,000-character prefix and the original
 character count.
+A runtime attempt ledger owns at most 1,024 typed attempts. Provider call IDs
+must remain unique across one round trip; the first attempt owns a normalized
+signature, and later repeats must explicitly reference that first provider call
+as duplicate lineage. Failed first attempts still own replay identity.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,
