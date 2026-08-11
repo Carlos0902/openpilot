@@ -73,6 +73,32 @@ def test_session_constraint_values_are_typed_and_round_trip() -> None:
     assert restored.canonical_hash.startswith("sha256:")
 
 
+def test_constraint_authority_hash_ignores_ingress_cursor_noise() -> None:
+    state = SessionConstraintState(
+        session_id="session-1",
+        project_root="/project",
+        revision=1,
+        processed_through_turn=1,
+        entries=[_entry()],
+    )
+    cursor_advanced = state.model_copy(update={"processed_through_turn": 50})
+
+    assert cursor_advanced.authority_hash == state.authority_hash
+    assert cursor_advanced.canonical_hash != state.canonical_hash
+
+    revision_changed = state.model_copy(update={"revision": 2})
+    assert revision_changed.authority_hash != state.authority_hash
+
+    revoked = SessionConstraintState(
+        session_id="session-1",
+        project_root="/project",
+        revision=2,
+        processed_through_turn=2,
+        entries=[_entry(status="revoked")],
+    )
+    assert revoked.authority_hash != state.authority_hash
+
+
 def test_session_constraint_proposal_is_not_active_authority() -> None:
     proposal = SessionConstraintProposal(
         proposal_id="proposal-1",
