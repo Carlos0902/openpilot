@@ -157,6 +157,10 @@ are checked against the existing typed input metadata without granting execution
 Provider file reads and writes require non-empty explicit scopes, exact canonical
 path matches, project-root containment, and non-symlink paths. Scope and request
 sets are independently capped at 64 paths.
+Provider tool budget admission uses typed per-call and batch-prior usage for
+tool calls, reads, edits, creates, and validation attempts. Decisions expose a
+strict admitted/blocked status and typed exhaustion reason; exact remaining
+boundaries are allowed and projected overages are blocked.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

@@ -2633,3 +2633,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
   at most four outside paths.
 - Remaining limitation: path validation does not itself authorize or execute a
   provider tool call.
+
+### Typed provider tool budget admission
+
+- Observed failure: provider tool resource counts and batch-prior usage were
+  represented as free dictionaries, and validation attempts were not included
+  in the same typed budget decision.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes resource classification, exact-boundary, five exhaustion reason,
+  invalid-count, accumulated-usage, and contradictory-state checks after
+  implementation; the full suite remains green.
+- Implemented fix: add strict per-call usage, accumulated batch usage, and
+  admitted/blocked budget decisions covering calls, reads, edits, creates, and
+  validation attempts.
+- Remaining limitation: budget admission does not itself grant permission or
+  execute tools.

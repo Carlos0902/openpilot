@@ -12,12 +12,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.llm import LLMToolCall
 from core.provider_tool_definitions import MAX_PROVIDER_FIELDS_PER_TOOL
+from core.tool_contracts import ToolCapability
 from metadata import (
     FailureMetadata,
+    RuntimeBudgetMetadata,
     ToolCallMetadata,
     ToolErrorMetadata,
     ToolInputMetadata,
@@ -63,6 +65,53 @@ class ProviderToolAdmission(BaseModel):
             raise ValueError("provider call ID must match ToolCallMetadata")
         if self.tool_call.call_id != self.project_call_id:
             raise ValueError("project call ID must match ToolCallMetadata")
+        return self
+
+
+class ProviderToolResourceUsage(BaseModel):
+    """Resource cost of one provider tool call before admission."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    calls: Literal[1] = 1
+    reads: int = Field(default=0, ge=0, le=1)
+    edits: int = Field(default=0, ge=0, le=1)
+    creates: int = Field(default=0, ge=0, le=1)
+    validation: int = Field(default=0, ge=0, le=1)
+
+
+class ProviderToolBudgetUsage(BaseModel):
+    """Usage already admitted inside the current provider batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    calls: int = Field(default=0, ge=0)
+    reads: int = Field(default=0, ge=0)
+    edits: int = Field(default=0, ge=0)
+    creates: int = Field(default=0, ge=0)
+    validation: int = Field(default=0, ge=0)
+
+
+class ProviderToolBudgetDecision(BaseModel):
+    """Typed runtime-budget decision for one provider tool call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["admitted", "blocked"]
+    reason_code: Literal[
+        "within_budget",
+        "tool_calls_exhausted",
+        "file_reads_exhausted",
+        "file_edits_exhausted",
+        "file_creates_exhausted",
+        "validation_exhausted",
+    ]
+    usage: ProviderToolResourceUsage
+
+    @model_validator(mode="after")
+    def _status_matches_reason(self) -> "ProviderToolBudgetDecision":
+        if (self.reason_code == "within_budget") != (self.status == "admitted"):
+            raise ValueError("budget decision status must match reason_code")
         return self
 
 
@@ -183,6 +232,96 @@ def provider_tool_contract_error(
                 f"{_readable_required_groups(conditional_any_of)}"
             )
     return None
+
+
+def provider_tool_resource_usage(
+    definition: Any,
+    input_metadata: ToolInputMetadata,
+    *,
+    validation_command: str | None = None,
+) -> ProviderToolResourceUsage:
+    """Classify one call into the runtime budget dimensions it consumes."""
+
+    capabilities = {
+        str(getattr(capability, "value", capability))
+        for capability in (getattr(definition, "capabilities", []) or [])
+    }
+    reads = int(ToolCapability.FILE_READ.value in capabilities)
+    writes = bool(
+        {
+            ToolCapability.FILE_WRITE.value,
+            ToolCapability.FILE_DELETE.value,
+        }
+        & capabilities
+    )
+    operation = str(input_metadata.operation_kind or "").lower()
+    creates = int(
+        writes
+        and operation in {"create_file", "file_create", "directory_generate"}
+    )
+    edits = int(writes and not creates)
+    validation = int(
+        bool(
+            validation_command
+            and input_metadata.tool_name == "command_executor"
+        )
+    )
+    return ProviderToolResourceUsage(
+        reads=reads,
+        edits=edits,
+        creates=creates,
+        validation=validation,
+    )
+
+
+def provider_tool_budget_decision(
+    budget: RuntimeBudgetMetadata,
+    usage: ProviderToolResourceUsage,
+    *,
+    prior: ProviderToolBudgetUsage | None = None,
+) -> ProviderToolBudgetDecision:
+    """Admit only when runtime, batch-prior, and requested usage fit."""
+
+    prior = prior or ProviderToolBudgetUsage()
+    checks = [
+        (
+            budget.tool_calls_used + prior.calls + usage.calls,
+            budget.max_tool_calls,
+            "tool_calls_exhausted",
+        ),
+        (
+            budget.file_reads_used + prior.reads + usage.reads,
+            budget.max_file_reads,
+            "file_reads_exhausted",
+        ),
+        (
+            budget.file_edits_used + prior.edits + usage.edits,
+            budget.max_file_edits,
+            "file_edits_exhausted",
+        ),
+        (
+            budget.file_creates_used + prior.creates + usage.creates,
+            budget.max_file_creates,
+            "file_creates_exhausted",
+        ),
+        (
+            budget.verification_attempts_used + prior.validation + usage.validation,
+            budget.max_verification_attempts,
+            "validation_exhausted",
+        ),
+    ]
+    for projected, maximum, reason_code in checks:
+        if projected > maximum:
+            return ProviderToolBudgetDecision(
+                status="blocked",
+                reason_code=reason_code,
+                usage=usage,
+            )
+    return ProviderToolBudgetDecision(
+        status="admitted",
+        reason_code="within_budget",
+        usage=usage,
+    )
 
 
 def provider_read_scope_error(
@@ -389,9 +528,14 @@ __all__ = [
     "MAX_PROVIDER_TOOL_ARGUMENT_CHARS",
     "ProviderToolAdmission",
     "ProviderToolAdmissionError",
+    "ProviderToolBudgetDecision",
+    "ProviderToolBudgetUsage",
+    "ProviderToolResourceUsage",
     "decode_provider_tool_arguments",
+    "provider_tool_budget_decision",
     "provider_tool_contract_error",
     "provider_tool_error",
+    "provider_tool_resource_usage",
     "provider_read_scope_error",
     "provider_write_scope_error",
 ]
