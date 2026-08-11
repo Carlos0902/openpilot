@@ -119,6 +119,12 @@ bridge: read-only when no admitted mutation exists, mutation only with literal
 allowance otherwise. Ledger and derived-scope inputs are forwarded only to the
 mutation bridge; blocked mutations remain on the non-executing read path. The
 dispatcher does not decode or admit provider input.
+Mutation-receipt projection is independently bounded and body-free. It selects
+the first successful mutation from at most 1,024 result mappings, preserves the
+exact bounded validation command and validated artifact lineage, caps changed
+ranges at eight line-only entries, and rejects malformed or oversized identity,
+range, byte-count, command, or collection values. It performs no execution,
+state update, or source-result mutation.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

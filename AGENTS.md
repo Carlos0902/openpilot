@@ -66,6 +66,12 @@ update this file together with `API.md`.
   root task's write, command, and network authority and must expose its side
   effects; a project-scoped Python validation must fail closed until a ready
   environment is attached, never silently fall back to the host interpreter.
+- Provider mutation receipts are retained evidence, not mutation authority.
+  Project only the first successful file mutation from a bounded result list;
+  preserve the exact bounded validation command, strict artifact reference,
+  byte count, and at most eight line-only changed ranges. Generated bodies,
+  replacement text, and malformed or unbounded evidence must never enter the
+  receipt.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

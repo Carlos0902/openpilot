@@ -229,6 +229,14 @@ with an admitted mutation it requires literal mutation allowance and forwards
 the runtime ledger/scope only to the mutation bridge. Blocked mutation calls do
 not select the mutation path or inspect those unused inputs. Dispatch does not
 decode arguments, admit tools, or execute anything outside the selected bridge.
+Post-write receipt projection is a separate pure boundary over one completed
+tool-loop result. It accepts only a list of at most 1,024 result mappings and
+selects the first successful file mutation deterministically. The receipt keeps
+only bounded tool/path/operation identity, a validated body-free artifact
+reference, bounded bytes written, at most eight line-only changed ranges, and
+the exact validation command. Generated code, replacement text, extra artifact
+fields, malformed line ranges, and unbounded collections fail closed or remain
+outside the projection; the source result is never mutated.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

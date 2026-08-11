@@ -3535,3 +3535,43 @@ PYTHONPATH=Code/src pytest -q Code/tests
   - Serialization and migration: no metadata or persisted shape changes.
 - Remaining limitation: the LLM/provider round-trip conversation loop still
   needs to invoke this dispatcher and compose returned tool messages.
+
+### Bounded provider mutation receipt projection
+
+- Observed failure: post-write context had no standalone admission boundary for
+  mutation receipts. The aggregate implementation iterated whatever result
+  collection it received and copied unchecked path, operation, byte, artifact,
+  and line-range values, allowing malformed or unbounded execution evidence to
+  enter the next model request.
+- Validation evidence: the regression test first fails because no receipt
+  module exists. Seventeen focused tests pass after implementation for
+  deterministic first-success selection, body-free artifact projection, exact
+  command preservation, eight-range capping, source immutability, ignored
+  failures/non-mutations, and malformed or oversized collection, identity,
+  command, artifact, and range rejection. The adjacent mutation/dispatch set
+  passes 49 and the complete provider-focused set passes 456. The complete
+  repository suite passes 1,552 in an isolated detached worktree, followed by
+  successful source compilation and diff validation.
+- Implemented fix: add a pure receipt projector over `ToolEventLoopRunResult`.
+  It preflights the complete result list, selects the first successful file
+  mutation, validates bounded receipt facts, and returns only the minimum
+  post-write evidence needed for a later exact-validation turn.
+- Metadata impact note:
+  - Facts: existing successful tool result, mutation identity, artifact
+    lineage, byte count, changed line bounds, and task-owned validation command.
+  - Authoritative producers: the tool loop owns execution results; artifact
+    registration owns the strict reference; the task owns the exact validation
+    command; receipt projection owns no authoritative fact.
+  - Lifecycle and control impact: model-facing evidence only. The projector
+    performs no tool execution, permission decision, state update, file I/O, or
+    mutation of source evidence.
+  - Existing contracts reviewed: `ToolEventLoopRunResult`, provider attempt
+    limits, `ProviderCodeArtifactReference`, mutation tool identity, public
+    metadata exports, and metadata development conventions.
+  - Decision: reuse the existing strict artifact contract and return the
+    established receipt mapping instead of adding a second persisted metadata
+    model or embedding this projection in the future conversation runner.
+  - Serialization and migration: the receipt is an ephemeral bounded mapping;
+    no persisted schema or migration changes.
+- Remaining limitation: the provider conversation loop does not yet append the
+  receipt to a post-mutation model request or enforce the exact validation turn.
