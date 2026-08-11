@@ -250,6 +250,13 @@ code-artifact kind, project/provider lineage, lowercase SHA-256, bounded
 byte/character counts, and language. Invalid, missing-kind, prefixed, uppercase,
 extra-field, or non-object references fail during typed tool-input construction
 before mutation admission or execution.
+Provider code-artifact handoff uses a strict frozen runtime reference containing
+explicit `code_artifact` kind, project/provider lineage, SHA-256 checksum,
+byte/character counts, and language. A bounded ledger stores at most 1,024
+authorized references and 6,400,000 aggregate code characters, while each body
+remains capped at 200,000 characters. Resolution requires every typed reference
+field and the recomputed body checksum to match; stale, forged, rebound, or
+over-capacity references fail before a writer can receive the code body.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

@@ -117,3 +117,7 @@ fixed retryable batch abort without consuming ordinary local result maps.
 Provider code-artifact references are parsed as a strict frozen
 `ToolInputMetadata.artifact_ref` value. They never fall through to the generic
 attributes escape hatch and contain no generated-code body.
+The code-artifact ledger separately owns bounded generated-code bodies for one
+runtime. Its frozen reference binds source and provider call IDs, checksum,
+sizes, and language; exact re-registration is idempotent, while lineage rebinds
+and mismatched or stale references fail closed without file I/O.

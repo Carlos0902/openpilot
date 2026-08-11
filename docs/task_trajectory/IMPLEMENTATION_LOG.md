@@ -3047,3 +3047,47 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: provider schema/admission does not yet expose
   `artifact_ref` as an alternative to `generated_unit`, and no ledger resolves
   the reference into writer input in this slice.
+
+### Checksum-verified provider code-artifact ledger
+
+- Observed failure: bounded code previews exposed a body-free `artifact_ref`,
+  but no independent runtime owner could register the generated code and later
+  prove that a provider-supplied reference named the same body and exact
+  project/provider lineage. The aggregate runner kept this authority in an
+  unbounded private dictionary.
+- Validation evidence: the regression suite fails because the ledger module is
+  absent on the stacked base; 25 tests pass after implementation for strict
+  frozen JSON references, prefix/case checksum normalization, registration and
+  resolution, checksum/lineage/size/language mismatch, unknown references,
+  conflicting code fields, idempotence, distinct lineage, lineage rebinds,
+  exact entry/total/body limits, Unicode sizes, invalid configuration, and
+  source immutability. The complete provider-focused set passes 332, and the
+  complete repository suite passes 1,428 in an isolated detached worktree,
+  followed by successful source compilation and diff validation.
+- Implemented fix: add a bounded runtime ledger that reuses the strict nested
+  artifact reference. It
+  caps one body at 200,000 characters, total retained code at 6,400,000
+  characters, and references at the existing 1,024-attempt limit; resolution
+  revalidates the exact stored reference, checksum, and byte/character counts.
+- Metadata impact note:
+  - Fact: one authorized runtime code-body reference with project/provider
+    lineage and integrity facts.
+  - Authoritative producer: `ProviderCodeArtifactLedger.register`; consumers:
+    the future provider result projector integration and patch-writer adapter.
+  - Lifecycle: runtime-only; control impact: artifact resolution identity, not
+    permission, mutation approval, completion, persistence, or execution.
+  - Existing contracts reviewed: `CodeArtifactMetadata`, `ToolResultMetadata`,
+    `DurableArtifactReference`, `ProviderToolRoundTripResult`, and provider call
+    correlation. The durable reference is checkpoint-owned and lacks provider
+    lineage, so it is not lifecycle-equivalent.
+  - Decision: reuse the strict nested `ProviderCodeArtifactReference` and add a
+    runtime owner, with no new `MetadataKind` and no second code source of
+    truth; the body exists only in the ledger and projections remain body-free.
+  - Serialization and migration: reference JSON belongs to the nested metadata
+    contract; the ledger is not serialized, and no historical producer exists
+    to migrate.
+  - Tests and docs: contract, boundary, integrity, lineage, and atomic-capacity
+    tests plus `API.md`, `Code/README.md`, catalog, and this log.
+- Remaining limitation: result projection does not yet register code artifacts
+  into the ledger, and the writer adapter does not yet resolve references into
+  scoped patch input.

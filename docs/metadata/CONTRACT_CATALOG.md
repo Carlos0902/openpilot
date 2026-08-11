@@ -163,6 +163,10 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   project call identity, checksum, bounded sizes, and language but no code body,
   permission, approval, or write scope. It is not a `MetadataKind`; invalid
   provider objects fail before admission instead of entering `attributes`.
+  `ProviderCodeArtifactLedger` is the runtime-only body owner for this nested
+  reference and revalidates every field before resolution. It is not a durable
+  checkpoint artifact and therefore does not reuse `DurableArtifactReference`;
+  it performs no file I/O and cannot grant mutation permission.
 - `RuntimePromptContextSnapshot` is a strict value owned by
   `RuntimeCheckpointMetadata`. It binds the complete context request hash and
   rendered Prompt hash to the existing `ContextSelectionMetadata` and one
