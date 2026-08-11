@@ -44,3 +44,6 @@ reasoning semantics.
 Structured JSON requests disable provider-default reasoning only for capability
 profiles that explicitly support disabling it; generic endpoints remain
 provider-controlled.
+Provider tool definitions and continuation messages are rendered explicitly at
+the LLM boundary. Tool-call responses retain call identity and reasoning state,
+fail closed on malformed shapes, and bypass the response cache.

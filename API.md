@@ -103,7 +103,9 @@ are not treated as equivalent authority.
 
 `LLMRequest`:
 
-- `messages`: list of `{role, content}` chat messages.
+- `messages`: typed chat messages, including provider tool continuation fields.
+- `tools`: optional typed function definitions.
+- `tool_choice`: optional `auto`, `none`, or `required` provider selection policy.
 - `response_format`: `text` or `json_object`.
 - `temperature`: optional per-request override.
 - `max_tokens`: optional token limit.
@@ -122,6 +124,9 @@ substring matching is not a capability source.
 For structured JSON requests, a provider-default policy is mapped to explicit
 reasoning disable only when the selected capability profile declares that
 control; otherwise the provider default remains omitted.
+Tool definitions, tool choice, and continuation messages participate in cache
+identity. Provider tool-call responses are normalized into `LLMResponse` and
+are never cached because they require a fresh, ordered tool result continuation.
 
 Decision routing may supply a typed `ReasoningDecisionComplexity` value
 (`routine`, `standard`, or `complex`) to a request owner. It is intentionally

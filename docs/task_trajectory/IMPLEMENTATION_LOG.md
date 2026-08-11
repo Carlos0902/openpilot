@@ -2455,3 +2455,17 @@ PYTHONPATH=Code/src pytest -q Code/tests
   and cache-key reasoning resolution, while leaving generic profiles unchanged.
 - Remaining limitation: this does not add provider-native routing or streaming
   tool-call aggregation; those remain separate changes.
+
+### LLM tool-call preservation
+
+- Observed failure: `LLMClient` omitted typed tools from provider payloads,
+  excluded them from cache identity, and discarded returned tool calls before
+  orchestration could continue them.
+- Validation evidence: four offline regressions fail on the stacked base for
+  missing payload fields, cache collisions, dropped calls, and malformed-shape
+  acceptance; focused and full suites pass after the fix.
+- Implemented fix: render tools and continuation messages explicitly, normalize
+  provider tool calls into the existing typed response contract, fail closed on
+  malformed shapes, and never cache intermediate tool-call responses.
+- Remaining limitation: streaming tool-call fragments and native-provider
+  transport routing remain separate changes.

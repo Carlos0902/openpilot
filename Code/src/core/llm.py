@@ -15,7 +15,11 @@ from openai import APITimeoutError, OpenAI, OpenAIError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config import LLMSettings
-from core.reasoning import render_reasoning_transport, resolve_reasoning_policy
+from core.reasoning import (
+    UnsupportedReasoningPolicyError,
+    render_reasoning_transport,
+    resolve_reasoning_policy,
+)
 from core.exceptions import (
     ContextAssemblyBudgetError,
     ContextAssemblyGovernanceError,
@@ -244,7 +248,9 @@ class LLMClient:
             "response_format": request.response_format,
             "temperature": temp,
             "max_tokens": request.max_tokens,
-            "messages": [message.model_dump(mode="json") for message in request.messages],
+            "messages": [render_llm_message(message) for message in request.messages],
+            "tools": render_llm_tools(request.tools),
+            "tool_choice": request.tool_choice,
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"v2:sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
@@ -316,7 +322,7 @@ class LLMClient:
             effective_timeout = request.timeout_seconds or self.settings.timeout_seconds
             payload: dict[str, Any] = {
                 "model": self.settings.model,
-                "messages": [message.model_dump() for message in repair_messages],
+                "messages": [render_llm_message(message) for message in repair_messages],
                 "temperature": request.temperature
                 if request.temperature is not None
                 else self.settings.temperature,
@@ -326,6 +332,10 @@ class LLMClient:
                 payload["max_tokens"] = request.max_tokens
             if request.response_format == "json_object":
                 payload["response_format"] = {"type": "json_object"}
+            if request.tools:
+                payload["tools"] = render_llm_tools(request.tools)
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
             payload.update(render_reasoning_transport(resolved_reasoning))
 
             self._emit_stream_event(
@@ -358,7 +368,29 @@ class LLMClient:
 
             choice = response.choices[0]
             content, content_diagnostics = self._extract_message_content(choice.message)
+            reasoning_content = self._extract_message_reasoning_content(choice.message)
+            tool_calls = self._extract_message_tool_calls(choice.message)
             parsed_json: dict[str, Any] | list[Any] | None = None
+
+            if tool_calls:
+                result = LLMResponse(
+                    content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls,
+                    model=response.model,
+                    provider=self.settings.provider,
+                    usage=self._usage_metadata(response),
+                    finish_reason=choice.finish_reason,
+                    provider_details=self._response_metadata(
+                        response=response,
+                        choice=choice,
+                        content=content,
+                        content_diagnostics=content_diagnostics,
+                        json_repair_attempt=attempt + 1,
+                    ),
+                )
+                result.provider_details["tool_call_count"] = len(tool_calls)
+                return result
 
             if request.response_format == "json_object":
                 # Try to extract JSON from markdown code blocks if present
@@ -387,6 +419,8 @@ class LLMClient:
                     )
                     result = LLMResponse(
                         content=content,
+                        reasoning_content=reasoning_content,
+                        tool_calls=tool_calls,
                         parsed_json=parsed_json,
                         model=response.model,
                         provider=self.settings.provider,
@@ -448,6 +482,8 @@ class LLMClient:
                 usage = self._usage_metadata(response)
                 result = LLMResponse(
                     content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls,
                     parsed_json=parsed_json,
                     model=response.model,
                     provider=self.settings.provider,
@@ -908,6 +944,57 @@ class LLMClient:
                 return value, diagnostics
         return "", diagnostics
 
+    def _extract_message_reasoning_content(self, message: Any) -> str | None:
+        value = (
+            message.get("reasoning_content")
+            if isinstance(message, dict)
+            else getattr(message, "reasoning_content", None)
+        )
+        return value if isinstance(value, str) else None
+
+    def _extract_message_tool_calls(self, message: Any) -> list[LLMToolCall]:
+        raw_calls = (
+            message.get("tool_calls")
+            if isinstance(message, dict)
+            else getattr(message, "tool_calls", None)
+        )
+        if not raw_calls:
+            return []
+        if not isinstance(raw_calls, (list, tuple)):
+            raise UnsupportedReasoningPolicyError("provider tool_calls must be a list")
+
+        calls: list[LLMToolCall] = []
+        for raw_call in raw_calls:
+            try:
+                if hasattr(raw_call, "model_dump"):
+                    normalized = raw_call.model_dump(mode="json", exclude_none=True)
+                elif isinstance(raw_call, dict):
+                    normalized = dict(raw_call)
+                else:
+                    normalized = {
+                        "id": getattr(raw_call, "id", None),
+                        "type": getattr(raw_call, "type", "function"),
+                        "function": getattr(raw_call, "function", None),
+                        "index": getattr(raw_call, "index", None),
+                    }
+
+                raw_function = normalized.get("function")
+                if hasattr(raw_function, "model_dump"):
+                    normalized["function"] = raw_function.model_dump(
+                        mode="json", exclude_none=True
+                    )
+                elif not isinstance(raw_function, dict):
+                    normalized["function"] = {
+                        "name": getattr(raw_function, "name", None),
+                        "arguments": getattr(raw_function, "arguments", ""),
+                    }
+                calls.append(LLMToolCall.model_validate(normalized))
+            except Exception as exc:
+                raise UnsupportedReasoningPolicyError(
+                    f"provider tool_call shape is unsupported: {exc}"
+                ) from exc
+        return calls
+
     def _content_part_text(self, part: Any) -> str:
         if isinstance(part, str):
             return part
@@ -972,6 +1059,8 @@ class LLMClient:
         return {}
 
     def _should_cache_response(self, response: LLMResponse) -> bool:
+        if response.tool_calls:
+            return False
         if response.finish_reason == "length" and not response.content.strip():
             return False
         return True
