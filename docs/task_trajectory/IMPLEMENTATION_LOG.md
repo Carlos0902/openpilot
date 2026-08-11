@@ -3618,3 +3618,42 @@ PYTHONPATH=Code/src pytest -q Code/tests
     persisted shape or migration changes.
 - Remaining limitation: the multi-round conversation runner still needs to
   select this context after mutation and admit the exact validation call.
+
+### Mutually exclusive exact-validation observation
+
+- Observed failure: aggregate validation handling used independent success and
+  failure scans. Repeated exact commands or one result with successful tool
+  status but a failing exit code could make both booleans true, leaving branch
+  order rather than one authoritative observation to determine the outcome.
+- Validation evidence: the regression suite first fails because no standalone
+  observer exists. Fifteen focused tests pass after implementation for
+  argv-equivalent success, every explicit failure source, unrelated-command
+  omission, repeated exact execution, ambiguous result rejection, missing
+  command authority, and malformed or oversized result collections. The
+  observer plus command, receipt, and post-mutation context regressions pass 50,
+  and the complete provider-focused set passes 481. The complete repository
+  suite passes 1,577 in an isolated detached worktree, followed by successful
+  source compilation and diff validation.
+- Implemented fix: add one pure observer returning `not_observed`, `succeeded`,
+  or `failed`. It uses the existing shell-aware command matcher, preflights the
+  bounded loop results, rejects more than one exact execution, and requires
+  literal tool/result success with integer exit code zero for success. The
+  shared 8,192-character command limit now has one owner in
+  `core.validation_command` and remains re-exported by the receipt module.
+- Metadata impact note:
+  - Facts: existing task-owned validation command and observed command-executor
+    result only.
+  - Authoritative producers: the task owns the required command; the tool loop
+    owns execution evidence; the observer derives one mutually exclusive view.
+  - Lifecycle and control impact: runtime validation classification for a
+    future conversation branch. It performs no command execution, admission,
+    permission change, state update, file I/O, or persistence.
+  - Existing contracts reviewed: validation command normalization,
+    `ToolEventLoopRunResult`, command result shape, provider attempt limits,
+    public metadata inventory, and metadata development conventions.
+  - Decision: add a core enum-derived view rather than a new persisted metadata
+    kind or two competing booleans.
+  - Serialization and migration: the enum is runtime-only and no persisted
+    shape changes.
+- Remaining limitation: the provider conversation runner still needs to consume
+  this observation and route failure, finalization, or another validation turn.

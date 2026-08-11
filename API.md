@@ -246,6 +246,13 @@ bound; any inline `generated_unit` is rejected. Old assistant/tool history,
 duplicate authority messages, absent mutation evidence, role-injecting wire
 messages, oversized collections, and receipt truncation are rejected or omitted
 before the next provider request is assembled.
+Exact validation observation is represented by one mutually exclusive runtime
+value: `not_observed`, `succeeded`, or `failed`. It scans only a bounded tool
+result list, compares the task-owned command using the same argv normalization
+as admission, and rejects repeated exact execution. A successful observation
+requires literal successful tool evidence, literal successful command-result
+evidence, and integer exit code zero; malformed or contradictory outcome fields
+fail closed instead of producing simultaneous success/failure flags.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

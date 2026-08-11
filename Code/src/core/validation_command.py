@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import shlex
 
+MAX_VALIDATION_COMMAND_CHARS = 8192
+
 
 def normalize_command_argv(command: str | None) -> tuple[str, ...] | None:
     """Parse command text for comparison without granting shell-wrapper equivalence."""
@@ -22,3 +24,10 @@ def validation_commands_match(expected: str | None, actual: str | None) -> bool:
     expected_argv = normalize_command_argv(expected)
     actual_argv = normalize_command_argv(actual)
     return expected_argv is not None and actual_argv == expected_argv
+
+
+__all__ = [
+    "MAX_VALIDATION_COMMAND_CHARS",
+    "normalize_command_argv",
+    "validation_commands_match",
+]

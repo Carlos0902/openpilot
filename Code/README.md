@@ -133,6 +133,11 @@ messages, strips assistant prose/reasoning, requires exact wire-call identity,
 rejects inline generated bodies, preserves the validation command without
 truncation, and fails closed on absent mutation evidence or unbounded/invalid
 message collections.
+Exact post-write validation is classified by one enum rather than separate
+booleans. The observer reuses admission's argv-aware command comparison,
+requires at most one exact execution from a bounded result list, and accepts
+success only when tool success, result success, and integer zero exit code all
+agree. Missing, malformed, repeated, or contradictory evidence fails closed.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

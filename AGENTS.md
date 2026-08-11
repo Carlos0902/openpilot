@@ -76,6 +76,10 @@ update this file together with `API.md`.
   messages in canonical role order, one observed bounded mutation receipt, and
   bounded body-free assistant/tool wire evidence only. Never truncate the exact
   validation command or carry stale tool history into that continuation.
+- Exact provider validation is one typed observation, never independent success
+  and failure booleans. The task-owned command may match by normalized argv only,
+  must execute at most once, and requires literal result success plus an integer
+  zero exit code before the observation can become successful.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
