@@ -289,6 +289,13 @@ and either page-cap readiness or a no-progress round with a bounded projection.
 Both routes verify that another provider round remains; otherwise they return
 `ProviderToolFinalizationBudgetUnavailable` instead of setting a pending state
 that can only end as a generic round-limit failure.
+Duplicate-only and no-progress handling is also a pure transition. A covered
+duplicate mutation requests guidance once; repeated mutation duplicates count
+toward the no-progress threshold. Covered read-only duplicates request
+finalization when no earlier request exists and another round remains. Ordinary
+progress resets the counter; other no-progress rounds increment it and fail with
+typed `ProviderToolNoProgress` at the configured bound. The dynamic count is
+kept separate from the stable error code.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

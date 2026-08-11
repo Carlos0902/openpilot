@@ -163,6 +163,10 @@ Read-only finalization uses a pure evidence gate: all scoped reads complete, a
 read-only tool set, no earlier finalization request, and either page-cap
 readiness or bounded no-progress evidence. It reserves the next round before
 setting pending; the last round returns the typed budget-unavailable failure.
+Duplicate/no-progress routing is a separate typed policy. It emits one mutation
+guidance request, converts covered read-only duplicates into finalization when
+budget remains, resets on real progress, and otherwise increments a bounded
+counter until stable `ProviderToolNoProgress` failure.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

@@ -3851,3 +3851,42 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: duplicate-only/no-progress failure policy and the
   bounded multi-round controller still need to compose the typed transitions.
+
+### Typed duplicate-only and no-progress transition
+
+- Observed failure: aggregate duplicate-only handling, one-time mutation
+  guidance, duplicate read finalization, ordinary progress reset, and
+  no-progress failure all mutated shared counters inline. Stable failure identity
+  was embedded in a dynamic string containing the current round count.
+- Validation evidence: the regression suite first fails because no standalone
+  transition exists. Twenty-two focused tests pass after implementation for
+  one-time mutation guidance, repeated mutation duplicates, duplicate read
+  finalization and budget failure, ordinary progress reset, threshold counting,
+  thresholds independent of a shorter total round budget,
+  existing-finalization suppression, and malformed state facts. The adjacent
+  no-progress/read/final/mutation transition set passes 55 and the complete
+  provider-focused set passes 567. The complete repository suite passes 1,663
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add one pure transition returning a typed action, stable enum
+  error code, and the exact next guidance/finalization/no-progress/duplicate
+  counters. The no-progress count remains a separate integer for later display;
+  no branch performs state mutation directly.
+- Metadata impact note:
+  - Facts: existing duplicate coverage, mutation/read-only tool facts, guidance
+    flag, finalization count, progress observation, no-progress threshold,
+    duplicate-only count, and round budget.
+  - Authoritative producers: duplicate partition/evidence state own duplicate
+    facts; the conversation controller owns flags and counters; this transition
+    derives one next-state view.
+  - Lifecycle and control impact: runtime continuation/failure routing only. It
+    performs no request, execution, file I/O, state mutation, or persistence.
+  - Existing contracts reviewed: duplicate partition, attempt/evidence state,
+    finalization transitions, round/no-progress bounds, public metadata
+    inventory, and metadata development conventions.
+  - Decision: use strict core enums and a frozen derived value instead of shared
+    inline counter mutation or a new persisted metadata kind.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: protocol/execution recovery policy and the bounded
+  multi-round controller still need to compose all typed transitions.

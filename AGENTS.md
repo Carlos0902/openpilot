@@ -99,6 +99,10 @@ update this file together with `API.md`.
 - Read-only finalization must require complete scoped reads plus either the page
   cap or a bounded no-progress projection. Both routes must reserve a remaining
   provider round before setting finalization pending.
+- Duplicate-only and no-progress routing must be one typed transition. Mutation
+  guidance is sent at most once, duplicate read-only evidence may request
+  finalization only with remaining budget, and no-progress failure uses a stable
+  code plus a separate bounded count.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
