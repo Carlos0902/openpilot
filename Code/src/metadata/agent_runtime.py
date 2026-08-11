@@ -2577,6 +2577,11 @@ class RuntimeCheckpointMetadata(MetadataBase):
             and self.session_ingress_state.session_constraints != self.runtime_state.session_constraints
         ):
             raise ValueError("checkpoint ingress constraints must match runtime execution constraints")
+        if (
+            self.session_ingress_state is not None
+            and self.session_ingress_state.identity.run_id != self.session_id
+        ):
+            raise ValueError("checkpoint session identity differs from ingress run identity")
         return self
 
 
