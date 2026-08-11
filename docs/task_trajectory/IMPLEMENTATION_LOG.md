@@ -2661,3 +2661,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
   shell-aware argv comparator, with exact cwd binding and automatic mode default.
 - Remaining limitation: this decision does not execute the command or prove its
   result.
+
+### Typed provider permission admission
+
+- Observed failure: provider permission checks did not represent mutation
+  opt-in separately from user confirmation and could accept truthy substitutes
+  for those control facts.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes low-risk, elevated permission, mutation opt-in, named mutation,
+  forbidden/unknown, literal-boolean, and contradictory-state checks after
+  implementation; the full suite remains green.
+- Implemented fix: add a strict permission decision with typed reason codes,
+  fail-closed unknown levels, separate mutation opt-in, and explicit
+  confirmation evidence.
+- Remaining limitation: permission admission alone does not create an executable
+  selection or perform a mutation.

@@ -70,3 +70,5 @@ Provider resource usage and budget outcomes are typed before full admission;
 free-form error text does not control budget branching.
 Validation command admission preserves the exact task-owned argv and cwd and
 permits only one automatic execution.
+Provider permission decisions require literal booleans and keep mutation opt-in
+separate from user confirmation.

@@ -166,6 +166,10 @@ equivalence, bind omitted mode to `automatic`, reject unapproved modes and cwd
 changes, and expose typed rejection reasons. Shell wrappers, pipes,
 redirections, substitutions, appended commands, and malformed quoting do not
 match the task-owned command.
+Provider permission admission fails closed on unknown or forbidden levels.
+Medium/high calls require confirmation; mutations additionally require a
+separate literal-boolean mutation opt-in, explicit confirmation, and retain
+typed mutation/confirmation evidence even after admission.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

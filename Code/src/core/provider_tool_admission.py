@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.llm import LLMToolCall
 from core.provider_tool_definitions import MAX_PROVIDER_FIELDS_PER_TOOL
-from core.tool_contracts import ToolCapability
+from core.tool_contracts import PermissionLevel, ToolCapability
 from core.validation_command import validation_commands_match
 from metadata import (
     FailureMetadata,
@@ -26,6 +26,7 @@ from metadata import (
     ToolInputMetadata,
 )
 from tools.tool_selection import ToolSelection
+from tools.mutation_descriptor import FILE_MUTATION_TOOLS
 
 MAX_PROVIDER_TOOL_ARGUMENT_CHARS = 200_000
 MAX_PROVIDER_SCOPE_PATHS = 64
@@ -142,6 +143,33 @@ class ProviderValidationCommandDecision(BaseModel):
             raise ValueError("only admitted validation decisions expose effective mode")
         if not admitted and self.effective_cwd is not None:
             raise ValueError("blocked validation decisions cannot expose effective cwd")
+        return self
+
+
+class ProviderToolPermissionDecision(BaseModel):
+    """Typed permission and mutation admission for one registered tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["admitted", "blocked"]
+    reason_code: Literal[
+        "allowed",
+        "forbidden",
+        "unknown_permission",
+        "confirmation_required",
+        "mutation_not_allowed",
+    ]
+    requires_confirmation: bool
+    mutating: bool
+
+    @model_validator(mode="after")
+    def _status_matches_reason(self) -> "ProviderToolPermissionDecision":
+        if (self.status == "admitted") != (self.reason_code == "allowed"):
+            raise ValueError("permission decision status must match reason_code")
+        if self.reason_code == "confirmation_required" and not self.requires_confirmation:
+            raise ValueError("confirmation-required decision must expose that requirement")
+        if self.status == "admitted" and self.mutating and not self.requires_confirmation:
+            raise ValueError("admitted mutation must retain confirmation evidence")
         return self
 
 
@@ -394,6 +422,74 @@ def provider_validation_command_decision(
     )
 
 
+def provider_tool_permission_decision(
+    tool_name: str,
+    definition: Any,
+    *,
+    user_confirmed: bool,
+    allow_mutations: bool,
+) -> ProviderToolPermissionDecision:
+    """Fail closed unless typed permission, opt-in, and confirmation allow the call."""
+
+    if type(user_confirmed) is not bool or type(allow_mutations) is not bool:
+        raise ValueError("permission inputs must be literal booleans")
+    permission = str(
+        getattr(getattr(definition, "permission_level", ""), "value", None)
+        or getattr(definition, "permission_level", "")
+    ).lower()
+    known_permissions = {level.value for level in PermissionLevel}
+    capabilities = {
+        str(getattr(capability, "value", capability))
+        for capability in (getattr(definition, "capabilities", []) or [])
+    }
+    mutating = bool(
+        {
+            ToolCapability.FILE_WRITE.value,
+            ToolCapability.FILE_DELETE.value,
+        }
+        & capabilities
+    ) or tool_name in FILE_MUTATION_TOOLS
+    requires_confirmation = permission in {
+        PermissionLevel.MEDIUM.value,
+        PermissionLevel.HIGH.value,
+    } or mutating
+
+    if permission not in known_permissions:
+        return ProviderToolPermissionDecision(
+            status="blocked",
+            reason_code="unknown_permission",
+            requires_confirmation=requires_confirmation,
+            mutating=mutating,
+        )
+    if permission == PermissionLevel.FORBIDDEN.value:
+        return ProviderToolPermissionDecision(
+            status="blocked",
+            reason_code="forbidden",
+            requires_confirmation=requires_confirmation,
+            mutating=mutating,
+        )
+    if mutating and not allow_mutations:
+        return ProviderToolPermissionDecision(
+            status="blocked",
+            reason_code="mutation_not_allowed",
+            requires_confirmation=True,
+            mutating=True,
+        )
+    if requires_confirmation and not user_confirmed:
+        return ProviderToolPermissionDecision(
+            status="blocked",
+            reason_code="confirmation_required",
+            requires_confirmation=True,
+            mutating=mutating,
+        )
+    return ProviderToolPermissionDecision(
+        status="admitted",
+        reason_code="allowed",
+        requires_confirmation=requires_confirmation,
+        mutating=mutating,
+    )
+
+
 def _blocked_validation_decision(
     reason_code: Literal[
         "duplicate_validation",
@@ -615,12 +711,14 @@ __all__ = [
     "ProviderToolAdmissionError",
     "ProviderToolBudgetDecision",
     "ProviderToolBudgetUsage",
+    "ProviderToolPermissionDecision",
     "ProviderToolResourceUsage",
     "ProviderValidationCommandDecision",
     "decode_provider_tool_arguments",
     "provider_tool_budget_decision",
     "provider_tool_contract_error",
     "provider_tool_error",
+    "provider_tool_permission_decision",
     "provider_tool_resource_usage",
     "provider_validation_command_decision",
     "provider_read_scope_error",
