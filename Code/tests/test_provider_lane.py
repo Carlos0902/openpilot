@@ -60,3 +60,27 @@ def test_lane_rejects_empty_identity() -> None:
             reasoning_mode=OPENAI_GPT4O_MINI_LANE.reasoning_mode,
             budget_profile=OPENAI_GPT4O_MINI_LANE.budget_profile,
         )
+
+
+def test_lane_bounds_rounds_and_credential_fan_out() -> None:
+    common = {
+        "lane_id": "bounded-lane",
+        "provider": "openai-compatible",
+        "endpoint": "https://example.invalid",
+        "model": "model",
+        "capability_profile": OPENAI_GPT4O_MINI_LANE.capability_profile,
+        "tokenizer_id": "counter",
+        "reasoning_mode": OPENAI_GPT4O_MINI_LANE.reasoning_mode,
+        "budget_profile": OPENAI_GPT4O_MINI_LANE.budget_profile,
+    }
+    with pytest.raises(ValueError, match="max_rounds"):
+        ProviderLane(
+            **common,
+            credential_env_names=("KEY",),
+            max_rounds=9,
+        )
+    with pytest.raises(ValueError, match="credential scope"):
+        ProviderLane(
+            **common,
+            credential_env_names=("KEY_1", "KEY_2", "KEY_3", "KEY_4", "KEY_5"),
+        )
