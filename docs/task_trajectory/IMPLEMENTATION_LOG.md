@@ -2685,7 +2685,8 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Validation evidence: the regression suite fails at import on the stacked base
   and the focused provider-admission suite passes 81 protocol, registry,
   contract, budget, permission, scope, and validation-command checks after the
-  implementation.
+  implementation; the full suite passes 1,189 tests, followed by successful
+  source compilation and diff validation.
 - Implemented fix: add one non-executing single-call admission function that
   preserves provider/project identity, resolves both registry definition and
   executor, applies copied typed defaults, then checks contract, budget,
