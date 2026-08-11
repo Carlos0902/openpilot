@@ -142,6 +142,9 @@ negative indexes, or incomplete final shapes fail closed.
 Provider call IDs are retained separately from project-owned tool lifecycle IDs;
 the external ID correlates wire requests and results but never grants permission,
 budget, checkpoint, or execution authority.
+When the event loop appends a result for a provider-bound call, its result map
+retains that non-null external ID alongside the project-owned `call_id`. Local
+tool results without provider identity keep their historical shape.
 Provider-native admission returns one strict `admitted` or `blocked` outcome.
 Admitted outcomes require an existing typed `ToolSelection`; blocked outcomes
 require an existing typed `ToolErrorMetadata`. Contradictory payloads and

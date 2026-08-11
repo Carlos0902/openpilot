@@ -60,6 +60,8 @@ Normalized responses attach typed reasoning-usage observations without storing
 provider reasoning bodies in diagnostics.
 Provider tool admission outcomes reuse project call, selection, failure, and
 error contracts; wire identity alone never authorizes execution.
+Event-loop result maps preserve a non-null provider call ID for wire correlation
+without adding a null field to ordinary local tool results.
 Provider tool schemas are a narrow read-only projection of registered typed
 contracts, not a copy of the broad internal input model.
 Provider argument decoding and contract validation are bounded pure checks;

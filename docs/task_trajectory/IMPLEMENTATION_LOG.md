@@ -2911,3 +2911,19 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: successful execution-result projection, artifact
   handoff, historical message compaction, request dispatch, and runner control
   flow remain separate changes.
+
+### Provider identity in event-loop result maps
+
+- Observed failure: `ToolCallMetadata.provider_call_id` survived admission and
+  events, but `_append_tool_result()` dropped it, so provider result projection
+  could not correlate successful or failed event-loop results back to wire call
+  IDs.
+- Validation evidence: the regression test fails for both provider-bound and
+  local calls on the stacked base; both cases pass after implementation. The
+  complete focused provider set passes 207. The full suite passes 1,315 tests,
+  followed by successful source compilation and diff validation.
+- Implemented fix: include `provider_call_id` only when it is non-null in the
+  existing tool-result map. Provider calls retain wire correlation; ordinary
+  local results preserve their historical dictionary shape.
+- Remaining limitation: this change does not project result payloads, create
+  `LLMToolResult` values, execute provider rounds, or integrate the runner.

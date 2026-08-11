@@ -1505,6 +1505,11 @@ class ToolEventLoopRunner:
         self.tool_results.append(
             {
                 "call_id": tool_call.call_id,
+                **(
+                    {"provider_call_id": tool_call.provider_call_id}
+                    if tool_call.provider_call_id is not None
+                    else {}
+                ),
                 "step_id": tool_call.step_id,
                 "tool": tool_call.tool_name,
                 "input_metadata": input_metadata.to_json_dict(),
