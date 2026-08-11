@@ -269,6 +269,13 @@ Failures identify `preflight`, `execution`, `result_projection`, or
 `wire_composition` without copying underlying exception text. Result/wire
 failures retain the completed loop, and wire failures also retain projected
 results, so an applied mutation cannot be mistaken for an unobserved write.
+Mutation follow-up routing is a separate pure transition. From literal receipt
+availability/new-receipt facts, one exact-validation observation, and bounded
+round position, it returns exactly one of: no mutation action, enter validation,
+continue validation, request finalization, or fail with a typed stable code.
+Validation without a receipt fails closed, and successful validation on the
+last available round becomes `ProviderToolFinalizationBudgetUnavailable` rather
+than silently completing without a final response.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

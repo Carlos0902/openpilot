@@ -3738,3 +3738,41 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the bounded multi-round conversation controller still
   needs to request/admit calls, consume this round result, update attempt and
   evidence state, and route mutation validation/finalization transitions.
+
+### Typed provider mutation follow-up transition
+
+- Observed failure: the aggregate loop mutated several booleans inline after a
+  write or validation result. Receipt availability, validation outcome,
+  post-mutation mode, finalization mode, and round budget could therefore become
+  contradictory or depend on branch order.
+- Validation evidence: the regression suite first fails because no standalone
+  transition exists. Fourteen focused tests pass after implementation for no-op,
+  entering/continuing validation, terminal validation failure, finalization
+  handoff, final-round exhaustion, validation without mutation, and malformed or
+  contradictory state facts. The transition and validation-observation set
+  passes 29, the adjacent mutation follow-up set passes 56, and the complete
+  provider-focused set passes 512. The complete repository suite passes 1,608
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add one pure transition over literal receipt facts, the
+  existing mutually exclusive validation observation, and bounded round
+  position. It returns a frozen typed action plus stable enum error code and the
+  exact next post-mutation/finalization flags; it performs no state mutation.
+- Metadata impact note:
+  - Facts: existing mutation receipt availability, exact validation outcome, and
+    round budget position only.
+  - Authoritative producers: receipt projection owns the derived receipt;
+    validation observation owns the exact outcome; the conversation controller
+    owns current/max round facts.
+  - Lifecycle and control impact: runtime routing. The transition selects the
+    next legal mode but performs no request, execution, state update, file I/O,
+    or persistence.
+  - Existing contracts reviewed: mutation receipt, validation observation,
+    provider round bounds, finalization error semantics, public metadata
+    inventory, and metadata development conventions.
+  - Decision: use strict core enums and a frozen derived value rather than
+    independent booleans or a new persisted metadata kind.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: a separate read/finalization/no-progress transition and
+  then the bounded multi-round controller still need to consume these actions.

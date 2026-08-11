@@ -150,6 +150,10 @@ one existing bridge, then reuses bounded result and wire projection. Its frozen
 success value carries loop/result/wire evidence; stage-typed failures redact
 underlying exception text and retain completed post-execution evidence so an
 applied mutation remains recoverable and observable.
+Mutation follow-up is decided by a pure typed transition: no action, enter or
+continue exact validation, request finalization, or fail with a stable code.
+Contradictory receipt facts are rejected, validation without mutation fails
+closed, and validation success requires another provider round for finalization.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

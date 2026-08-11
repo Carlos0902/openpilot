@@ -89,6 +89,10 @@ update this file together with `API.md`.
   existing execution bridge, then reuse bounded result and wire projection. A
   post-execution projection failure must retain completed loop evidence (and
   projected results when available) without exposing provider exception text.
+- Mutation/validation/finalization routing must be derived from one typed
+  transition. Validation cannot succeed or fail without an available mutation
+  receipt; a successful validation requires a remaining round for finalization;
+  free-form error text must not control these branches.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
