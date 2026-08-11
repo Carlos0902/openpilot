@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from core.llm import LLMToolCall
 from core.provider_tool_definitions import MAX_PROVIDER_FIELDS_PER_TOOL
 from core.tool_contracts import ToolCapability
+from core.validation_command import validation_commands_match
 from metadata import (
     FailureMetadata,
     RuntimeBudgetMetadata,
@@ -112,6 +113,35 @@ class ProviderToolBudgetDecision(BaseModel):
     def _status_matches_reason(self) -> "ProviderToolBudgetDecision":
         if (self.reason_code == "within_budget") != (self.status == "admitted"):
             raise ValueError("budget decision status must match reason_code")
+        return self
+
+
+class ProviderValidationCommandDecision(BaseModel):
+    """Typed admission result for the task-owned exact validation command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["admitted", "blocked"]
+    reason_code: Literal[
+        "exact_match",
+        "duplicate_validation",
+        "command_mismatch",
+        "invalid_mode",
+        "cwd_mismatch",
+        "unexpected_cwd",
+    ]
+    effective_mode: Literal["automatic", "execute", "run", "exec"] | None = None
+    effective_cwd: str | None = None
+
+    @model_validator(mode="after")
+    def _status_matches_reason(self) -> "ProviderValidationCommandDecision":
+        admitted = self.status == "admitted"
+        if admitted != (self.reason_code == "exact_match"):
+            raise ValueError("validation decision status must match reason_code")
+        if admitted != (self.effective_mode is not None):
+            raise ValueError("only admitted validation decisions expose effective mode")
+        if not admitted and self.effective_cwd is not None:
+            raise ValueError("blocked validation decisions cannot expose effective cwd")
         return self
 
 
@@ -324,6 +354,61 @@ def provider_tool_budget_decision(
     )
 
 
+def provider_validation_command_decision(
+    input_metadata: ToolInputMetadata,
+    *,
+    validation_command: str,
+    validation_cwd: str | None,
+    validation_commands_used: int,
+) -> ProviderValidationCommandDecision:
+    """Admit one exact typed validation command without shell widening."""
+
+    if validation_commands_used < 0:
+        raise ValueError("validation_commands_used must be non-negative")
+    if validation_commands_used > 0:
+        return _blocked_validation_decision("duplicate_validation")
+    if not validation_commands_match(
+        validation_command,
+        str(input_metadata.command or ""),
+    ):
+        return _blocked_validation_decision("command_mismatch")
+
+    mode = str(input_metadata.mode or "automatic").strip().lower()
+    if mode not in {"automatic", "execute", "run", "exec"}:
+        return _blocked_validation_decision("invalid_mode")
+
+    requested_cwd = str(input_metadata.cwd or "").strip()
+    if requested_cwd and not validation_cwd:
+        return _blocked_validation_decision("unexpected_cwd")
+    effective_cwd = (
+        _canonical_path(validation_cwd, None) if validation_cwd else None
+    )
+    if requested_cwd and effective_cwd:
+        if _canonical_path(requested_cwd, None) != effective_cwd:
+            return _blocked_validation_decision("cwd_mismatch")
+    return ProviderValidationCommandDecision(
+        status="admitted",
+        reason_code="exact_match",
+        effective_mode=mode,
+        effective_cwd=effective_cwd,
+    )
+
+
+def _blocked_validation_decision(
+    reason_code: Literal[
+        "duplicate_validation",
+        "command_mismatch",
+        "invalid_mode",
+        "cwd_mismatch",
+        "unexpected_cwd",
+    ],
+) -> ProviderValidationCommandDecision:
+    return ProviderValidationCommandDecision(
+        status="blocked",
+        reason_code=reason_code,
+    )
+
+
 def provider_read_scope_error(
     input_metadata: ToolInputMetadata,
     read_scope: Sequence[str],
@@ -531,11 +616,13 @@ __all__ = [
     "ProviderToolBudgetDecision",
     "ProviderToolBudgetUsage",
     "ProviderToolResourceUsage",
+    "ProviderValidationCommandDecision",
     "decode_provider_tool_arguments",
     "provider_tool_budget_decision",
     "provider_tool_contract_error",
     "provider_tool_error",
     "provider_tool_resource_usage",
+    "provider_validation_command_decision",
     "provider_read_scope_error",
     "provider_write_scope_error",
 ]

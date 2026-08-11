@@ -161,6 +161,11 @@ Provider tool budget admission uses typed per-call and batch-prior usage for
 tool calls, reads, edits, creates, and validation attempts. Decisions expose a
 strict admitted/blocked status and typed exhaustion reason; exact remaining
 boundaries are allowed and projected overages are blocked.
+Provider validation commands admit only once, require exact parsed-argv
+equivalence, bind omitted mode to `automatic`, reject unapproved modes and cwd
+changes, and expose typed rejection reasons. Shell wrappers, pipes,
+redirections, substitutions, appended commands, and malformed quoting do not
+match the task-owned command.
 Provider responses may expose messages as SDK objects or plain mappings; both
 forms use the same content, fallback-field, and diagnostic normalization.
 Every normalized response records the selected profile adapter's typed,

@@ -68,3 +68,5 @@ Provider path-scope checks require exact project-contained, non-symlink targets;
 an empty explicit scope grants no file authority.
 Provider resource usage and budget outcomes are typed before full admission;
 free-form error text does not control budget branching.
+Validation command admission preserves the exact task-owned argv and cwd and
+permits only one automatic execution.

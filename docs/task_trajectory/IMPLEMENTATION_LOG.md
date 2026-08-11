@@ -2648,3 +2648,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
   validation attempts.
 - Remaining limitation: budget admission does not itself grant permission or
   execute tools.
+
+### Exact provider validation command admission
+
+- Observed failure: provider validation requests lacked a typed decision for
+  duplicate use, argv mismatch, execution mode, and cwd widening.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes exact/default binding, five typed rejection reasons, six shell
+  widening forms, contradictory-state, and negative-counter checks after
+  implementation; the full suite remains green.
+- Implemented fix: add one body-free admitted/blocked decision over the existing
+  shell-aware argv comparator, with exact cwd binding and automatic mode default.
+- Remaining limitation: this decision does not execute the command or prove its
+  result.
