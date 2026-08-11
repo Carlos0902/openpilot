@@ -191,6 +191,12 @@ separate inputs when constructing a call. Every lifecycle event inherits the
 typed call's `provider_executed` fact, while ordinary local calls and events
 remain false by default. This propagation records provenance only; it does not
 admit or execute a provider request.
+Provider execution batch preflight is a separate pure boundary over already
+admitted values. It accepts only a list or tuple of at most 32 calls, requires
+non-empty current task/session identity and a positive round, rejects duplicate
+provider or project call IDs and cross-task/session/round values, and refuses an
+admitted mutation in either the tool-call or selection view. It returns the
+same admissions as an immutable tuple and never emits events or executes tools.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

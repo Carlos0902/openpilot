@@ -3273,3 +3273,38 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: admitted provider calls are not yet executed through
   the shared event loop, and loop-level provenance/redaction still requires the
   provider execution bridge.
+
+### Provider execution batch preflight
+
+- Observed failure: admitted provider values had no execution-entry preflight.
+  A caller could supply an unbounded iterable, duplicate call identities, a
+  value from another task/session/round, or an admitted mutation before the
+  future execution bridge changed lifecycle state.
+- Validation evidence: the regression suite fails on the stacked base because
+  the preflight module is absent; 16 tests pass after implementation for exact
+  read-only identity, immutable output, list/tuple shape, the exact 32-call
+  boundary, overflow, invalid rounds, empty task/session identity, duplicate
+  provider and project IDs, cross-lifecycle values, mutation in either
+  admission view, and invalid object types. The complete provider-focused set
+  passes 408, and the complete repository suite passes 1,504 in an isolated
+  detached worktree, followed by successful source compilation and diff
+  validation.
+- Implemented fix: add one pure preflight that validates the complete batch and
+  returns the same typed admissions as a tuple only after every invariant
+  passes. It performs no event emission, checkpoint operation, state update,
+  tool execution, artifact binding, or redaction.
+- Metadata impact note:
+  - Facts: existing admission identity, status, tool names, and lifecycle
+    correlation only; no new fact is produced.
+  - Authoritative producer: provider admission remains the sole producer;
+    execution preflight only validates its existing typed values.
+  - Lifecycle and control impact: read-only execution eligibility. Passing
+    preflight does not itself grant execution or mutation authority.
+  - Existing contracts reviewed: `ProviderToolAdmission`, `ToolCallMetadata`,
+    `ToolSelection`, provider batch limits, and file-mutation tool identity.
+  - Decision: add a narrow core validator rather than embedding identity and
+    cardinality checks in the already-large shared event loop.
+  - Serialization and migration: no fields, serialized shapes, or persisted
+    records change.
+- Remaining limitation: the shared event loop still has no read-only provider
+  execution entry; mutation execution remains closed and separate.

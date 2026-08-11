@@ -245,3 +245,24 @@ def test_execution_batch_rejects_non_admission_values() -> None:
             session_id="session",
             round_index=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("task_id", "session_id", "message"),
+    [
+        ("", "session", "task_id"),
+        ("task", "", "session_id"),
+    ],
+)
+def test_execution_batch_requires_non_empty_lifecycle_identity(
+    task_id: str,
+    session_id: str,
+    message: str,
+) -> None:
+    with pytest.raises(ProviderToolExecutionBatchError, match=message):
+        validated_readonly_provider_execution_batch(
+            [],
+            task_id=task_id,
+            session_id=session_id,
+            round_index=1,
+        )

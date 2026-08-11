@@ -89,6 +89,11 @@ project identity and external provider identity. Emitted lifecycle events
 inherit the call's `provider_executed` provenance, while local calls remain
 non-provider by default; this layer records identity but performs no admission
 or execution.
+The execution-batch preflight separately validates at most 32 already-admitted
+read-only calls. It requires unique project/provider IDs and exact current
+task, session, and round identity, rejects unbounded shapes and admitted
+mutations, and returns an immutable tuple without emitting events, applying
+state, or invoking an executor.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.
