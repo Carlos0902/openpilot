@@ -62,3 +62,5 @@ Provider tool admission outcomes reuse project call, selection, failure, and
 error contracts; wire identity alone never authorizes execution.
 Provider tool schemas are a narrow read-only projection of registered typed
 contracts, not a copy of the broad internal input model.
+Provider argument decoding and contract validation are bounded pure checks;
+successful validation is not an execution permission.

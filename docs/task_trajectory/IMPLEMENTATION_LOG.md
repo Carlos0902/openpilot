@@ -2605,3 +2605,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
   a bounded command-mode enum, with explicit 32-tool and 64-field caps.
 - Remaining limitation: schema projection does not admit or execute provider
   calls; those remain separate boundaries.
+
+### Provider argument and contract validation
+
+- Observed failure: provider tool arguments lacked one bounded JSON-object
+  decoder and reusable validation for required, alternative, and conditional
+  typed input fields.
+- Validation evidence: the regression suite fails at import on the stacked base
+  and passes argument-shape, malformed JSON, size, required-field, any-of,
+  conditional, and contract-field-cap checks after implementation; the full
+  suite remains green.
+- Implemented fix: add pure argument decoding with a 200,000-character cap and
+  contract validation aligned with the preceding 64-field provider projection.
+- Remaining limitation: validation does not select, authorize, or execute tools.
