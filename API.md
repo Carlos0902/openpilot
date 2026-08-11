@@ -318,6 +318,11 @@ compacts only tool results older than the latest assistant tool-call. The latest
 tool round remains unchanged; malformed historical JSON becomes a bounded
 failure payload, and every rewritten result stays within the existing provider
 result-character bounds.
+Per-round budget derivation is a separate pure value. It caps a response at
+four provider calls, uses a 512-token reserve per result when remaining prompt
+capacity is known, applies the existing 640–1,600 result-character bounds, and
+defaults to at most two calls when remaining capacity is unavailable. Invalid
+or negative numeric facts fail closed.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

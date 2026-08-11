@@ -4030,3 +4030,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the multi-round controller still needs to call this
   projection at the historical-compaction point and preserve current-round wire
   evidence through the next request.
+
+### Bounded provider round budget policy
+
+- Observed failure: the aggregate loop derived maximum calls and result
+  character budgets inline from prompt capacity, response call count, and
+  remaining prompt tokens. Zero/negative or malformed values could be coerced,
+  and the two budget calculations could diverge at their lower bounds.
+- Validation evidence: the regression suite first fails because no standalone
+  budget policy exists. Eleven focused tests pass after implementation for the
+  default two-call path, remaining-prompt reserve, call-count/result-size caps,
+  the 640-character floor, and invalid numeric facts. The adjacent
+  budget/historical/completion set passes 25 and the complete provider-focused
+  set passes 629. The complete repository suite passes 1,725 in an isolated
+  detached worktree whose final directory was named `openpilot`, followed by
+  successful source compilation and diff validation.
+- Implemented fix: add a pure frozen budget value. It validates positive prompt
+  and call facts, caps calls at four, reserves 512 tokens per result when
+  available, and clamps result payloads to the existing 640–1,600 bounds.
+- Metadata impact note:
+  - Facts: existing prompt budget, provider response call count, and remaining
+    prompt capacity.
+  - Authoritative producers: context assembly owns remaining prompt capacity;
+    the provider response owns call count; this policy derives per-round limits.
+  - Lifecycle and control impact: runtime budget/routing only. It performs no
+    request, admission, execution, state mutation, file I/O, or persistence.
+  - Existing contracts reviewed: provider result payload bounds, round call
+    limits, context selection remaining capacity, public metadata inventory, and
+    metadata development conventions.
+  - Decision: centralize the derived policy in one core value rather than keep
+    duplicate arithmetic in the multi-round runner.
+  - Serialization and migration: runtime-only value; no persisted schema or
+    migration changes.
+- Remaining limitation: the multi-round controller still needs to consume this
+  policy for request admission and result projection.

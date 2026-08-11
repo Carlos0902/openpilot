@@ -182,6 +182,10 @@ Historical tool wire compaction is isolated from current-round evidence. It
 deep-copies bounded message collections, rewrites only older tool results,
 preserves the latest tool round, and turns malformed JSON into a bounded failure
 projection using the existing result-payload contract.
+The per-round budget policy is isolated from request execution. It validates
+prompt and call counts, caps calls at four, reserves 512 tokens per result when
+possible, keeps the 640-character minimum result payload, and defaults to two
+calls without remaining-prompt evidence.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

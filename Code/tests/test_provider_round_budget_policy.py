@@ -16,7 +16,7 @@ def test_budget_defaults_to_two_calls_without_remaining_prompt_fact() -> None:
     )
 
     assert budget.max_calls == 2
-    assert budget.tool_result_char_budget == 1365
+    assert budget.tool_result_char_budget == 640
 
 
 def test_budget_caps_calls_by_remaining_prompt_reserve() -> None:

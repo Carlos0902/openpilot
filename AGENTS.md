@@ -117,6 +117,10 @@ update this file together with `API.md`.
   before the latest assistant tool-call. It must deep-copy the message list,
   preserve the latest round byte-for-byte, bound the compacted payload, and
   convert malformed JSON into a bounded failure projection.
+- Per-round provider budget calculation must be a pure bounded policy. It must
+  validate positive prompt/call facts, preserve the 640-character result floor,
+  cap calls at four, reserve 512 prompt tokens per tool result when remaining
+  prompt capacity is known, and never infer a zero/negative call budget.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
