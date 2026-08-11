@@ -2375,3 +2375,14 @@ PYTHONPATH=Code/src pytest -q Code/tests
   bonus, and per-attempt diagnostics that preserve unknown usage.
 - Remaining limitation: this change records budget evidence only; provider
   transport integration remains a separate change.
+
+### Stable model-facing session constraint identity
+
+- Observed failure: advancing an ordinary conversation turn changed the
+  constraint candidate identity even when active constraints were unchanged.
+- Validation evidence: focused tests reproduce the identity drift and pass once
+  snapshot identity is separated from authority identity.
+- Implemented fix: preserve `canonical_hash` for checkpoint/replay and use an
+  `authority_hash` that excludes only `processed_through_turn` for prompt views.
+- Remaining limitation: any actual constraint revision or revoke still changes
+  authority identity by design.

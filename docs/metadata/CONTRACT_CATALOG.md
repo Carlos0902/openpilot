@@ -87,6 +87,9 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
   `SessionConstraintEntry`, and `SessionConstraintState` are strict nested
   values, not public Metadata kinds. Proposals never control execution;
   active/revoked entries preserve a per-key snapshot and revoked tombstones.
+  `canonical_hash` identifies the complete persisted snapshot, including the
+  ingress cursor; `authority_hash` excludes only that cursor and identifies the
+  stable model-facing constraint projection.
   `SessionConstraintLimits` is an owned typed bound for pending proposals,
   active/revoked entries, serialized values, and variant item counts. Newer
   same-key user proposals source-link and supersede older pending proposals;
