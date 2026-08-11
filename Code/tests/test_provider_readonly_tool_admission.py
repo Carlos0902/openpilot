@@ -179,9 +179,7 @@ def test_mutation_is_blocked_in_readonly_admission() -> None:
 
     assert admission.tool_error is not None
     assert admission.tool_error.error_type == "PermissionDenied"
-    assert admission.tool_error.failure.details["reason_code"] == (
-        "mutation_not_allowed"
-    )
+    assert "mutation_not_allowed" in admission.tool_error.error_message
 
 
 def test_exact_validation_command_binds_mode_and_cwd(tmp_path) -> None:
@@ -206,6 +204,59 @@ def test_exact_validation_command_binds_mode_and_cwd(tmp_path) -> None:
     assert admission.status == "admitted"
     assert admission.selection.input_metadata.mode == "automatic"
     assert admission.selection.input_metadata.cwd == str(tmp_path.resolve())
+
+
+@pytest.mark.parametrize(
+    ("updates", "error_type"),
+    [
+        ({"validation_command": "python -m compileall src"}, "ProviderToolValidationViolation"),
+        (
+            {
+                "validation_command": "python -m compileall -q src",
+                "validation_commands_used": 1,
+            },
+            "ProviderToolValidationDuplicate",
+        ),
+    ],
+)
+def test_validation_command_failures_are_typed(updates, error_type) -> None:
+    definition = _definition(
+        "command_executor",
+        permission=PermissionLevel.MEDIUM,
+        capabilities=(ToolCapability.SHELL_EXECUTION,),
+        required=("command",),
+    )
+    admission = _admit(
+        _call(
+            "command_executor",
+            {"command": "python -m compileall -q src"},
+        ),
+        _Registry({"command_executor": definition}),
+        user_confirmed=True,
+        read_scope=[],
+        **updates,
+    )
+
+    assert admission.tool_error is not None
+    assert admission.tool_error.error_type == error_type
+
+
+def test_command_executor_requires_task_owned_validation_command() -> None:
+    definition = _definition(
+        "command_executor",
+        permission=PermissionLevel.MEDIUM,
+        capabilities=(ToolCapability.SHELL_EXECUTION,),
+        required=("command",),
+    )
+    admission = _admit(
+        _call("command_executor", {"command": "pwd"}),
+        _Registry({"command_executor": definition}),
+        user_confirmed=True,
+        read_scope=[],
+    )
+
+    assert admission.tool_error is not None
+    assert admission.tool_error.error_type == "ProviderToolValidationViolation"
 
 
 @pytest.mark.parametrize(
