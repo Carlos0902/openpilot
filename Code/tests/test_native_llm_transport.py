@@ -1,6 +1,7 @@
 import pytest
 
 from core.config import LLMSettings
+from core.exceptions import LLMProviderError
 from core.llm import LLMMessage, LLMRequest
 from core.native_llm_transport import (
     AnthropicMessagesTransport,
@@ -170,3 +171,47 @@ def test_native_transport_registry_is_explicit_and_openai_family_is_not_native()
     with pytest.raises(NativeTransportUnsupportedError):
         get_native_transport(ReasoningTransportFamily.OPENAI_CHAT_COMPLETIONS)
 
+
+def test_native_transport_rejects_redirects_and_oversized_responses(monkeypatch) -> None:
+    settings = _settings(
+        "anthropic-messages-known",
+        base_url="https://api.anthropic.com/v1",
+        model="claude-sonnet-4-6",
+    )
+    request = LLMRequest(messages=[LLMMessage(role="user", content="hello")])
+    resolved = resolve_reasoning_policy(request.reasoning_policy, settings)
+    observed: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def iter_bytes(self):
+            yield b"{" + b"x" * 32
+
+    class FakeStream:
+        def __enter__(self):
+            return FakeResponse()
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return FakeStream()
+
+    monkeypatch.setattr("core.native_llm_transport.httpx.Client", FakeClient)
+    transport = AnthropicMessagesTransport()
+    transport.max_response_bytes = 16
+
+    with pytest.raises(LLMProviderError, match="response exceeds"):
+        transport.send_once(settings, request, resolved)
+    assert observed["follow_redirects"] is False
