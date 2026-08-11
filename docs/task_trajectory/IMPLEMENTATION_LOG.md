@@ -2420,3 +2420,15 @@ PYTHONPATH=Code/src pytest -q Code/tests
   mutation budget profiles; settings construction skips repository env files.
 - Remaining limitation: this change does not send provider requests or grant
   mutation authority.
+
+### Native provider request and response contracts
+
+- Observed failure: Anthropic and Gemini had no typed native request conversion
+  or normalized response boundary outside the OpenAI-compatible client.
+- Validation evidence: offline fixtures cover request shapes, reasoning fields,
+  response usage, invalid budgets, registry selection, redirect policy, and
+  oversized response rejection.
+- Implemented fix: add strict native adapters and provider-tool message models;
+  native HTTP performs one non-redirecting attempt with a 2,000,000-byte cap.
+- Remaining limitation: `LLMClient` routing, retry, caching, and JSON repair are
+  separate changes.

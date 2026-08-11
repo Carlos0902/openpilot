@@ -90,6 +90,13 @@ because the CLI was launched from `Code/` instead of the repository root.
 
 ### Standard LLM Request / Response
 
+Provider-native Anthropic Messages and Gemini GenerateContent adapters convert
+typed requests and normalize responses without changing reasoning policy
+ownership. A native call performs one HTTP attempt, never follows redirects,
+and rejects response bodies larger than 2,000,000 bytes before JSON parsing.
+Retry, caching, and JSON repair remain `LLMClient` responsibilities and are not
+enabled by the transport contract alone.
+
 `LLMRequest`:
 
 - `messages`: list of `{role, content}` chat messages.
