@@ -2422,6 +2422,33 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: this change records and validates evidence only. It does
   not enable reusable summaries in model-facing prompts.
 
+### Body-free reusable compaction shadow admission
+
+- Observed failure: a checkpoint-owned compaction artifact could be considered
+  for reuse without a stable, body-free binding hash over the current source
+  projection. Source drift, required-candidate omission, recent-suffix omission,
+  or artifact checksum drift therefore had no isolated admission boundary.
+- Reproduction: apply the reusable admission module to the #103 baseline and
+  run the focused shadow tests. The first attempt failed at import because
+  `source_candidate_binding_hash` was not present on that baseline. After adding
+  the minimal helper, matching payloads admit, every drift case rejects with a
+  typed reason, and checkpoint bindings without a persisted/compatibility hash
+  fail closed with a zero hash. The encoded admission never contains the
+  summary body and always reports `used_in_prompt=false`.
+- Implemented fix: add a provider-free `memory.compaction_reuse` boundary with
+  strict body-free artifact candidates, source-binding hash reconstruction,
+  typed shadow admission, bounded candidate-provider factories, and checkpoint
+  compatibility handling. This PR does not read artifact bodies, mutate the
+  builder, select a prompt candidate, or grant tool/file/mutation authority.
+- Validation evidence: focused reuse, rolling-summary, compaction-summary,
+  metadata, context-assembly, memory, projection, and rolling-integration suite
+  **182 passed**; `python -m compileall -q Code/src` and `git diff --check` pass.
+  The slice is **387 additions** across the implementation, helper, tests, and
+  log; it is below the 3000-line large-PR threshold.
+- Remaining limitation: prompt-use preflight/simulation, builder shadow wiring,
+  and reusable artifact selection remain separate follow-up PRs; this slice is
+  shadow evidence only.
+
 ### Bounded provider completion outcome evidence
 
 - Observed failure: empty, truncated, and failed provider attempts could not be
