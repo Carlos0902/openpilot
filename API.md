@@ -276,6 +276,13 @@ continue validation, request finalization, or fail with a typed stable code.
 Validation without a receipt fails closed, and successful validation on the
 last available round becomes `ProviderToolFinalizationBudgetUnavailable` rather
 than silently completing without a final response.
+The mutation round-trip runner composes these existing boundaries into a bounded
+request loop: provider request planning, response partitioning, typed admission,
+one admitted patch round, exact validation observation, and finalization. It
+requires literal mutation opt-in and user confirmation, an explicit write scope,
+an exact validation command, and an authorized post-processing scope at entry;
+it adds no permission or path authority and does not replay an indeterminate
+transport outcome.
 Final-response routing is another pure transition evaluated before execution.
 A response with tool calls executes tools only when finalization is not pending;
 otherwise it fails as `ProviderToolFinalizationToolCall`. A tool-free response

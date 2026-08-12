@@ -4402,3 +4402,36 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: mutation request-loop integration, validation
   observation/transition, recovery, and complete aggregate parity remain
   separate slices.
+
+### Provider mutation request loop
+
+- Observed failure: the provider stack could execute one already-admitted
+  `file_patch_writer` round, but no bounded runner connected provider requests
+  to admission, mutation execution, exact validation, and finalization. A real
+  mutation task therefore stopped after planning or required a separate caller
+  to orchestrate the rounds.
+- Validation evidence: the new focused suite passes 2 tests, and the existing
+  mutation/transition/validation/request-plan suites pass 48 tests. Source
+  compilation and `git diff --check` pass.
+- Implemented fix: add `ProviderMutationRoundTripRunner`, which reuses the
+  immutable request plan, provider surface, duplicate ledger, typed batch
+  admission, existing admitted-mutation round executor, exact validation
+  observation, and mutation transition. The runner requires literal mutation
+  opt-in and confirmation, explicit write/post-processing scopes, and an exact
+  validation command; it bounds rounds and completion budget and never retries
+  an indeterminate transport request.
+- Metadata impact note:
+  - Facts: request round, provider response identity, admission outcome,
+    mutation receipt, exact validation observation, finalization state, and
+    bounded completion budget.
+  - Authoritative producers: request plan owns visible tool surface and budget;
+    admission owns permission and scopes; mutation executor owns side effects;
+    validation observation and mutation transition own follow-up state; runner
+    owns sequencing only.
+  - Lifecycle and control impact: mutation request-loop sequencing only. No new
+    permission, path, command, persistence, or replay authority is introduced.
+  - Serialization and migration: runtime-only result projection; no persisted
+    schema or migration changes.
+- Remaining limitation: validation failure recovery, protocol repair,
+  completion-budget recovery, integration into the autonomous task entry, and
+  complete aggregate parity remain separate slices.
