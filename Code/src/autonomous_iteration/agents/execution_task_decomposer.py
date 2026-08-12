@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import json
+import posixpath
 import re
+import shlex
 import uuid
 from typing import Any, Callable
 
@@ -155,6 +158,10 @@ class TaskDecomposer:
         decomposition = self._generate_decomposition(original_task, context)
         if self._is_simple_code_artifact(task_description):
             decomposition["subtasks"] = self._compact_simple_code_subtasks(decomposition.get("subtasks", []))
+        decomposition["subtasks"] = self._normalize_interactive_validation_commands(
+            task_description,
+            decomposition["subtasks"],
+        )
 
         # Create subtasks
         subtasks = []
@@ -510,6 +517,10 @@ Guidelines:
 - Every implement or repair subtask must list every permitted target in write_files.
 - Tasks that write the same file must depend on each other or set can_run_parallel=false
 - Every validate subtask must include the exact non-empty validation_command it is required to run.
+- Validation commands must terminate without user input. For games, graphical applications,
+  interactive programs, servers, or other long-running applications, never validate by launching
+  the application directly. Prefer a bounded static or syntax check such as
+  `python -m py_compile <file.py>`.
 - Dependencies should be indices (0, 1, 2, etc.) of other subtasks in the list
 - Keep descriptions clear and actionable
 - Do not replace kind with type or task_kind."""
@@ -642,7 +653,8 @@ Context:
             ]
         }
 
-    def _string_list(self, value: Any) -> list[str]:
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -687,6 +699,69 @@ Context:
         for index, subtask in enumerate(compact):
             subtask["dependencies"] = [index - 1] if index > 0 else []
         return compact
+
+    @classmethod
+    def _normalize_interactive_validation_commands(
+        cls,
+        task_description: str,
+        subtasks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Replace grounded interactive Python launches with a bounded syntax check."""
+
+        combined = " ".join(
+            [task_description] + [str(subtask.get("description") or "") for subtask in subtasks]
+        )
+        if not cls._describes_interactive_artifact(combined):
+            return subtasks
+        grounded_paths = {
+            posixpath.normpath(path)
+            for subtask in subtasks
+            for field in ("read_files", "write_files")
+            for path in cls._string_list(subtask.get(field))
+        }
+        normalized_subtasks: list[dict[str, Any]] = []
+        for raw_subtask in subtasks:
+            subtask = dict(raw_subtask)
+            kind = str(subtask.get("kind") or subtask.get("task_kind") or "").strip().lower()
+            command = str(subtask.get("validation_command") or "").strip()
+            direct_run = cls._direct_python_script(command) if kind == "validate" else None
+            if direct_run is not None:
+                interpreter, target = direct_run
+                if posixpath.normpath(target) not in grounded_paths:
+                    raise ValueError("Interactive validation command requires a grounded Python target.")
+                subtask["validation_command"] = shlex.join([interpreter, "-m", "py_compile", target])
+            normalized_subtasks.append(subtask)
+        return normalized_subtasks
+
+    @staticmethod
+    def _describes_interactive_artifact(description: str) -> bool:
+        text = description.lower()
+        markers = (
+            "daemon", "game", "graphical", "gui", "interactive", "pygame", "server", "tkinter",
+            "交互式", "小游戏", "图形界面", "守护进程", "服务器", "游戏", "贪吃蛇",
+        )
+        return any(
+            re.search(rf"\b{re.escape(marker)}\b", text) is not None
+            if marker.isascii() else marker in text
+            for marker in markers
+        )
+
+    @staticmethod
+    def _direct_python_script(command: str) -> tuple[str, str] | None:
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return None
+        if len(argv) < 2 or any(token in {"&&", "||", ";", "|"} for token in argv):
+            return None
+        interpreter = argv[0]
+        interpreter_name = interpreter.rsplit("/", 1)[-1]
+        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", interpreter_name) is None:
+            return None
+        target = argv[1]
+        if target.startswith("-") or not target.endswith(".py"):
+            return None
+        return interpreter, target
 
     def _is_planning_subtask(self, description: str) -> bool:
         text = description.lower()

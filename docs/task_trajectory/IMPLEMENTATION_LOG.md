@@ -4548,3 +4548,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: interactive validation normalization, CLI success
   delivery, recovery, budget exhaustion, autonomous task-entry integration, and
   complete aggregate parity remain separate slices.
+
+### Bounded interactive validation commands
+
+- Observed failure: a real Snake task used `python snake_game.py` as validation.
+  The game loop did not terminate, timed out, and recovery then proposed a
+  substitute command that the exact-command gate correctly rejected.
+- Validation evidence: decomposer/relocation focused tests pass **19 tests**;
+  source compilation and `git diff --check` pass.
+- Implemented fix: add a producer-side normalization step for interactive
+  artifacts. Only a direct Python launch whose target is grounded by a typed
+  `read_files` or `write_files` entry is rewritten to the same interpreter's
+  `-m py_compile`; ungrounded targets fail closed, while noninteractive and
+  already-bounded commands remain unchanged.
+- Metadata impact note: the decomposer remains the sole producer of the typed
+  validation command; executor, router, environment binding, and completion
+  evidence remain authoritative for execution and success. No schema,
+  permission, path, command, network, persistence, or replay authority is added.
+- Remaining limitation: `py_compile` proves syntax only; stronger headless smoke
+  checks require an explicitly terminating task-owned validation command.

@@ -197,6 +197,30 @@ def test_decomposition_normalizes_legacy_type_into_permission_relevant_task_kind
     assert result.subtasks[2].validation_command == "python -m pytest -q"
 
 
+def test_interactive_python_direct_run_is_normalized_to_bounded_compile() -> None:
+    class InteractiveLLM:
+        def complete(self, _request):
+            return type("Response", (), {"parsed_json": {"subtasks": [
+                {"description": "实现贪吃蛇小游戏。", "kind": "implement", "write_files": ["snake_game.py"]},
+                {"description": "运行游戏并确认能够启动。", "kind": "validate", "read_files": ["snake_game.py"], "validation_command": "python snake_game.py", "dependencies": [0]},
+            ]}, "content": ""})()
+
+    result = TaskDecomposer(InteractiveLLM()).decompose("帮我做一个贪吃蛇小游戏")
+
+    assert result.subtasks[1].validation_command == "python -m py_compile snake_game.py"
+
+
+def test_interactive_python_direct_run_requires_a_grounded_target() -> None:
+    class InteractiveLLM:
+        def complete(self, _request):
+            return type("Response", (), {"parsed_json": {"subtasks": [
+                {"description": "运行游戏并确认能够启动。", "kind": "validate", "read_files": ["other.py"], "validation_command": "python snake_game.py"},
+            ]}, "content": ""})()
+
+    with pytest.raises(ValueError, match="grounded Python target"):
+        TaskDecomposer(InteractiveLLM()).decompose("帮我做一个贪吃蛇小游戏")
+
+
 def test_decomposition_rejects_unknown_explicit_subtask_type() -> None:
     decomposer = TaskDecomposer(FakeLLM())
 

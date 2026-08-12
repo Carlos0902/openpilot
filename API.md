@@ -832,6 +832,15 @@ requested `pytest` check. Tasks that include `write_files`, omit the command, or
 use an unknown task kind remain on the ordinary contract-checked path and fail
 closed when required evidence is missing.
 
+The decomposition boundary also requires validation commands to terminate
+without user input. For a task describing a game, GUI, interactive program,
+server, or other long-running application, a direct Python script launch is not
+accepted as authoritative validation. When the `.py` target is grounded by the
+decomposition's `read_files` or `write_files`, the producer deterministically
+replaces the launch with the same interpreter's `-m py_compile` command before
+constructing `Task`; an ungrounded target fails closed. This does not reinterpret
+pytest, existing bounded checks, or ordinary terminating scripts.
+
 Tool-planning prompts project the current typed `Task.write_files` list as the
 authoritative write scope. README generation is optional post-processing: an
 unscoped README need is dropped when the same plan still contains authorized
