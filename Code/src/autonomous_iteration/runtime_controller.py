@@ -1569,11 +1569,33 @@ class _RuntimeSessionExecutor:
                 details="Breaking down task into executable subtasks",
                 status="running",
             )
+            decomposition_failure: dict[str, Any] | None = None
             with runtime.tracker.track_task("Task Decomposition", {"goal": goal}):
-                decomposition = runtime.task_decomposer.decompose(
-                    task_description=goal,
-                    context=context,
+                try:
+                    decomposition = runtime.task_decomposer.decompose(
+                        task_description=goal,
+                        context=context,
+                    )
+                except (InvalidLLMResponseError, ValueError, TypeError, KeyError) as exc:
+                    decomposition_failure = self._decomposition_failure_result(goal, context, exc)
+            if decomposition_failure is not None:
+                stage_statuses["Task Decomposition"] = "failed"
+                runtime.enhanced_ui.set_task_graph_state(stage_statuses=stage_statuses)
+                runtime.enhanced_ui.set_current_task_state(
+                    title="Task Decomposition",
+                    details=decomposition_failure["failure_reason"],
+                    status="failed",
                 )
+                runtime.tracker.stop_tracking()
+                self._log(
+                    "session_decomposition_failed",
+                    output_summary={
+                        "task_id": decomposition_failure.get("task_id"),
+                        "error_type": decomposition_failure["error_type"],
+                    },
+                    success=False,
+                )
+                return decomposition_failure
             execution_order = self._execution_order(decomposition.subtasks)
             self._emit_cursor(
                 self._cursor(
@@ -1705,6 +1727,45 @@ class _RuntimeSessionExecutor:
     @staticmethod
     def _enum_value(value: Any) -> str:
         return str(getattr(value, "value", value) or "")
+
+    @staticmethod
+    def _decomposition_failure_result(
+        goal: str,
+        context: dict[str, Any],
+        error: Exception,
+    ) -> dict[str, Any]:
+        """Return bounded, redacted evidence when the plan violates its contract."""
+
+        task_id = str(context.get("task_id") or "").strip() or None
+        failure = FailureMetadata(
+            error_type=type(error).__name__,
+            error_message="Task decomposition response did not match the executable task contract.",
+            error_code="task_decomposition_contract_invalid",
+            recoverable=True,
+            retry_recommended=True,
+            recovery_strategy="retry_decomposition_with_valid_contract",
+            details={
+                "phase": "Task Decomposition",
+                "task_id": task_id or "",
+                "attempts": 1,
+            },
+        )
+        payload = failure.to_json_dict()
+        return {
+            "success": False,
+            "goal": goal,
+            "results": [],
+            "failure": payload,
+            "failure_reason": failure.error_message,
+            "failure_stage": "Task Decomposition",
+            "failed_tool": "task_decomposer",
+            "task_id": task_id,
+            "failure_id": f"{task_id}:task_decomposition" if task_id else "task_decomposition",
+            "error_type": failure.error_type,
+            "suggested_recovery": failure.recovery_strategy,
+            "recoverable": failure.recoverable,
+            "recoverability": Recoverability.RECOVERABLE_AFTER_ACTION.value,
+        }
 
     @classmethod
     def _semantic_snapshot(cls, semantic: Any) -> SessionSemanticSnapshot:
@@ -1943,10 +2004,23 @@ class _RuntimeSessionExecutor:
                     return fast_result
 
                 runtime.console.print("[bold cyan]🔍 Decomposing task...[/bold cyan]")
-                decomposition = runtime.task_decomposer.decompose(
-                    task_description=goal,
-                    context=context,
-                )
+                try:
+                    decomposition = runtime.task_decomposer.decompose(
+                        task_description=goal,
+                        context=context,
+                    )
+                except (InvalidLLMResponseError, ValueError, TypeError, KeyError) as exc:
+                    failure = self._decomposition_failure_result(goal, context, exc)
+                    runtime.console.print(f"[bold red]❌ {failure['failure_reason']}[/bold red]")
+                    self._log(
+                        "session_decomposition_failed",
+                        output_summary={
+                            "task_id": failure.get("task_id"),
+                            "error_type": failure["error_type"],
+                        },
+                        success=False,
+                    )
+                    return failure
                 execution_order = self._execution_order(decomposition.subtasks)
                 initial_cursor = self._cursor(
                     semantic=semantic,

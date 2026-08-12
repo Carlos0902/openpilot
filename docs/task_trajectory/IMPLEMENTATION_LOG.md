@@ -1,5 +1,19 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Bounded decomposition-contract failure evidence
+
+- Observed failure: malformed decomposition payloads could raise during task
+  conversion, leak provider response text through the CLI, and leave the
+  execution stage without a typed retryable failure record.
+- Implemented fix: validate the decomposition object, subtask array, kind, and
+  description before conversion; return a bounded `Task Decomposition` failure
+  with typed recoverability and a stable failure ID; CLI exceptions now show
+  redacted stage/recovery metadata and never print raw `response_text`.
+- Validation evidence: focused decomposer/runtime/CLI suite **25 passed**;
+  `compileall` and `git diff --check` passed.
+- Remaining limitations: this slice does not retry the model request or change
+  the broader decomposition policy; callers may explicitly retry the task.
+
 ## 文档定位
 
 这份文档是 OpenPilot 真实任务 / 任务轨迹证据工作的**实现总日志**。

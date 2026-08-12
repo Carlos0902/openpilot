@@ -20,6 +20,7 @@ from metadata import (
     ProjectImprovementPolicy,
     ProjectImprovementPolicySource,
     ProjectImprovementRequirement,
+    Recoverability,
     SessionIngressState,
     SessionTurn,
 )
@@ -111,6 +112,12 @@ def _format_failure_details(result: dict) -> str:
         context_lines.append(f"Task: {context['task_description']}")
     if context.get("task_id"):
         context_lines.append(f"Task ID: {context['task_id']}")
+    if context.get("failure_id"):
+        context_lines.append(f"Failure ID: {context['failure_id']}")
+    if context.get("recoverable") is not None:
+        context_lines.append(f"Recoverable: {'yes' if bool(context['recoverable']) else 'no'}")
+    if context.get("recoverability"):
+        context_lines.append(f"Recovery status: {context['recoverability']}")
     if failure_stage or failed_tool:
         context_lines.extend(
             [
@@ -130,7 +137,7 @@ def _format_failure_details(result: dict) -> str:
         context_lines.append(f"Error Type: {context['error_type']}")
     if context.get("suggested_recovery"):
         context_lines.append(f"Recovery: {context['suggested_recovery']}")
-    response_preview = context.get("response_preview") or context.get("response_text")
+    response_preview = context.get("response_preview")
     if response_preview:
         context_lines.append(f"Response Preview: {str(response_preview)[:1000]}")
     if context_lines:
@@ -173,6 +180,23 @@ def _result_value(value, key: str):
     return getattr(value, key, None)
 
 
+def _cli_exception_failure(exc: Exception, *, task_id: str | None = None) -> dict[str, object]:
+    """Build a bounded ordinary-mode failure without exposing exception text."""
+
+    return {
+        "success": False,
+        "failure_reason": "Autonomous iteration stopped before completion.",
+        "failure_stage": "CLI",
+        "failed_tool": "autonomous_iteration",
+        "task_id": task_id,
+        "failure_id": f"{task_id}:cli" if task_id else "cli",
+        "error_type": type(exc).__name__,
+        "recoverable": False,
+        "recoverability": Recoverability.NOT_RECOVERABLE.value,
+        "suggested_recovery": "Retry after reviewing the diagnostic log.",
+    }
+
+
 def _extract_failure_context(result) -> dict:
     if not isinstance(result, dict):
         return {}
@@ -183,6 +207,7 @@ def _extract_failure_context(result) -> dict:
             if nested_context:
                 return nested_context
     direct_reason = result.get("failure_reason")
+    failure_payload = result.get("failure") if isinstance(result.get("failure"), dict) else {}
     if direct_reason and direct_reason != "Autopilot reported failure":
         direct_context = {
             "failure_reason": direct_reason,
@@ -195,7 +220,10 @@ def _extract_failure_context(result) -> dict:
             "file_path": result.get("file_path"),
             "error_type": result.get("error_type"),
             "suggested_recovery": result.get("suggested_recovery"),
-            "response_preview": result.get("response_preview") or result.get("response_text"),
+            "response_preview": result.get("response_preview"),
+            "recoverable": result.get("recoverable", failure_payload.get("recoverable")),
+            "recoverability": result.get("recoverability"),
+            "failure_id": result.get("failure_id"),
         }
         if any(value for key, value in direct_context.items() if key != "failure_reason"):
             return direct_context
@@ -210,6 +238,9 @@ def _extract_failure_context(result) -> dict:
             "failed_tool": result.get("failed_tool"),
             "failed_call_id": result.get("failed_call_id"),
             "failed_step_id": result.get("failed_step_id"),
+            "recoverable": result.get("recoverable", failure_payload.get("recoverable")),
+            "recoverability": result.get("recoverability"),
+            "failure_id": result.get("failure_id"),
         }
     decomposition = result.get("decomposition")
     for task in _result_value(decomposition, "subtasks") or []:
@@ -267,8 +298,7 @@ def _failure_context_from_details(details, reason: str) -> dict:
         or details.get("response_preview_start")
         or final_details.get("response_preview")
         or final_details.get("response_preview_start")
-        or details.get("response_text")
-        or final_details.get("response_text")
+        or None
     )
     return {
         "failure_reason": reason,
@@ -441,6 +471,7 @@ def _run_once_mode(
     ui.console.print(f"[bold cyan]Goal:[/bold cyan] {goal}")
     ui.console.print()
 
+    execution_context: dict[str, object] = {}
     try:
         classification = _classify_task_route(goal)
         _show_task_route(ui, classification)
@@ -500,9 +531,15 @@ def _run_once_mode(
 
     except Exception as e:
         ui.show_full_task_graph_timeline()
-        ui.show_error("Execution failed", str(e))
-        import traceback
-        traceback.print_exc()
+        ui.show_error(
+            "Execution failed",
+            _format_failure_details(
+                _cli_exception_failure(
+                    e,
+                    task_id=str(execution_context.get("task_id") or "") or None,
+                )
+            ),
+        )
         return 2
 
 
@@ -972,14 +1009,12 @@ def _execute_autopilot(
     except Exception as e:
         ui.console.print()
         ui.show_full_task_graph_timeline()
-        ui.show_error("Autopilot execution failed", str(e))
-        import traceback
-        traceback.print_exc()
-        return {
-            "success": False,
-            "failure_stage": "CLI",
-            "failure_reason": str(e),
-        }
+        failure = _cli_exception_failure(
+            e,
+            task_id=str((context or {}).get("task_id") or "") or None,
+        )
+        ui.show_error("Autopilot execution failed", _format_failure_details(failure))
+        return failure
 
 
 def _execute_agent_generator(task: str, ui: EnhancedUI, llm_client = None, logger = None) -> bool:

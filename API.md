@@ -841,6 +841,12 @@ replaces the launch with the same interpreter's `-m py_compile` command before
 constructing `Task`; an ungrounded target fails closed. This does not reinterpret
 pytest, existing bounded checks, or ordinary terminating scripts.
 
+Malformed decomposition responses are rejected before task conversion. The
+runtime returns a bounded `Task Decomposition` failure with a stable failure ID,
+typed `recoverable`/`recoverability` fields, and a retry recommendation. CLI
+failure formatting accepts only an already-redacted `response_preview`; raw
+provider `response_text` is never displayed.
+
 Interactive application launch is a separate delivery operation. The command
 tool accepts `mode="interactive"` only when a runtime-only
 `ToolExecutionContext.user_confirmed is True` handle is attached. It starts the

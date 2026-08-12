@@ -43,6 +43,7 @@ class TaskDecomposer:
         "codebase_understanding": "codebase_understanding",
         "document": "document",
         "documentation": "document",
+        "general": "general",
         "implement": "implement",
         "implementation": "implement",
         "inspect": "inspect",
@@ -117,7 +118,7 @@ class TaskDecomposer:
                 "task_decomposition_failed",
                 input_summary={"task_description": task_description},
                 success=False,
-                error=str(exc),
+                error=type(exc).__name__,
             )
             raise
         self._log_agent(
@@ -156,8 +157,15 @@ class TaskDecomposer:
 
         # Analyze task and generate decomposition
         decomposition = self._generate_decomposition(original_task, context)
+        if not isinstance(decomposition, dict):
+            raise ValueError("Task decomposition response must be a JSON object.")
+        raw_subtasks = decomposition.get("subtasks")
+        if not isinstance(raw_subtasks, list):
+            raise ValueError("Task decomposition subtasks must be a JSON array.")
+        if any(not isinstance(item, dict) for item in raw_subtasks):
+            raise ValueError("Each decomposed subtask must be a JSON object.")
         if self._is_simple_code_artifact(task_description):
-            decomposition["subtasks"] = self._compact_simple_code_subtasks(decomposition.get("subtasks", []))
+            decomposition["subtasks"] = self._compact_simple_code_subtasks(raw_subtasks)
         decomposition["subtasks"] = self._normalize_interactive_validation_commands(
             task_description,
             decomposition["subtasks"],
@@ -274,6 +282,9 @@ class TaskDecomposer:
         if not isinstance(raw_subtask, dict):
             raise ValueError("Each decomposed subtask must be a JSON object.")
         normalized = dict(raw_subtask)
+        description = normalized.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("Each decomposed subtask must include a description.")
         explicit_kind = normalized.get("kind") or normalized.get("task_kind")
         legacy_type = normalized.get("type")
         raw_kind = explicit_kind if explicit_kind is not None else legacy_type
@@ -283,7 +294,7 @@ class TaskDecomposer:
         kind_key = str(raw_kind).strip().lower().replace("-", "_")
         canonical = cls._TASK_KIND_ALIASES.get(kind_key)
         if canonical is None:
-            raise ValueError(f"Unsupported subtask kind: {raw_kind!r}")
+            raise ValueError("Unsupported subtask kind")
         normalized["kind"] = canonical
         return normalized
 
