@@ -6,6 +6,31 @@ This document is the normative short-form contract for restarting an OpenPilot
 runtime session. The staged implementation and test matrix live in
 `docs/runtime_recovery/RUNTIME_CHECKPOINT_RECOVERY_PLAN.md`.
 
+## Pre-task iteration records
+
+The feature-flagged unified autonomous entry uses a conversation-owned
+`IterationTurnRecordMetadata` before any task checkpoint exists. Its offline
+`IterationTurnStore` is separate from `RuntimeCheckpointStore`: it persists
+immutable turn generations, checksum-bound artifacts, and a revisioned
+`SessionIngressState` snapshot. Reads may fall back from a corrupt latest turn
+record to the newest previous valid generation, but a writer must fail closed
+when any existing turn history or ingress snapshot is unreadable. Corruption
+must never be interpreted as generation/revision zero.
+
+Response artifacts are content-addressed. `IterationTurnCommitter` recovers the
+response path in the fixed order pending turn record → assistant ingress turn →
+committed turn record. The assistant message ID, turn index, payload reference,
+and canonical payload hash must match at every boundary. An identical retry
+reuses the same terminal record/payload; an existing message ID with different
+content fails closed. A crash after the ingress write must not append another
+turn, and recovery after the terminal record write may replay only the exact
+durable display payload. This replay never invokes or authorizes a Provider.
+
+This response recovery is not task-resume authorization. Prepared-task
+materialization, current session-authority freshness/revocation checks, and the
+transition to an active `RuntimeCheckpointMetadata` remain mandatory gates
+before the unified entry can be enabled.
+
 ## Source of truth
 
 `RuntimeStateMetadata.recovery_status` is the current operational status;

@@ -93,6 +93,7 @@ class MetadataKind(str, Enum):
     GUARD_DECISION = "guard_decision"
     TOOL_DECISION = "tool_decision"
     RUNTIME_REPORT = "runtime_report"
+    ITERATION_TURN_RECORD = "iteration_turn_record"
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
     EXECUTION_CONTEXT = "execution_context"
