@@ -1,5 +1,24 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Discovered persisted-binding opt-in canary
+
+- Observed failure: the token-aware simulation used builder-selected sources
+  but did not prove that a persisted checkpoint binding could be discovered,
+  admitted, and then passed through the same preflight/simulation path.
+- Reproduction: build raw and compact contexts, discover the compact builder's
+  persisted binding, replay it against raw candidates, and assert source-hash
+  admission, required/recent retention, positive char/token deltas, and
+  `used_in_prompt=False` throughout.
+- Implemented fix: add a self-contained discovered-binding canary with local
+  canonical hashing, receipt writing, and zero-side-effect accounting. The
+  discovered binding remains opt-in and shadow-only; no production prompt is
+  mutated.
+- Validation evidence: discovered-binding regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  536 experiment/test lines plus this log entry, below the 3,000-line threshold.
+- Remaining limitation: this canary does not call a real provider or authorize
+  reusable-summary prompt selection.
+
 ## 2026-08-12 — Token-aware opt-in prompt-use canary
 
 - Observed failure: token-reduction evidence was not separated from ordinary
