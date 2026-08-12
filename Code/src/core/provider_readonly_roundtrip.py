@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import json
+from pathlib import Path
 from typing import Any
 
 from core.llm import LLMMessage, LLMResponse, LLMToolDefinition
@@ -11,6 +13,15 @@ from core.provider_completion_usage_observation import provider_completion_token
 from core.provider_execution_dispatch import dispatch_provider_execution_batch
 from core.provider_round_request_builder import build_provider_round_llm_request
 from core.provider_round_request_plan import build_provider_round_request_plan
+from core.provider_final_response_transition import (
+    ProviderFinalResponseAction,
+    provider_final_response_transition,
+)
+from core.provider_read_finalization_transition import (
+    ProviderReadFinalizationAction,
+    provider_read_finalization_transition,
+)
+from core.provider_tool_evidence_state import ProviderToolEvidenceState
 from core.provider_tool_batch_admission import admit_provider_tool_calls
 from core.provider_tool_call_signature import provider_tool_call_signature
 from core.provider_tool_duplicate_partition import partition_provider_tool_calls
@@ -22,7 +33,7 @@ from core.provider_tool_roundtrip_contracts import (
 )
 from core.provider_tool_wire_exchange import provider_tool_wire_exchange
 from core.tool_event_loop import ToolEventLoopRunResult
-from metadata import ContextRequestPurpose, RuntimeBudgetMetadata
+from metadata import ContextRequestPurpose, RuntimeBudgetMetadata, metadata_summary
 
 
 class ProviderReadonlyRoundTripError(ValueError):
@@ -68,6 +79,11 @@ class ProviderReadonlyRoundTripRunner:
         self.max_tokens = max_tokens
         self.context_max_prompt_tokens = context_max_prompt_tokens
         self._attempt_ledger = ProviderToolAttemptLedger()
+        self._evidence = ProviderToolEvidenceState(project_path=self.project_path)
+        self._bounded_projection_seen = False
+        self._last_round_progress = False
+        self._finalization_pending = False
+        self._finalization_requests = 0
 
         if not self.tools:
             raise ValueError("read-only provider round requires at least one tool")
@@ -92,7 +108,7 @@ class ProviderReadonlyRoundTripRunner:
                 plan = build_provider_round_request_plan(
                     messages=current_messages,
                     tool_names=[tool.function.name for tool in self.tools],
-                    finalization_pending=False,
+                    finalization_pending=self._finalization_pending,
                     post_mutation_active=False,
                     mutation_tools_exposed=False,
                     all_scoped_reads_complete=False,
@@ -110,7 +126,7 @@ class ProviderReadonlyRoundTripRunner:
                 request = build_provider_round_llm_request(
                     self.runtime.llm_client,
                     plan=plan,
-                    tool_definitions=self.tools,
+                    tool_definitions=() if self._finalization_pending else self.tools,
                     purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
                     max_tokens=min(
                         request_max_tokens,
@@ -133,15 +149,35 @@ class ProviderReadonlyRoundTripRunner:
                     raise ProviderReadonlyRoundTripError("provider completion usage exceeded request limit")
                 outcome = provider_completion_outcome(response)
                 self._observe_completion_budget(budget, request.max_tokens, usage, outcome)
-                if not response.tool_calls:
-                    return ProviderReadonlyRoundTripResult(
+                response_transition = provider_final_response_transition(
+                    response,
+                    finalization_pending=self._finalization_pending,
+                )
+                if response_transition.action is ProviderFinalResponseAction.COMPLETE:
+                    return self._result(
                         success=bool(response.content.strip()),
                         final_response=response,
-                        messages=tuple(current_messages),
-                        tool_loop_results=tuple(loop_results),
+                        messages=current_messages,
+                        tool_loop_results=loop_results,
                         rounds_used=round_index,
-                        error_message=None if response.content.strip() else "ProviderToolEmptyResponse",
-                        attempts=self._attempt_ledger.attempts,
+                        error_message=None
+                        if response.content.strip()
+                        else "ProviderToolEmptyResponse",
+                    )
+                if response_transition.action is ProviderFinalResponseAction.FAIL:
+                    error_code = response_transition.error_code.value
+                    return self._result(
+                        success=False,
+                        final_response=response,
+                        messages=current_messages,
+                        tool_loop_results=loop_results,
+                        rounds_used=round_index,
+                        error_message=error_code,
+                    )
+
+                if self._finalization_pending:
+                    raise ProviderReadonlyRoundTripError(
+                        "provider finalization transition returned an invalid action"
                     )
 
                 partition = partition_provider_tool_calls(
@@ -178,26 +214,117 @@ class ProviderReadonlyRoundTripRunner:
                 )
                 current_messages.extend(provider_tool_wire_exchange(response, tool_results))
                 self._record_attempts(response, loop_result, round_index)
+                self._observe_read_evidence(response, loop_result)
+                transition = provider_read_finalization_transition(
+                    page_cap_ready=self._all_scoped_reads_complete(),
+                    all_scoped_reads_complete=self._all_scoped_reads_complete(),
+                    read_only_tool_set=True,
+                    has_bounded_projection=self._bounded_projection_seen,
+                    round_made_progress=self._last_round_progress,
+                    finalization_requests=self._finalization_requests,
+                    round_index=round_index,
+                    max_rounds=self.max_rounds,
+                )
+                if transition.action is ProviderReadFinalizationAction.FAIL:
+                    return self._result(
+                        success=False,
+                        final_response=response,
+                        messages=current_messages,
+                        tool_loop_results=loop_results,
+                        rounds_used=round_index,
+                        error_message=transition.error_code.value,
+                    )
+                if transition.action is ProviderReadFinalizationAction.REQUEST_FINALIZATION:
+                    self._finalization_pending = True
+                    self._finalization_requests = transition.finalization_requests
+                    current_messages.append(LLMMessage(role="user", content=self._finalization_instruction()))
             except Exception as exc:
-                return ProviderReadonlyRoundTripResult(
+                return self._result(
                     success=False,
                     final_response=last_response,
-                    messages=tuple(current_messages),
-                    tool_loop_results=tuple(loop_results),
+                    messages=current_messages,
+                    tool_loop_results=loop_results,
                     rounds_used=round_index,
                     error_message=str(exc)[:2000] or type(exc).__name__,
-                    attempts=self._attempt_ledger.attempts,
                 )
 
-        return ProviderReadonlyRoundTripResult(
+        return self._result(
             success=False,
             final_response=last_response,
-            messages=tuple(current_messages),
-            tool_loop_results=tuple(loop_results),
+            messages=current_messages,
+            tool_loop_results=loop_results,
             rounds_used=self.max_rounds,
             error_message="ProviderToolRoundLimitExceeded",
-            attempts=self._attempt_ledger.attempts,
         )
+
+    def _result(self, **kwargs: Any) -> ProviderReadonlyRoundTripResult:
+        return ProviderReadonlyRoundTripResult(
+            attempts=self._attempt_ledger.attempts,
+            evidence_coverage=self._evidence.coverage(),
+            **kwargs,
+        )
+
+    def _finalization_instruction(self) -> str:
+        return (
+            "The explicitly scoped read evidence is complete. Do not call any tool. "
+            "Answer the task using only the evidence already returned, and state "
+            "when the evidence is insufficient."
+        )
+
+    def _all_scoped_reads_complete(self) -> bool:
+        expected = {
+            self._canonical_path(path)
+            for path in self.read_scope
+            if str(path or "").strip()
+        }
+        observed = set(self._evidence.coverage().completed_read_paths)
+        return bool(expected) and expected.issubset(observed)
+
+    def _canonical_path(self, raw_path: str) -> str:
+        path = Path(str(raw_path).strip()).expanduser()
+        if not path.is_absolute() and self.project_path:
+            path = Path(self.project_path) / path
+        return str(path.resolve(strict=False))
+
+    def _observe_read_evidence(
+        self,
+        response: LLMResponse,
+        loop_result: ToolEventLoopRunResult,
+    ) -> None:
+        self._last_round_progress = False
+        result_by_id = {
+            str(item.get("provider_call_id")): item
+            for item in loop_result.tool_results
+            if item.get("provider_call_id")
+        }
+        for call in response.tool_calls:
+            if call.function.name != "file_reader":
+                continue
+            item = result_by_id.get(call.id)
+            if not item or not item.get("success"):
+                continue
+            arguments = {}
+            try:
+                decoded = json.loads(call.function.arguments or "{}")
+                arguments = decoded if isinstance(decoded, dict) else {}
+            except (TypeError, ValueError, RecursionError):
+                arguments = {}
+            summary = metadata_summary(item.get("result"))
+            summary = summary if isinstance(summary, dict) else {}
+            read_path = str(summary.get("file_path") or arguments.get("file_path") or "").strip()
+            if not read_path:
+                continue
+            canonical = self._canonical_path(read_path)
+            truncated = bool(summary.get("truncated", False))
+            content = summary.get("content") or summary.get("preview") or ""
+            if truncated:
+                self._bounded_projection_seen = True
+                self._evidence.record_completed_read(canonical, projection="bounded_preview")
+            else:
+                self._evidence.record_completed_read(canonical, projection="inline")
+            if len(str(content)) > 480:
+                self._bounded_projection_seen = True
+            self._last_round_progress = True
 
     def _event_runner(self) -> Any:
         from core.tool_event_loop import ToolEventLoopRunner

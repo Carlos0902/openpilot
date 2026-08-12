@@ -4312,3 +4312,31 @@ PYTHONPATH=Code/src pytest -q Code/tests
     no persisted schema or migration changes.
 - Remaining limitation: mutation task entry, finalization, duplicate/no-progress
   recovery, and full aggregate integration remain separate slices.
+
+### Read-only provider finalization integration
+
+- Observed failure: the read-only provider runner could execute a scoped read
+  and send its result back, but it had no state transition into a no-tool
+  final answer. A provider could therefore repeat completed reads or receive a
+  tool-capable request after evidence was already complete.
+- Validation evidence: 27 focused tests pass across the runner, task entry,
+  request builder, and typed finalization policy. The regression covers a
+  successful no-tool finalization and a tool call rejected during
+  finalization; source compilation and diff validation are run before push.
+- Implemented fix: integrate the existing typed read-finalization and final
+  response transitions into the read-only runner. Once every declared read
+  path is observed, the runner appends a bounded finalization instruction and
+  builds the next request with an empty tool surface. The runner records typed
+  evidence coverage and returns stable finalization error codes.
+- Metadata impact note:
+  - Facts: declared read scope, completed read evidence, bounded projection,
+    round progress, finalization request count, and provider response facts.
+  - Authoritative producers: evidence state owns read completion; the
+    finalization transition owns the next action; the final-response transition
+    owns response classification; the runner owns sequencing only.
+  - Lifecycle and control impact: read-only finalization routing. No mutation,
+    confirmation, transport, or persistence authority is added.
+  - Serialization and migration: runtime-only evidence and result projection;
+    no persisted schema or migration changes.
+- Remaining limitation: mutation execution, protocol repair, duplicate/no-
+  progress recovery, and complete aggregate parity remain separate slices.

@@ -186,7 +186,38 @@ def test_readonly_roundtrip_executes_one_read_and_continues(monkeypatch):
     assert len(executor.calls) == 1
     assert len(llm.requests) == 2
     assert llm.requests[0].tool_choice == "required"
-    assert llm.requests[1].messages[-1].tool_call_id == "provider-read-1"
+    assert llm.requests[1].tool_choice is None
+    assert llm.requests[1].tools == []
+    assert any(
+        message.tool_call_id == "provider-read-1"
+        for message in llm.requests[1].messages
+    )
+
+
+def test_readonly_roundtrip_rejects_tool_call_during_finalization(monkeypatch):
+    monkeypatch.setattr(
+        "memory.context_assembly.request_builder.ProviderTokenCounter.from_settings",
+        lambda _settings: _TokenCounter(),
+    )
+    llm = _LLM(
+        [
+            _tool_response(call_id="provider-finalize-read-1"),
+            _tool_response(call_id="provider-finalize-read-2"),
+        ]
+    )
+    runtime = _runtime(llm, _Executor())
+    result = ProviderReadonlyRoundTripRunner(
+        _Owner(runtime),
+        Task(id="task-finalization-tool-call", description="Read README"),
+        tools=build_provider_tool_definitions(runtime.tool_registry, ["file_reader"]),
+        read_scope=["README.md"],
+        max_rounds=3,
+    ).run([LLMMessage(role="user", content="Read README.md")])
+
+    assert result.success is False
+    assert result.error_message == "ProviderToolFinalizationToolCall"
+    assert len(llm.requests) == 2
+    assert llm.requests[1].tools == []
 
 
 def test_readonly_roundtrip_rejects_mutation_tools_at_entry():
