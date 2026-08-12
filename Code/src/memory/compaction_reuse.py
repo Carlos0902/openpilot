@@ -509,7 +509,15 @@ def build_checkpoint_compaction_reuse_shadow_provider(
                 continue
             if binding.source_binding_hash and compaction_id in compatibility_hashes:
                 if binding.source_binding_hash != compatibility_hashes[compaction_id]:
-                    admissions.append(_rejected_admission(binding, admission_id, required, recent, None))
+                    admissions.append(
+                        _rejected_admission(
+                            binding,
+                            admission_id,
+                            required,
+                            recent,
+                            binding.source_binding_hash,
+                        )
+                    )
                     continue
             try:
                 candidate = ReusableCompactionArtifactCandidate.from_binding(

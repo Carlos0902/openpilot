@@ -1,5 +1,28 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Compaction reuse contract regression coverage
+
+- Observed failure: checkpoint-backed reusable compaction admission could detect
+  a conflict between the persisted source binding hash and a compatibility hash,
+  but the rejection receipt replaced the known checkpoint hash with an all-zero
+  placeholder. That discarded useful lineage evidence even though prompt use
+  was correctly rejected.
+- Reproduction: run the checkpoint shadow provider with a binding that has a
+  valid source binding hash and a conflicting compatibility hash; assert a typed
+  `artifact_contract_invalid` rejection that preserves the binding hash. The
+  contract suite also covers body-free candidate construction, source-binding
+  drift, required/recent candidate guards, artifact checksum drift, preflight,
+  simulation, and checkpoint fallback behavior.
+- Implemented fix: preserve the checkpoint-owned source binding hash when the
+  compatibility hash conflicts; continue to emit a rejected, never-prompt-used
+  admission. Added the complete compaction reuse contract regression module.
+- Validation evidence: compaction reuse, builder shadow, preflight, shadow, and
+  simulation suite **61 passed**; `python -m compileall -q Code/src` and
+  `git diff --check` passed. This slice is 1,056 additions and 9 deletions,
+  below the 3,000-line PR threshold.
+- Remaining limitation: this PR does not authorize reusable artifact prompt
+  selection or perform provider/network I/O; those remain guarded future work.
+
 ## 2026-08-12 — Governed decomposition and preselected evidence handoff
 
 ## 2026-08-12 — Body-free compaction reuse shadow wiring
