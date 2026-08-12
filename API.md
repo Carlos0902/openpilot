@@ -885,6 +885,14 @@ no explicit target remains fail-closed, and an explicit writer is not
 duplicated. This handoff is orchestration repair only and does not add any
 path or mutation authority.
 
+Code generation completion reservations are reconciled before any generated
+artifact is admitted to a writer. A response ending with `length` or
+`max_tokens` is eligible for at most one source-linked retry with a larger
+bounded reservation when usage is known; the retry cannot exceed the purpose's
+recovery ceiling. Unknown usage, a second length outcome, or no larger
+reservation produces a typed decomposition-required failure and no code
+artifact. Truncated source is never passed to `file_writer`.
+
 The production ingress contract is separate from the runtime ledger:
 `ConversationIdentity` binds a stable conversation to a per-run checkpoint and
 project root; `SessionTurn` carries one source turn; and `SessionIngressState`

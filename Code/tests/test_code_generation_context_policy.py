@@ -15,6 +15,7 @@ from metadata import (
     ContextRequestPurpose,
     EnhancementCompletionRequirement,
     ReasoningMode,
+    RuntimeBudgetMetadata,
 )
 from tools.code_generation_context import build_code_generation_candidates
 from tools.code_generator import CodeGenerator
@@ -260,6 +261,87 @@ def test_code_generation_length_finish_reason_fails_typed_without_returning_trun
 
     assert exc.value.finish_reason == "length"
     assert "def incomplete(" not in getattr(exc.value, "generated_code", "")
+
+
+def test_code_generation_retries_one_observed_length_with_larger_budget() -> None:
+    class LengthThenStopLLM(_CapturingLLM):
+        def complete(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return SimpleNamespace(
+                    content="```python\ndef incomplete(",
+                    usage={"completion_tokens": request.max_tokens},
+                    finish_reason="length",
+                )
+            return SimpleNamespace(
+                content="```python\nprint('ok')\n```",
+                usage={"completion_tokens": 12},
+                finish_reason="stop",
+            )
+
+    client = LengthThenStopLLM()
+    budget = RuntimeBudgetMetadata()
+    generator = CodeGenerator(
+        client,
+        runtime_budget=budget,
+        enhancement_requirement=EnhancementCompletionRequirement.REQUIRED,
+    )
+
+    generated = generator.generate_code(_contextual_request())
+
+    assert generated.code == "print('ok')"
+    assert len(client.requests) == 2
+    assert client.requests[1].max_tokens > client.requests[0].max_tokens
+    assert len(budget.enhancement_completion_reservations) == 2
+    assert len(budget.enhancement_completion_reconciliations) == 2
+
+
+def test_code_generation_second_length_fails_without_third_attempt() -> None:
+    class AlwaysLengthLLM(_CapturingLLM):
+        def complete(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(
+                content="```python\ndef incomplete(",
+                usage={"completion_tokens": request.max_tokens},
+                finish_reason="length",
+            )
+
+    client = AlwaysLengthLLM()
+    generator = CodeGenerator(
+        client,
+        runtime_budget=RuntimeBudgetMetadata(),
+        enhancement_requirement=EnhancementCompletionRequirement.REQUIRED,
+    )
+
+    with pytest.raises(InvalidLLMResponseError) as exc:
+        generator.generate_code(_contextual_request())
+
+    assert len(client.requests) == 2
+    assert exc.value.context["recovery_disposition"] == "decompose_required"
+
+
+def test_code_generation_length_without_usage_does_not_retry() -> None:
+    class UnknownUsageLengthLLM(_CapturingLLM):
+        def complete(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(
+                content="```python\ndef incomplete(",
+                usage=None,
+                finish_reason="length",
+            )
+
+    client = UnknownUsageLengthLLM()
+    generator = CodeGenerator(
+        client,
+        runtime_budget=RuntimeBudgetMetadata(),
+        enhancement_requirement=EnhancementCompletionRequirement.REQUIRED,
+    )
+
+    with pytest.raises(InvalidLLMResponseError) as exc:
+        generator.generate_code(_contextual_request())
+
+    assert len(client.requests) == 1
+    assert exc.value.context["recovery_disposition"] == "decompose_required"
 
 
 def test_core_code_generation_does_not_consume_enhancement_budget_but_improvement_does() -> None:

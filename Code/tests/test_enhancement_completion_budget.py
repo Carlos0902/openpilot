@@ -371,6 +371,29 @@ def test_length_finish_allows_exactly_one_bounded_recovery_for_that_reservation(
     ) is None
 
 
+def test_unknown_usage_length_does_not_authorize_recovery() -> None:
+    budget = _budget()
+    coordinator = EnhancementCompletionBudgetCoordinator(budget)
+    initial = coordinator.reserve(
+        _request(ContextRequestPurpose.CODE_GENERATION)
+    )
+    assert initial is not None
+
+    reconciliation = coordinator.reconcile(
+        initial,
+        actual_tokens=None,
+        finish_reason="length",
+    )
+
+    assert reconciliation.usage_known is False
+    assert coordinator.reserve(
+        _request(
+            ContextRequestPurpose.CODE_GENERATION,
+            recovery_of=initial.reservation_id,
+        )
+    ) is None
+
+
 def test_non_length_failure_does_not_authorize_recovery_expansion() -> None:
     budget = _budget()
     coordinator = EnhancementCompletionBudgetCoordinator(budget)

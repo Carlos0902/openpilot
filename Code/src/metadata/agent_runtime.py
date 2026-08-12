@@ -780,16 +780,34 @@ class EnhancementCompletionRequirement(str, Enum):
     REQUIRED = "required"
 
 
+class CompletionRecoveryDisposition(str, Enum):
+    """Typed next action derived from one reconciled completion outcome."""
+
+    NOT_REQUIRED = "not_required"
+    RETRY_WITH_LARGER_BUDGET = "retry_with_larger_budget"
+    DECOMPOSE_REQUIRED = "decompose_required"
+
+
 class EnhancementCompletionPurposeLimit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     floor: int = Field(ge=1)
     ceiling: int = Field(ge=1)
+    recovery_ceiling: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_recovery_ceiling(cls, value: object) -> object:
+        if not isinstance(value, dict) or value.get("recovery_ceiling") is not None:
+            return value
+        return {**value, "recovery_ceiling": value.get("ceiling")}
 
     @model_validator(mode="after")
     def _floor_fits_ceiling(self) -> "EnhancementCompletionPurposeLimit":
         if self.floor > self.ceiling:
             raise ValueError("completion floor must not exceed ceiling")
+        if self.recovery_ceiling is None or self.recovery_ceiling < self.ceiling:
+            raise ValueError("completion recovery ceiling must not be below the initial ceiling")
         return self
 
 
@@ -798,7 +816,11 @@ def _default_enhancement_purpose_limits() -> dict[ContextRequestPurpose, Enhance
         ContextRequestPurpose.PROJECT_IMPROVEMENT: EnhancementCompletionPurposeLimit(floor=500, ceiling=1500),
         ContextRequestPurpose.ITERATION_GOAL: EnhancementCompletionPurposeLimit(floor=400, ceiling=1200),
         ContextRequestPurpose.ITERATION_TASK_DESIGN: EnhancementCompletionPurposeLimit(floor=700, ceiling=2200),
-        ContextRequestPurpose.CODE_GENERATION: EnhancementCompletionPurposeLimit(floor=1000, ceiling=3500),
+        ContextRequestPurpose.CODE_GENERATION: EnhancementCompletionPurposeLimit(
+            floor=8_000,
+            ceiling=16_000,
+            recovery_ceiling=32_000,
+        ),
         ContextRequestPurpose.CODE_EDIT: EnhancementCompletionPurposeLimit(floor=400, ceiling=1600),
     }
 
@@ -806,8 +828,8 @@ def _default_enhancement_purpose_limits() -> dict[ContextRequestPurpose, Enhance
 class EnhancementCompletionBudgetPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    total_tokens: int = Field(default=12000, ge=1)
-    recovery_step: int = Field(default=300, ge=0)
+    total_tokens: int = Field(default=64_000, ge=1)
+    recovery_step: int = Field(default=16_000, ge=0)
     purpose_limits: dict[ContextRequestPurpose, EnhancementCompletionPurposeLimit] = Field(
         default_factory=_default_enhancement_purpose_limits
     )
@@ -850,7 +872,10 @@ class EnhancementCompletionBudgetPolicy(BaseModel):
         }
         if set(self.purpose_limits) != expected:
             raise ValueError("enhancement completion policy requires the exact five purposes")
-        if any(limit.ceiling > self.total_tokens for limit in self.purpose_limits.values()):
+        if any(
+            int(limit.recovery_ceiling or limit.ceiling) > self.total_tokens
+            for limit in self.purpose_limits.values()
+        ):
             raise ValueError("purpose ceiling must fit shared total")
         return self
 
@@ -893,6 +918,9 @@ class EnhancementCompletionReconciliation(BaseModel):
     refunded_tokens: int = Field(ge=0)
     usage_known: bool
     finish_reason: str | None = None
+    recovery_disposition: CompletionRecoveryDisposition = (
+        CompletionRecoveryDisposition.NOT_REQUIRED
+    )
 
 
 class RuntimeBudgetMetadata(MetadataBase):

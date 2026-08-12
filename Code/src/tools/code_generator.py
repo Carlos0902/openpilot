@@ -508,12 +508,10 @@ TOOL OUTPUT REQUIREMENTS:
             sort_keys=True,
             default=str,
         )
+        logical_key = "code_generation:" + hashlib.sha256(generation_identity.encode("utf-8")).hexdigest()
         reservation = self.enhancement_budget.reserve(
             EnhancementCompletionRequest(
-                logical_key=(
-                    "code_generation:"
-                    + hashlib.sha256(generation_identity.encode("utf-8")).hexdigest()
-                ),
+                logical_key=logical_key,
                 purpose=ContextRequestPurpose.CODE_GENERATION,
                 complexity=(
                     EnhancementCompletionComplexity.ROUTINE
@@ -550,31 +548,50 @@ TOOL OUTPUT REQUIREMENTS:
             }
         )
         if hasattr(self.llm_client, 'complete'):
-            try:
-                response = self.llm_client.complete(request)
-            except Exception as exc:
-                self.enhancement_budget.reconcile_failure(reservation, exc)
-                raise
-            usage = getattr(response, "usage", None)
-            actual_tokens = None
-            if isinstance(usage, dict):
-                actual_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
-            self.enhancement_budget.reconcile(
+            response, actual_tokens, _reconciliation = self._complete_generation_attempt(
+                request,
                 reservation,
-                actual_tokens=int(actual_tokens) if actual_tokens is not None else None,
-                finish_reason=getattr(response, "finish_reason", None),
-                response_empty=not bool(str(getattr(response, "content", "") or "")),
             )
-            if str(getattr(response, "finish_reason", "") or "").lower() in {
-                "length",
-                "max_tokens",
-            }:
-                raise InvalidLLMResponseError(
-                    "Code generation reached its completion limit; truncated source is not safe to apply.",
-                    response_text=str(getattr(response, "content", "") or ""),
-                    usage=usage if isinstance(usage, dict) else None,
-                    finish_reason=getattr(response, "finish_reason", None),
+            if self._is_length_response(response):
+                if actual_tokens is None:
+                    raise self._length_error(response, recovery_disposition="decompose_required")
+                recovery = self.enhancement_budget.reserve(
+                    EnhancementCompletionRequest(
+                        logical_key=f"{logical_key}:length_recovery",
+                        purpose=ContextRequestPurpose.CODE_GENERATION,
+                        complexity=EnhancementCompletionComplexity.COMPLEX,
+                        prompt_tokens=int(getattr(request.context_selection, "final_prompt_tokens", 0) or 0),
+                        remaining_calls=1,
+                        remaining_value=EnhancementCompletionDecisionValue.HIGH,
+                        requirement=(self.enhancement_requirement or EnhancementCompletionRequirement.REQUIRED),
+                        recovery_of=reservation.reservation_id,
+                    )
                 )
+                if recovery is None or recovery.max_tokens <= reservation.max_tokens:
+                    raise self._length_error(response, recovery_disposition="decompose_required")
+                recovery_request = request.model_copy(
+                    update={
+                        "max_tokens": recovery.max_tokens,
+                        "trace_info": {
+                            **request.trace_info,
+                            "completion_budget": {
+                                **request.trace_info.get("completion_budget", {}),
+                                "reservation_id": recovery.reservation_id,
+                                "reserved_tokens": recovery.max_tokens,
+                                "recovery_of": reservation.reservation_id,
+                            },
+                        },
+                    }
+                )
+                response, _actual_tokens, recovery_reconciliation = self._complete_generation_attempt(
+                    recovery_request,
+                    recovery,
+                )
+                if self._is_length_response(response):
+                    raise self._length_error(
+                        response,
+                        recovery_disposition=recovery_reconciliation.recovery_disposition.value,
+                    )
             return response.content
         elif hasattr(self.llm_client, 'generate'):
             response = self.llm_client.generate("\n\n".join(message.content for message in request.messages))
@@ -591,6 +608,43 @@ TOOL OUTPUT REQUIREMENTS:
             response = str(response)
 
         return response
+
+    def _complete_generation_attempt(
+        self,
+        request: Any,
+        reservation: Any,
+    ) -> tuple[Any, int | None, Any]:
+        try:
+            response = self.llm_client.complete(request)
+        except Exception as exc:
+            self.enhancement_budget.reconcile_failure(reservation, exc)
+            raise
+        usage = getattr(response, "usage", None)
+        actual_tokens = None
+        if isinstance(usage, dict):
+            actual_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        reconciliation = self.enhancement_budget.reconcile(
+            reservation,
+            actual_tokens=int(actual_tokens) if actual_tokens is not None else None,
+            finish_reason=getattr(response, "finish_reason", None),
+            response_empty=not bool(str(getattr(response, "content", "") or "")),
+        )
+        return response, (int(actual_tokens) if actual_tokens is not None else None), reconciliation
+
+    @staticmethod
+    def _is_length_response(response: Any) -> bool:
+        return str(getattr(response, "finish_reason", "") or "").lower() in {"length", "max_tokens"}
+
+    @staticmethod
+    def _length_error(response: Any, *, recovery_disposition: str) -> InvalidLLMResponseError:
+        error = InvalidLLMResponseError(
+            "Code generation reached its completion limit; truncated source is not safe to apply.",
+            response_text=str(getattr(response, "content", "") or ""),
+            usage=getattr(response, "usage", None) if isinstance(getattr(response, "usage", None), dict) else None,
+            finish_reason=getattr(response, "finish_reason", None),
+        )
+        error.context["recovery_disposition"] = recovery_disposition
+        return error
 
     def _simulate_llm_response(self, prompt: str) -> str:
         """模拟 LLM 响应（用于测试）"""

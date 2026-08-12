@@ -4654,3 +4654,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: bounded recovery for code-generator completion limits,
   including retry/compaction and complete-artifact admission, remains a
   separate slice.
+
+### Bounded code-generation recovery
+
+- Observed failure: real Snake generation occasionally ended with a provider
+  completion/length limit. The truncated source could not safely be written,
+  but the old path had no source-linked recovery attempt.
+- Validation evidence: the focused code-generation and enhancement-budget
+  suites pass **30 tests**; source compilation and `git diff --check` pass.
+- Implemented fix: reconcile the first completion before artifact parsing, then
+  allow exactly one recovery request with a larger bounded reservation when
+  usage is known. A repeated length result, unknown usage, or exhausted
+  recovery ceiling fails closed with a typed disposition; no truncated code is
+  returned to the writer.
+- Metadata impact note: recovery reservations and dispositions extend the
+  existing typed runtime budget ledger. They do not grant file, command,
+  network, persistence, or replay authority, and the existing writer admission
+  remains the only artifact mutation path.
+- Remaining limitation: provider-window-aware prompt headroom and configurable
+  post-plan reasoning controls remain separate follow-up slices.
