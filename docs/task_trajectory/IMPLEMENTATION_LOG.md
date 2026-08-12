@@ -4751,6 +4751,27 @@ PYTHONPATH=Code/src pytest -q Code/tests
   validate receipts/checkpoints, call external tools, or commit an assistant
   response after evidence is collected; those belong to the dependent slice.
 
+### Read-only evidence task materialization
+
+- Observed failure: an evidence-required response had no bounded task entry that
+  preserved the source class of each open obligation. Project claims and current
+  external claims could therefore be routed through an ambiguous follow-up
+  path.
+- Reproduction: create project and current-external response candidates, verify
+  that they produce respectively `project_structure` and `web_search` decision
+  needs, tamper with the claim manifest, and attempt materialization with
+  response-only authority.
+- Implemented fix: add `EvidenceEscalationController` for claim-manifest
+  verification and source-compatible decision needs, then materialize a single
+  `inspect` task with read-only runtime state, disabled project improvement, and
+  a generation-one checkpoint via the existing materializer.
+- Validation evidence: focused evidence-admission, bounded-response,
+  materializer, and metadata suite **40 passed**; `compileall` and
+  `git diff --check` pass.
+- Remaining limitation: this slice does not execute readers/search, validate
+  evidence receipts or freshness, or commit the assistant response. Those
+  behaviors are isolated in the next dependent slice.
+
 ### Canonical task materialization and active-checkpoint recovery
 
 - Observed failure: an evidence/task re-entry path could not prove that the

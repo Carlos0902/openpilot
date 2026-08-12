@@ -884,6 +884,15 @@ mentions a project remains response-only. The materializer rejects
 `read_only_eligible` snapshots. This slice records the contract and admission
 boundary only; it does not execute evidence tools or close an obligation.
 
+`EvidenceEscalationController` is the next read-only admission boundary. It
+verifies the persisted claim manifest against the response candidate, maps
+project claims to a bounded `project_structure` need and current/external claims
+to a bounded `web_search` need, then materializes one `inspect` task with a
+generation-one read-only checkpoint through `IterationTaskMaterializer`. The
+result has no project-improvement attempts and no mutation authority. Receipt
+validation, external freshness, checkpoint-result binding, and assistant
+completion remain a dependent boundary.
+
 When a response candidate requires a read-only project task, task materialization
 is a separate durable boundary. `CanonicalInitialTaskSnapshot` is the complete
 typed input: task graph/order, response authority, root budget, session
