@@ -651,11 +651,16 @@ class ProjectEvaluatorAgent:
             return terminal_result
 
         if self._looks_interactive_python_project(files or [], args):
-            import_result = self._import_only_smoke_test(project_path, args, files or [])
-            if not import_result["passed"]:
-                return import_result
-            if import_result["warning"]:
-                return import_result
+            entry = self._entry_module_from_args(project_path, args, files or [])
+            if entry is not None and self._has_unprotected_interactive_startup(entry):
+                return {
+                    "passed": False,
+                    "warning": False,
+                    "message": "Interactive application has an unprotected top-level event loop or window startup.",
+                }
+            compile_result = self._compile_only_smoke_test(project_path, args, files or [])
+            if not compile_result["passed"]:
+                return compile_result
             return {
                 "passed": True,
                 "warning": True,
@@ -1934,6 +1939,55 @@ class ProjectEvaluatorAgent:
             return {"passed": True, "warning": True, "message": message, "warning_check_result": warning_check}
         return {"passed": True, "warning": False, "message": "Import-only smoke test passed."}
 
+    def _compile_only_smoke_test(self, project_path: Path, args: list[str], files: list[Path]) -> dict[str, Any]:
+        entry = self._entry_module_from_args(project_path, args, files)
+        if entry is None:
+            return {
+                "passed": False,
+                "warning": False,
+                "message": "Interactive project entry could not be identified for bounded compilation.",
+            }
+        command = [args[0], "-m", "py_compile", str(entry.resolve())]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=project_path,
+                capture_output=True,
+                text=True,
+                timeout=max(1, self.smoke_timeout_seconds),
+                env=self._smoke_env(project_path),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {
+                "passed": False,
+                "warning": False,
+                "message": f"Interactive compile-only smoke test failed: {exc}",
+            }
+        combined = f"{result.stdout or ''}\n{result.stderr or ''}"
+        warning_check = self._assess_runtime_warnings(
+            command=" ".join(command),
+            cwd=project_path,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+        )
+        if warning_check and warning_check.requires_fix:
+            return self._warning_fix_failure(warning_check)
+        if result.returncode != 0:
+            return {
+                "passed": False,
+                "warning": False,
+                "message": self._short_error("Interactive compile-only smoke test failed", combined),
+            }
+        if warning_check and (warning_check.warnings or warning_check.ignored_warnings):
+            message = warning_check.reason or "Interactive compile-only smoke test emitted runtime warnings."
+            return {
+                "passed": True,
+                "warning": True,
+                "message": message,
+                "warning_check_result": warning_check,
+            }
+        return {"passed": True, "warning": False, "message": "Interactive compile-only smoke test passed."}
+
     def _assess_runtime_warnings(
         self,
         *,
@@ -2147,7 +2201,7 @@ class ProjectEvaluatorAgent:
     def _is_interactive_startup_call(self, node: ast.Call) -> bool:
         name = self._call_name(node.func)
         return (
-            name in {"main", "run", "pygame.init", "pygame.display.set_mode"}
+            name in {"main", "run", "pygame.display.set_mode"}
             or name.endswith(".mainloop")
             or name.endswith(".run")
             or name.endswith(".set_mode")

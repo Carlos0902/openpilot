@@ -53,16 +53,21 @@ def test_interactive_guarded_slow_import_is_warning_not_failure(tmp_path, monkey
         """
 import pygame
 
+pygame.init()
+
 def main():
-    pygame.init()
+    pygame.display.set_mode((640, 480))
 
 if __name__ == "__main__":
     main()
 """,
     )
 
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=kwargs.get("args") or args[0], timeout=kwargs.get("timeout"), output="", stderr="")
+    commands = []
+
+    def fake_run(args, **kwargs):
+        commands.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -75,7 +80,9 @@ if __name__ == "__main__":
     )
 
     assert result.validation_passed is True
-    assert any("interactive import was slow" in warning for warning in result.warnings)
+    assert any("requires a real terminal/window" in warning for warning in result.warnings)
+    assert commands
+    assert commands[0][1:3] == ["-m", "py_compile"]
 
 
 def test_interactive_unprotected_startup_timeout_is_failure(tmp_path, monkeypatch) -> None:
@@ -125,16 +132,15 @@ if __name__ == "__main__":
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = ProjectEvaluatorAgent(smoke_timeout_seconds=1).evaluate_project(
-        goal="build snake game",
-        project_path=tmp_path,
-        written_files=[app],
-        readme_path=readme,
-        static_review={"approved": True, "issues": [], "syntax_errors": []},
+    evaluator = ProjectEvaluatorAgent(smoke_timeout_seconds=1)
+    result = evaluator._import_only_smoke_test(
+        tmp_path,
+        ["python", "main.py"],
+        [tmp_path / "main.py"],
     )
 
-    assert result.validation_passed is False
-    assert any("ImportError: boom" in error for error in result.validation_errors)
+    assert result["passed"] is False
+    assert "ImportError: boom" in result["message"]
 
 
 def test_placeholder_validation_issue_targets_only_failing_file(tmp_path) -> None:
