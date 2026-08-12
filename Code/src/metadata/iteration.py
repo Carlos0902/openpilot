@@ -190,6 +190,12 @@ class IterationPendingProviderRequest(_StrictValue):
     request_ref: DurableArtifactReference
     purpose: Literal["response", "grounding_repair", "decomposition"]
 
+    @model_validator(mode="after")
+    def _request_reference_has_expected_kind(self) -> "IterationPendingProviderRequest":
+        if self.request_ref.kind != "provider_request":
+            raise ValueError("pending provider request reference has the wrong kind")
+        return self
+
 
 class ResponseClaim(_StrictValue):
     claim_id: str = Field(min_length=1, max_length=160)
@@ -378,11 +384,27 @@ class IterationControlCursor(_StrictValue):
     completion_candidate_hash: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     decision_progress_signature: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     pending_provider_request: IterationPendingProviderRequest | None = None
+    observed_provider_response_ref: DurableArtifactReference | None = None
 
     @model_validator(mode="after")
     def _ids_are_unique(self) -> "IterationControlCursor":
         if len(self.open_obligation_ids) != len(set(self.open_obligation_ids)):
             raise ValueError("open obligation IDs must be unique")
+        if (
+            self.pending_provider_request is not None
+            and self.observed_provider_response_ref is not None
+        ):
+            raise ValueError("pending request and observed response are mutually exclusive")
+        if (
+            self.observed_provider_response_ref is not None
+            and self.observed_provider_response_ref.kind != "provider_response"
+        ):
+            raise ValueError("observed provider response reference has the wrong kind")
+        if (
+            self.observed_provider_response_ref is not None
+            and self.decision_progress_signature is None
+        ):
+            raise ValueError("observed provider response requires a progress signature")
         return self
 
 

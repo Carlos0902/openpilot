@@ -25,6 +25,7 @@ from metadata import (
     IterationControlCursor,
     IterationDisposition,
     IterationOutcome,
+    IterationPendingProviderRequest,
     IterationPhase,
     IterationStopReason,
     IterationTurnRecordMetadata,
@@ -108,6 +109,50 @@ def test_iteration_turn_record_defaults_to_pretask_response_only_authority() -> 
     assert record.task_binding.state == "none"
     assert record.outcome is None
     assert record.core_success is None
+
+
+def test_iteration_cursor_observed_provider_reference_round_trips_and_migrates() -> None:
+    cursor = IterationControlCursor(
+        phase=IterationPhase.GROUND_RESPONSE,
+        current_disposition=IterationDisposition.COMPLETE_RESPONSE,
+        authority_state=_authority(),
+        decision_progress_signature="sha256:" + "c" * 64,
+        observed_provider_response_ref=_artifact("provider_response"),
+    )
+    record = _record(cursor=cursor)
+
+    restored = IterationTurnRecordMetadata.model_validate(record.to_json_dict())
+
+    assert restored.cursor.observed_provider_response_ref == _artifact("provider_response")
+    historical = record.to_json_dict()
+    historical["cursor"].pop("observed_provider_response_ref")
+    migrated = IterationTurnRecordMetadata.model_validate(historical)
+    assert migrated.cursor.observed_provider_response_ref is None
+
+
+def test_iteration_cursor_observed_provider_reference_requires_kind_and_signature() -> None:
+    with pytest.raises(ValidationError, match="wrong kind"):
+        IterationControlCursor(
+            authority_state=_authority(),
+            decision_progress_signature="sha256:" + "c" * 64,
+            observed_provider_response_ref=_artifact("response_payload"),
+        )
+    with pytest.raises(ValidationError, match="progress signature"):
+        IterationControlCursor(
+            authority_state=_authority(),
+            observed_provider_response_ref=_artifact("provider_response"),
+        )
+
+
+def test_pending_provider_request_requires_request_artifact_kind() -> None:
+    with pytest.raises(ValidationError, match="wrong kind"):
+        IterationPendingProviderRequest(
+            request_id="request-1",
+            request_ordinal=1,
+            request_hash="sha256:" + "d" * 64,
+            request_ref=_artifact("provider_response"),
+            purpose="response",
+        )
 
 
 def test_mutation_eligibility_requires_current_confirmation_lineage() -> None:

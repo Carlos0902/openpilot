@@ -28,6 +28,7 @@ from metadata import (
     CompletionObligationKind,
     CompletionObligationStatus,
     ControlledStopOutcome,
+    DurableArtifactReference,
     GroundingDecision,
     GroundingStatus,
     IterationAuthorityState,
@@ -100,8 +101,17 @@ class BoundedModelResponseResult:
     evidence_obligation_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ObservedProviderResponse:
+    response: LLMResponse
+    request_ordinal: int
+    tool_call_count: int
+
+
 class BoundedModelResponseController:
     """Execute at most one initial and one repair request with no tools."""
+
+    _MAX_DURABLE_PROVIDER_RESPONSE_CHARS = 256_000
 
     def __init__(
         self,
@@ -137,151 +147,84 @@ class BoundedModelResponseController:
         )
         if user_turn is None or user_turn.identity != ingress.identity or user_turn.content != goal:
             raise IterationTurnConflictError("bounded response requires the current user turn")
-        if self.store.load_latest(ingress.identity.conversation_id, ingress.identity.run_id) is not None:
-            raise IterationTurnConflictError("bounded response run already has durable state")
-
-        user_ref = self.store.save_artifact(
+        existing = self.store.load_latest(
             ingress.identity.conversation_id,
             ingress.identity.run_id,
-            kind="user_input",
-            payload={
-                "message_id": user_turn.message_id,
-                "turn_index": user_turn.identity.turn_index,
-                "content": user_turn.content,
-            },
         )
-        authority = self._initial_authority(goal, ingress)
-        initial = IterationTurnRecordMetadata(
-            record_id=self._stable_id("turn", ingress, user_turn.message_id),
-            identity=ingress.identity,
-            pre_task_state=PreTaskState(
+        observed: _ObservedProviderResponse | None = None
+        if existing is None:
+            user_ref = self.store.save_artifact(
+                ingress.identity.conversation_id,
+                ingress.identity.run_id,
+                kind="user_input",
+                payload={
+                    "message_id": user_turn.message_id,
+                    "turn_index": user_turn.identity.turn_index,
+                    "content": user_turn.content,
+                },
+            )
+            authority = self._initial_authority(goal, ingress)
+            initial = IterationTurnRecordMetadata(
+                record_id=self._stable_id("turn", ingress, user_turn.message_id),
+                identity=ingress.identity,
+                pre_task_state=PreTaskState(
+                    user_message_id=user_turn.message_id,
+                    user_input_ref=user_ref,
+                    session_authority_revision=ingress.session_constraints.revision,
+                    session_authority_hash=ingress.session_constraints.authority_hash,
+                    runtime_fact_hash=self._hash(facts.model_dump(mode="json")),
+                ),
+                cursor=IterationControlCursor(
+                    authority_state=authority
+                ),
+                root_budget=RootDecisionBudget(max_root_provider_calls=2),
+            )
+            current = self.store.save(initial, expected_generation=0)
+        else:
+            current = self._admit_recovery(
+                existing,
+                ingress=ingress,
+                facts=facts,
                 user_message_id=user_turn.message_id,
-                user_input_ref=user_ref,
-                session_authority_revision=ingress.session_constraints.revision,
-                session_authority_hash=ingress.session_constraints.authority_hash,
-                runtime_fact_hash=self._hash(facts.model_dump(mode="json")),
-            ),
-            cursor=IterationControlCursor(
-                authority_state=authority
-            ),
-            root_budget=RootDecisionBudget(max_root_provider_calls=2),
-        )
-        current = self.store.save(initial, expected_generation=0)
+            )
+            recovered = self._recover_after_provider(
+                current,
+                ingress=ingress,
+                user_message_id=user_turn.message_id,
+            )
+            if recovered is not None:
+                return recovered
+            if current.cursor.pending_provider_request is not None:
+                self._raise_failure(
+                    current,
+                    BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                    "pending provider request has an indeterminate outcome and cannot be safely replayed",
+                )
+            observed = self._load_observed_provider_response(current)
         last_failure = BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID
         repair_preview = ""
         parsed: _ModelResponse | None = None
-        for ordinal in (1, 2):
-            purpose = "response" if ordinal == 1 else "grounding_repair"
-            remaining_tokens = (
-                current.root_budget.max_response_completion_tokens
-                - current.root_budget.response_completion_tokens_used
-            )
-            if remaining_tokens <= 0:
-                self._raise_failure(
+        start_ordinal = observed.request_ordinal if observed is not None else 1
+        for ordinal in range(start_ordinal, 3):
+            resumed_observation = observed is not None and observed.request_ordinal == ordinal
+            observed_tool_call_count = 0
+            if resumed_observation:
+                response = observed.response
+                observed_tool_call_count = observed.tool_call_count
+                observed = None
+            else:
+                current, response = self._execute_provider_step(
                     current,
-                    BoundedResponseFailureCode.RESPONSE_BUDGET_EXHAUSTED,
-                    "bounded response token budget was exhausted before repair",
+                    ordinal=ordinal,
+                    projection=projection,
+                    facts=facts,
+                    repair_preview=repair_preview,
+                    ingress=ingress,
+                    user_message_id=user_turn.message_id,
                 )
-            request = self._request(
-                projection,
-                facts=facts,
-                repair_preview=repair_preview if ordinal == 2 else "",
-                max_tokens=min(
-                    2000,
-                    remaining_tokens,
-                ),
-            )
-            request_payload = {
-                "messages": [message.model_dump(mode="json") for message in request.messages],
-                "response_format": request.response_format,
-                "max_tokens": request.max_tokens,
-                "tools": [],
-            }
-            request_hash = self._hash(request_payload)
-            request_ref = self.store.save_artifact(
-                ingress.identity.conversation_id,
-                ingress.identity.run_id,
-                kind="provider_request",
-                payload=request_payload,
-            )
-            requested_budget = current.root_budget.model_copy(
-                update={
-                    "decision_rounds_used": current.root_budget.decision_rounds_used + 1,
-                    "root_provider_calls_used": current.root_budget.root_provider_calls_used + 1,
-                    "grounding_repairs_used": (
-                        current.root_budget.grounding_repairs_used + (1 if ordinal == 2 else 0)
-                    ),
-                }
-            )
-            requested = IterationTurnReducer.request_provider(
-                current,
-                request=IterationPendingProviderRequest(
-                    request_id=self._stable_id(f"request-{ordinal}", ingress, user_turn.message_id),
-                    request_ordinal=ordinal,
-                    request_hash=request_hash,
-                    request_ref=request_ref,
-                    purpose=purpose,
-                ),
-                root_budget=requested_budget,
-            )
-            requested = self.store.save(requested, expected_generation=current.generation)
-            try:
-                response = self.client.complete(request, max_retries=1, use_cache=False)
-            except Exception:
-                self._raise_failure(
-                    requested,
-                    BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
-                    "provider request failed inside the bounded response step",
-                )
-            if not isinstance(response, LLMResponse):
-                self._raise_failure(
-                    requested,
-                    BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
-                    "provider returned an invalid bounded response envelope",
-                )
-            usage = self._completion_tokens(response, fallback=request.max_tokens or 0)
-            observed_budget = requested.root_budget.model_copy(
-                update={
-                    "response_completion_tokens_used": (
-                        requested.root_budget.response_completion_tokens_used + usage
-                    )
-                }
-            )
-            if (
-                observed_budget.response_completion_tokens_used
-                > observed_budget.max_response_completion_tokens
-            ):
-                self._raise_failure(
-                    requested,
-                    BoundedResponseFailureCode.RESPONSE_BUDGET_EXHAUSTED,
-                    "bounded response token usage exceeded the root budget",
-                )
-            raw_ref = self.store.save_artifact(
-                ingress.identity.conversation_id,
-                ingress.identity.run_id,
-                kind="provider_response",
-                payload={
-                    "content": response.content[:64_000],
-                    "finish_reason": response.finish_reason,
-                    "completion_tokens": usage,
-                    "tool_call_count": len(response.tool_calls),
-                },
-            )
-            progress_signature = self._hash(
-                {
-                    "request_hash": request_hash,
-                    "response_ref": raw_ref.model_dump(mode="json"),
-                }
-            )
-            current = IterationTurnReducer.finish_provider_request(
-                requested,
-                root_budget=observed_budget,
-                progress_signature=progress_signature,
-            )
-            current = self.store.save(current, expected_generation=requested.generation)
             try:
                 attempt_failure = BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID
-                if response.tool_calls:
+                if response.tool_calls or observed_tool_call_count:
                     attempt_failure = BoundedResponseFailureCode.PROVIDER_TOOL_CALL_REJECTED
                     raise ValueError("provider returned a tool call on a zero-tool request")
                 parsed = self._parse_response(response)
@@ -304,6 +247,446 @@ class BoundedModelResponseController:
             ingress=ingress,
             facts=facts,
             user_message_id=user_turn.message_id,
+        )
+
+    def _execute_provider_step(
+        self,
+        current: IterationTurnRecordMetadata,
+        *,
+        ordinal: int,
+        projection: BoundedSessionProjection,
+        facts: RuntimeFactProjection,
+        repair_preview: str,
+        ingress: SessionIngressState,
+        user_message_id: str,
+    ) -> tuple[IterationTurnRecordMetadata, LLMResponse]:
+        purpose = "response" if ordinal == 1 else "grounding_repair"
+        remaining_tokens = (
+            current.root_budget.max_response_completion_tokens
+            - current.root_budget.response_completion_tokens_used
+        )
+        if remaining_tokens <= 0:
+            self._raise_failure(
+                current,
+                BoundedResponseFailureCode.RESPONSE_BUDGET_EXHAUSTED,
+                "bounded response token budget was exhausted before repair",
+            )
+        request = self._request(
+            projection,
+            facts=facts,
+            repair_preview=repair_preview if ordinal == 2 else "",
+            max_tokens=min(2000, remaining_tokens),
+        )
+        request_payload = {
+            "messages": [message.model_dump(mode="json") for message in request.messages],
+            "response_format": request.response_format,
+            "max_tokens": request.max_tokens,
+            "tools": [],
+        }
+        request_hash = self._hash(request_payload)
+        request_ref = self.store.save_artifact(
+            ingress.identity.conversation_id,
+            ingress.identity.run_id,
+            kind="provider_request",
+            payload=request_payload,
+        )
+        requested_budget = current.root_budget.model_copy(
+            update={
+                "decision_rounds_used": current.root_budget.decision_rounds_used + 1,
+                "root_provider_calls_used": current.root_budget.root_provider_calls_used + 1,
+                "grounding_repairs_used": (
+                    current.root_budget.grounding_repairs_used + (1 if ordinal == 2 else 0)
+                ),
+            }
+        )
+        request_id = self._stable_id(f"request-{ordinal}", ingress, user_message_id)
+        requested = IterationTurnReducer.request_provider(
+            current,
+            request=IterationPendingProviderRequest(
+                request_id=request_id,
+                request_ordinal=ordinal,
+                request_hash=request_hash,
+                request_ref=request_ref,
+                purpose=purpose,
+            ),
+            root_budget=requested_budget,
+        )
+        requested = self.store.save(requested, expected_generation=current.generation)
+        try:
+            response = self.client.complete(request, max_retries=1, use_cache=False)
+        except Exception:
+            self._raise_failure(
+                requested,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "provider request failed inside the bounded response step",
+            )
+        if not isinstance(response, LLMResponse):
+            self._raise_failure(
+                requested,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "provider returned an invalid bounded response envelope",
+            )
+        usage = self._completion_tokens(response, fallback=request.max_tokens or 0)
+        observed_budget = requested.root_budget.model_copy(
+            update={
+                "response_completion_tokens_used": (
+                    requested.root_budget.response_completion_tokens_used + usage
+                )
+            }
+        )
+        if (
+            observed_budget.response_completion_tokens_used
+            > observed_budget.max_response_completion_tokens
+        ):
+            self._raise_failure(
+                requested,
+                BoundedResponseFailureCode.RESPONSE_BUDGET_EXHAUSTED,
+                "bounded response token usage exceeded the root budget",
+            )
+        durable_content = self._durable_provider_response_content(response)
+        if len(durable_content) > self._MAX_DURABLE_PROVIDER_RESPONSE_CHARS:
+            self._raise_failure(
+                requested,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "provider response exceeded the durable observation limit",
+            )
+        response_ref = self.store.save_artifact(
+            ingress.identity.conversation_id,
+            ingress.identity.run_id,
+            kind="provider_response",
+            payload={
+                "request_id": request_id,
+                "request_ordinal": ordinal,
+                "request_hash": request_hash,
+                "request_ref": request_ref.model_dump(mode="json"),
+                "purpose": purpose,
+                "content": durable_content,
+                "model": response.model,
+                "provider": response.provider,
+                "finish_reason": response.finish_reason,
+                "completion_tokens": usage,
+                "tool_call_count": len(response.tool_calls),
+            },
+        )
+        observed = IterationTurnReducer.finish_provider_request(
+            requested,
+            root_budget=observed_budget,
+            response_ref=response_ref,
+        )
+        observed = self.store.save(observed, expected_generation=requested.generation)
+        return observed, response
+
+    def _admit_recovery(
+        self,
+        record: IterationTurnRecordMetadata,
+        *,
+        ingress: SessionIngressState,
+        facts: RuntimeFactProjection,
+        user_message_id: str,
+    ) -> IterationTurnRecordMetadata:
+        if record.identity != ingress.identity:
+            raise IterationTurnConflictError("bounded response recovery identity differs")
+        if (
+            record.pre_task_state.user_message_id != user_message_id
+            or record.pre_task_state.session_authority_revision
+            != ingress.session_constraints.revision
+            or record.pre_task_state.session_authority_hash
+            != ingress.session_constraints.authority_hash
+            or record.pre_task_state.runtime_fact_hash
+            != self._hash(facts.model_dump(mode="json"))
+        ):
+            raise IterationTurnConflictError(
+                "bounded response recovery facts differ from durable state"
+            )
+        if str(record.task_binding.state) != "none":
+            raise IterationTurnConflictError(
+                "bounded response recovery cannot resume a task-bound turn"
+            )
+        if record.outcome is not None and not isinstance(
+            record.outcome,
+            CompletedResponseOutcome,
+        ):
+            raise IterationTurnConflictError("bounded response run is already terminal")
+        if record.response_candidate is None and (
+            record.outcome is not None
+            or record.assistant_commit.state != AssistantLedgerCommitState.NONE
+        ):
+            raise IterationTurnConflictError(
+                "bounded response recovery lacks its durable response candidate"
+            )
+        if (
+            record.cursor.pending_provider_request is None
+            and record.cursor.observed_provider_response_ref is None
+            and record.root_budget.root_provider_calls_used > 0
+        ):
+            self._raise_failure(
+                record,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "historical Provider observation lacks an exact durable response reference",
+            )
+        return record
+
+    def _recover_after_provider(
+        self,
+        record: IterationTurnRecordMetadata,
+        *,
+        ingress: SessionIngressState,
+        user_message_id: str,
+    ) -> BoundedModelResponseResult | None:
+        candidate = record.response_candidate
+        if candidate is None:
+            return None
+        grounding = record.grounding_decision
+        if grounding is None or grounding.response_hash != candidate.response_hash:
+            raise IterationTurnConflictError(
+                "durable response candidate lacks its exact grounding decision"
+            )
+        if grounding.status == GroundingStatus.EVIDENCE_REQUIRED:
+            if (
+                record.outcome is not None
+                or record.assistant_commit.state != AssistantLedgerCommitState.NONE
+                or tuple(record.cursor.open_obligation_ids)
+                != tuple(grounding.open_obligation_ids)
+            ):
+                raise IterationTurnConflictError(
+                    "durable evidence candidate has inconsistent completion state"
+                )
+            restored, _revision = self.store.load_ingress(
+                ingress.identity.conversation_id
+            )
+            if restored is None:
+                raise IterationTurnConflictError(
+                    "durable evidence candidate lost session ingress"
+                )
+            return BoundedModelResponseResult(
+                record=record,
+                ingress=restored,
+                content=None,
+                evidence_required=True,
+                evidence_obligation_ids=tuple(grounding.open_obligation_ids),
+            )
+        if grounding.status != GroundingStatus.APPROVED:
+            raise IterationTurnConflictError(
+                "durable response candidate is not approved for completion"
+            )
+
+        payload = self._load_candidate_payload(
+            record,
+            ingress=ingress,
+            user_message_id=user_message_id,
+        )
+        if record.outcome is None:
+            if record.assistant_commit.state != AssistantLedgerCommitState.NONE:
+                raise IterationTurnConflictError(
+                    "uncompleted response candidate has assistant commit state"
+                )
+            outcome = CompletedResponseOutcome(
+                response_ref=candidate.response_ref,
+                response_hash=candidate.response_hash,
+                grounding_decision_hash=grounding.canonical_hash,
+            )
+            pending = IterationTurnReducer.prepare_response(
+                record,
+                cursor=record.cursor.model_copy(update={"phase": IterationPhase.COMPLETE}),
+                candidate=candidate,
+                grounding=grounding,
+                outcome=outcome,
+                assistant_commit=AssistantTurnCommit(
+                    state=AssistantLedgerCommitState.PENDING,
+                    message_id=payload["message_id"],
+                    turn_index=payload["turn_index"],
+                    payload_ref=candidate.response_ref,
+                    payload_hash=candidate.response_hash,
+                ),
+            )
+            committed = IterationTurnCommitter(self.store).commit(pending)
+            return self._committed_result(committed.record, committed.payload, ingress)
+
+        if not isinstance(record.outcome, CompletedResponseOutcome):
+            raise IterationTurnConflictError("response candidate has a non-response outcome")
+        if (
+            record.outcome.response_ref != candidate.response_ref
+            or record.outcome.response_hash != candidate.response_hash
+            or record.outcome.grounding_decision_hash != grounding.canonical_hash
+        ):
+            raise IterationTurnConflictError(
+                "completed response outcome differs from its durable candidate"
+            )
+        if record.assistant_commit.state == AssistantLedgerCommitState.PENDING:
+            committed = IterationTurnCommitter(self.store).commit(record)
+            return self._committed_result(committed.record, committed.payload, ingress)
+        if record.assistant_commit.state == AssistantLedgerCommitState.COMMITTED:
+            commit = record.assistant_commit
+            if (
+                commit.message_id != payload["message_id"]
+                or commit.turn_index != payload["turn_index"]
+                or commit.payload_ref != candidate.response_ref
+                or commit.payload_hash != candidate.response_hash
+            ):
+                raise IterationTurnConflictError(
+                    "committed assistant identity differs from its response candidate"
+                )
+            return self._committed_result(record, payload["content"], ingress)
+        raise IterationTurnConflictError(
+            "completed response outcome lacks an assistant ledger commit"
+        )
+
+    def _load_candidate_payload(
+        self,
+        record: IterationTurnRecordMetadata,
+        *,
+        ingress: SessionIngressState,
+        user_message_id: str,
+    ) -> dict[str, Any]:
+        candidate = record.response_candidate
+        if candidate is None:
+            raise IterationTurnConflictError("response candidate is unavailable")
+        payload = self.store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            candidate.response_ref,
+        )
+        expected_message_id = self._stable_id("assistant", ingress, user_message_id)
+        if (
+            payload is None
+            or set(payload) != {"message_id", "turn_index", "content"}
+            or payload.get("message_id") != expected_message_id
+            or payload.get("turn_index") != ingress.identity.turn_index + 1
+            or not isinstance(payload.get("content"), str)
+            or assistant_payload_hash(payload) != candidate.response_hash
+        ):
+            raise IterationTurnConflictError(
+                "durable response candidate payload is unavailable or invalid"
+            )
+        return payload
+
+    def _committed_result(
+        self,
+        record: IterationTurnRecordMetadata,
+        content: str,
+        ingress: SessionIngressState,
+    ) -> BoundedModelResponseResult:
+        restored, _revision = self.store.load_ingress(ingress.identity.conversation_id)
+        if restored is None:
+            raise IterationTurnConflictError("bounded response recovery lost committed ingress")
+        commit = record.assistant_commit
+        matching = next(
+            (turn for turn in restored.turns if turn.message_id == commit.message_id),
+            None,
+        )
+        if (
+            matching is None
+            or matching.role != "assistant"
+            or matching.identity
+            != record.identity.model_copy(update={"turn_index": commit.turn_index})
+            or matching.content != content
+        ):
+            raise IterationTurnConflictError(
+                "committed assistant ledger differs from the durable response"
+            )
+        return BoundedModelResponseResult(record, restored, content, False)
+
+    @staticmethod
+    def _durable_provider_response_content(response: LLMResponse) -> str:
+        if isinstance(response.parsed_json, (dict, list)):
+            return json.dumps(
+                response.parsed_json,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return response.content
+
+    def _load_observed_provider_response(
+        self,
+        record: IterationTurnRecordMetadata,
+    ) -> _ObservedProviderResponse | None:
+        reference = record.cursor.observed_provider_response_ref
+        if reference is None:
+            return None
+        payload = self.store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            reference,
+        )
+        if payload is None:
+            self._raise_failure(
+                record,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "durable Provider response observation is unavailable",
+            )
+        try:
+            request_hash = str(payload["request_hash"])
+            request_ref = DurableArtifactReference.model_validate(payload["request_ref"])
+            request_id = str(payload["request_id"])
+            request_ordinal = int(payload["request_ordinal"])
+            purpose = str(payload["purpose"])
+            content = str(payload["content"])
+            model = str(payload["model"])
+            provider = str(payload["provider"])
+            completion_tokens = int(payload["completion_tokens"])
+            tool_call_count = int(payload["tool_call_count"])
+            finish_reason = payload.get("finish_reason")
+        except (KeyError, TypeError, ValueError):
+            self._raise_failure(
+                record,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "durable Provider response observation is malformed",
+            )
+        try:
+            observed_request = IterationPendingProviderRequest(
+                request_id=request_id,
+                request_ordinal=request_ordinal,
+                request_hash=request_hash,
+                request_ref=request_ref,
+                purpose=purpose,
+            )
+        except ValidationError:
+            self._raise_failure(
+                record,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "durable Provider request identity is malformed",
+            )
+        expected_signature = IterationTurnReducer.provider_progress_signature(
+            observed_request,
+            reference,
+        )
+        request_payload = self.store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            request_ref,
+        )
+        if (
+            request_ordinal not in {1, 2}
+            or purpose != ("response" if request_ordinal == 1 else "grounding_repair")
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", request_hash)
+            or expected_signature != record.cursor.decision_progress_signature
+            or request_payload is None
+            or self._hash(request_payload) != request_hash
+            or record.root_budget.root_provider_calls_used < request_ordinal
+            or record.root_budget.decision_rounds_used < request_ordinal
+            or completion_tokens < 0
+            or completion_tokens > record.root_budget.response_completion_tokens_used
+            or tool_call_count < 0
+            or not model
+            or not provider
+        ):
+            self._raise_failure(
+                record,
+                BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID,
+                "durable Provider response observation does not match the turn cursor",
+            )
+        response = LLMResponse(
+            content=content,
+            model=model,
+            provider=provider,
+            usage={"completion_tokens": completion_tokens},
+            finish_reason=str(finish_reason) if finish_reason is not None else None,
+        )
+        return _ObservedProviderResponse(
+            response=response,
+            request_ordinal=request_ordinal,
+            tool_call_count=tool_call_count,
         )
 
     def _ground_and_commit(
@@ -748,8 +1131,20 @@ class BoundedModelResponseController:
         persisted, revision = self.store.load_ingress(ingress.identity.conversation_id)
         if persisted == ingress:
             return
-        if persisted is not None and ingress.turns[: len(persisted.turns)] != persisted.turns:
-            raise IterationTurnConflictError("session ingress history differs from durable ledger")
+        if persisted is not None:
+            if (
+                persisted.turns[: len(ingress.turns)] == ingress.turns
+                and persisted.identity.conversation_id == ingress.identity.conversation_id
+                and persisted.identity.run_id == ingress.identity.run_id
+                and persisted.identity.project_root == ingress.identity.project_root
+                and persisted.session_constraints.authority_hash
+                == ingress.session_constraints.authority_hash
+            ):
+                return
+            if ingress.turns[: len(persisted.turns)] != persisted.turns:
+                raise IterationTurnConflictError(
+                    "session ingress history differs from durable ledger"
+                )
         self.store.save_ingress(ingress, expected_revision=revision)
 
     def _raise_failure(

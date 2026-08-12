@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from autonomous_iteration.bounded_model_response import (
@@ -7,7 +9,10 @@ from autonomous_iteration.bounded_model_response import (
     BoundedResponseError,
     BoundedResponseFailureCode,
 )
-from autonomous_iteration.iteration_turn_store import IterationTurnStore
+from autonomous_iteration.iteration_turn_store import (
+    IterationTurnConflictError,
+    IterationTurnStore,
+)
 from autonomous_iteration.runtime_facts import RuntimeFactProjection
 from core.llm import LLMResponse, LLMToolCall, LLMToolFunctionCall
 from metadata import ConversationIdentity, SessionIngressState, SessionTurn
@@ -26,9 +31,46 @@ class _FakeClient:
         return response
 
 
+class _CrashAfterBoundaryStore(IterationTurnStore):
+    def __init__(self, root_dir, boundary: str) -> None:
+        super().__init__(root_dir)
+        self.boundary = boundary
+        self.crashed = False
+
+    def save(self, record, *, expected_generation=None):
+        saved = super().save(record, expected_generation=expected_generation)
+        if not self.crashed and str(saved.boundary) == self.boundary:
+            self.crashed = True
+            raise RuntimeError(f"crash after {self.boundary}")
+        return saved
+
+
+class _CrashAfterArtifactStore(IterationTurnStore):
+    def __init__(self, root_dir, kind: str) -> None:
+        super().__init__(root_dir)
+        self.kind = kind
+        self.crashed = False
+
+    def save_artifact(self, conversation_id, run_id, *, kind, payload):
+        reference = super().save_artifact(
+            conversation_id,
+            run_id,
+            kind=kind,
+            payload=payload,
+        )
+        if not self.crashed and kind == self.kind:
+            self.crashed = True
+            raise RuntimeError(f"crash after {kind} artifact")
+        return reference
+
+
 def _response(payload, *, tool_calls=None, completion_tokens=20) -> LLMResponse:
     return LLMResponse(
-        content="not relied on" if isinstance(payload, dict) else str(payload),
+        content=(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(payload, dict)
+            else str(payload)
+        ),
         parsed_json=payload if isinstance(payload, dict) else None,
         model="test-model",
         provider="test-provider",
@@ -110,6 +152,286 @@ def test_invalid_claim_coverage_gets_exactly_one_bounded_repair(tmp_path) -> Non
     assert "Replace the invalid prior output completely" in client.calls[1][0].messages[0].content
     assert result.record.root_budget.root_provider_calls_used == 2
     assert result.record.root_budget.grounding_repairs_used == 1
+
+
+def test_pending_provider_request_recovery_fails_closed_without_replay(tmp_path) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "decision_requested")
+    client = _FakeClient(
+        [_response({"response": "Never sent.", "claims": [{"text": "Never sent."}]})]
+    )
+    controller = BoundedModelResponseController(store, client)
+
+    with pytest.raises(RuntimeError, match="crash after decision_requested"):
+        controller.complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+    assert client.calls == []
+
+    with pytest.raises(BoundedResponseError) as caught:
+        BoundedModelResponseController(store, client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    assert caught.value.code == BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID
+    assert "cannot be safely replayed" in str(caught.value)
+    assert client.calls == []
+    assert caught.value.record.cursor.pending_provider_request is None
+    assert caught.value.record.outcome.outcome == "failed"
+
+
+def test_observed_provider_response_recovers_without_provider_replay(tmp_path) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "decision_recorded")
+    initial_client = _FakeClient(
+        [
+            _response(
+                {
+                    "response": "The sky looks blue due to scattering.",
+                    "claims": [{"text": "The sky looks blue due to scattering."}],
+                }
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="crash after decision_recorded"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+    assert len(initial_client.calls) == 1
+    observed = store.load_latest("conversation-1", "run-1")
+    assert observed.cursor.observed_provider_response_ref is not None
+
+    replay_client = _FakeClient([])
+    result = BoundedModelResponseController(store, replay_client).complete(
+        "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+    )
+
+    assert replay_client.calls == []
+    assert result.content == "The sky looks blue due to scattering."
+    assert result.record.assistant_commit.state == "committed"
+    assert result.record.root_budget.root_provider_calls_used == 1
+
+
+def test_unbound_provider_response_artifact_does_not_authorize_replay(tmp_path) -> None:
+    store = _CrashAfterArtifactStore(tmp_path, "provider_response")
+    initial_client = _FakeClient(
+        [
+            _response(
+                {
+                    "response": "The sky looks blue due to scattering.",
+                    "claims": [{"text": "The sky looks blue due to scattering."}],
+                }
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="crash after provider_response artifact"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+    assert len(initial_client.calls) == 1
+
+    replay_client = _FakeClient([])
+    with pytest.raises(BoundedResponseError) as caught:
+        BoundedModelResponseController(store, replay_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    assert caught.value.code == BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID
+    assert replay_client.calls == []
+    assert caught.value.record.outcome.outcome == "failed"
+
+
+def test_invalid_observed_response_uses_only_remaining_repair_call(tmp_path) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "decision_recorded")
+    initial_client = _FakeClient(
+        [_response({"response": "Complete answer.", "claims": [{"text": "Partial"}]})]
+    )
+    with pytest.raises(RuntimeError, match="crash after decision_recorded"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    repair_client = _FakeClient(
+        [_response({"response": "Complete answer.", "claims": [{"text": "Complete answer."}]})]
+    )
+    result = BoundedModelResponseController(store, repair_client).complete(
+        "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+    )
+
+    assert len(initial_client.calls) == 1
+    assert len(repair_client.calls) == 1
+    assert "Replace the invalid prior output completely" in repair_client.calls[0][0].messages[0].content
+    assert result.content == "Complete answer."
+    assert result.record.root_budget.root_provider_calls_used == 2
+    assert result.record.root_budget.grounding_repairs_used == 1
+
+
+def test_corrupt_observed_response_fails_closed_without_provider_replay(tmp_path) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "decision_recorded")
+    initial_client = _FakeClient(
+        [_response({"response": "Complete.", "claims": [{"text": "Complete."}]})]
+    )
+    with pytest.raises(RuntimeError, match="crash after decision_recorded"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+    observed = store.load_latest("conversation-1", "run-1")
+    reference = observed.cursor.observed_provider_response_ref
+    artifact_path = (
+        tmp_path
+        / "conversation-1"
+        / "run-1"
+        / "artifacts"
+        / f"{reference.artifact_id}.json"
+    )
+    artifact_path.write_text("{}", encoding="utf-8")
+
+    replay_client = _FakeClient([])
+    with pytest.raises(BoundedResponseError) as caught:
+        BoundedModelResponseController(store, replay_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    assert caught.value.code == BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID
+    assert replay_client.calls == []
+    assert caught.value.record.outcome.outcome == "failed"
+
+
+def test_approved_candidate_recovery_commits_without_provider_replay(tmp_path) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "completion_candidate_recorded")
+    initial_client = _FakeClient(
+        [_response({"response": "Complete.", "claims": [{"text": "Complete."}]})]
+    )
+
+    with pytest.raises(RuntimeError, match="crash after completion_candidate_recorded"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    replay_client = _FakeClient([])
+    result = BoundedModelResponseController(store, replay_client).complete(
+        "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+    )
+
+    assert replay_client.calls == []
+    assert result.content == "Complete."
+    assert result.record.assistant_commit.state == "committed"
+
+
+def test_evidence_candidate_recovery_returns_same_candidate_without_provider_replay(
+    tmp_path,
+) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "completion_candidate_recorded")
+    initial_client = _FakeClient(
+        [
+            _response(
+                {
+                    "response": "The repository uses SQLite.",
+                    "claims": [{"text": "The repository uses SQLite."}],
+                }
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="crash after completion_candidate_recorded"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "What database does this project use?",
+            ingress=_ingress(content="What database does this project use?"),
+            facts=_facts(),
+        )
+
+    replay_client = _FakeClient([])
+    result = BoundedModelResponseController(store, replay_client).complete(
+        "What database does this project use?",
+        ingress=_ingress(content="What database does this project use?"),
+        facts=_facts(),
+    )
+
+    assert replay_client.calls == []
+    assert result.content is None
+    assert result.evidence_required is True
+    assert result.record.response_candidate is not None
+
+
+def test_pending_assistant_recovery_commits_without_provider_replay(tmp_path) -> None:
+    store = _CrashAfterBoundaryStore(tmp_path, "completion_approved")
+    initial_client = _FakeClient(
+        [_response({"response": "Complete.", "claims": [{"text": "Complete."}]})]
+    )
+
+    with pytest.raises(RuntimeError, match="crash after completion_approved"):
+        BoundedModelResponseController(store, initial_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    replay_client = _FakeClient([])
+    result = BoundedModelResponseController(store, replay_client).complete(
+        "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+    )
+
+    assert replay_client.calls == []
+    assert result.content == "Complete."
+    assert result.record.assistant_commit.state == "committed"
+
+
+def test_committed_assistant_recovery_validates_ledger_without_provider_replay(
+    tmp_path,
+) -> None:
+    store = IterationTurnStore(tmp_path)
+    first = BoundedModelResponseController(
+        store,
+        _FakeClient(
+            [_response({"response": "Complete.", "claims": [{"text": "Complete."}]})]
+        ),
+    ).complete("Why does the sky look blue?", ingress=_ingress(), facts=_facts())
+    persisted, revision = store.load_ingress("conversation-1")
+    assert persisted is not None
+    corrupted_turn = persisted.turns[-1].model_copy(update={"content": "different"})
+    store.save_ingress(
+        persisted.model_copy(update={"turns": [persisted.turns[0], corrupted_turn]}),
+        expected_revision=revision,
+    )
+
+    replay_client = _FakeClient([])
+    with pytest.raises(IterationTurnConflictError, match="ledger"):
+        BoundedModelResponseController(store, replay_client).complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+
+    assert first.record.assistant_commit.state == "committed"
+    assert replay_client.calls == []
+
+
+@pytest.mark.parametrize("limit_delta, succeeds", [(0, True), (-1, False)])
+def test_durable_provider_response_character_limit_is_exact(
+    tmp_path,
+    limit_delta,
+    succeeds,
+) -> None:
+    response = _response(
+        {"response": "Complete.", "claims": [{"text": "Complete."}]}
+    )
+    client = _FakeClient([response])
+    controller = BoundedModelResponseController(
+        IterationTurnStore(tmp_path / str(limit_delta)),
+        client,
+    )
+    durable_length = len(controller._durable_provider_response_content(response))
+    controller._MAX_DURABLE_PROVIDER_RESPONSE_CHARS = durable_length + limit_delta
+
+    if succeeds:
+        result = controller.complete(
+            "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+        )
+        assert result.content == "Complete."
+    else:
+        with pytest.raises(BoundedResponseError) as caught:
+            controller.complete(
+                "Why does the sky look blue?", ingress=_ingress(), facts=_facts()
+            )
+        assert caught.value.code == BoundedResponseFailureCode.PROVIDER_CONTRACT_INVALID
+        assert "durable observation limit" in str(caught.value)
+    assert len(client.calls) == 1
 
 
 def test_tool_calls_are_rejected_and_never_executed(tmp_path) -> None:

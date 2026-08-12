@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from metadata import (
     ActiveTaskBinding,
     AssistantLedgerCommitState,
@@ -9,6 +12,7 @@ from metadata import (
     CompletedResponseOutcome,
     CompletionObligation,
     ControlledStopOutcome,
+    DurableArtifactReference,
     GroundingDecision,
     IterationBoundary,
     IterationControlCursor,
@@ -146,6 +150,8 @@ class IterationTurnReducer:
                 "decision_ordinal": record.cursor.decision_ordinal + 1,
                 "phase": "ground_response",
                 "pending_provider_request": request,
+                "observed_provider_response_ref": None,
+                "decision_progress_signature": None,
             }
         )
         return cls._validated_copy(
@@ -162,15 +168,20 @@ class IterationTurnReducer:
         record: IterationTurnRecordMetadata,
         *,
         root_budget: RootDecisionBudget,
-        progress_signature: str,
+        response_ref: DurableArtifactReference,
     ) -> IterationTurnRecordMetadata:
         if record.cursor.pending_provider_request is None:
             raise IterationTurnTransitionError("provider observation requires a pending request")
         cls._validate_budget_progress(record.root_budget, root_budget)
+        progress_signature = cls.provider_progress_signature(
+            record.cursor.pending_provider_request,
+            response_ref,
+        )
         cursor = record.cursor.model_copy(
             update={
                 "pending_provider_request": None,
                 "decision_progress_signature": progress_signature,
+                "observed_provider_response_ref": response_ref,
             }
         )
         return cls._validated_copy(
@@ -180,6 +191,23 @@ class IterationTurnReducer:
             cursor=cursor,
             root_budget=root_budget,
         )
+
+    @staticmethod
+    def provider_progress_signature(
+        request: IterationPendingProviderRequest,
+        response_ref: DurableArtifactReference,
+    ) -> str:
+        payload = {
+            "request": request.model_dump(mode="json"),
+            "response_ref": response_ref.model_dump(mode="json"),
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
     @classmethod
     def stop(

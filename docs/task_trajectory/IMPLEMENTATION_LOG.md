@@ -5281,3 +5281,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the CLI success-summary renderer and detached process
   implementation remain in their earlier dedicated PRs; this slice only adds
   the runtime integration boundary.
+
+### Bounded response recovery without provider replay
+
+- Observed failure: a crash after a provider response was received could leave
+  the turn between `request` and `response` boundaries. Retrying the CLI either
+  had no durable response to finish from or risked issuing the same provider
+  request again. A pending request with an indeterminate outcome must fail
+  closed.
+- Reproduction: inject crashes after provider-request persistence and after
+  observed-response persistence; assert that pending requests produce a typed
+  terminal failure without a provider call, while observed responses complete
+  or use only the one remaining grounding-repair request.
+- Implemented fix: persist a bounded provider-response artifact, bind it to the
+  typed cursor progress signature, recover from the exact observation, and
+  reject unbound/malformed artifacts or pending requests that cannot be safely
+  reconciled.
+- Validation evidence: focused bounded-response, iteration metadata, and reducer
+  suites **43 passed**; compileall and diff-check passed.
+- Remaining limitation: this boundary covers zero-tool bounded responses; tool
+  execution recovery remains owned by the separate checkpoint/runtime paths.
