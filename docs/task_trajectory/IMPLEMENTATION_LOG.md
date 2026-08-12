@@ -4584,3 +4584,16 @@ PYTHONPATH=Code/src pytest -q Code/tests
   mutation, path, network, persistence, or replay authority is introduced.
 - Remaining limitation: CLI success messaging and the explicit post-completion
   launch prompt remain a separate follow-up slice.
+
+### CLI success delivery evidence
+
+- Observed failure: the CLI displayed only a generic success line after
+  autonomous iterations, so users could not tell what changed or whether the
+  durable session result had been unwrapped.
+- Validation evidence: the new CLI formatting suite covers direct and wrapped
+  session results; focused UI/runtime tests, source compilation, and
+  `git diff --check` pass.
+- Implemented fix: render accepted iteration count, action summaries, changed
+  filenames, and validation status from the typed result projection. The
+  projection is display-only and cannot control routing or completion.
+- Remaining limitation: interactive launch confirmation remains a separate PR.

@@ -138,6 +138,35 @@ def _format_failure_details(result: dict) -> str:
     return str(details)
 
 
+def _session_result_payload(result: dict) -> dict:
+    """Use the durable session result when the runtime wraps it."""
+    if not isinstance(result, dict):
+        return {}
+    session_result = result.get("session_result")
+    return session_result if isinstance(session_result, dict) else result
+
+
+def _format_success_details(result: dict) -> str:
+    """Render concrete iteration actions, changed files, and validation state."""
+    result = _session_result_payload(result)
+    lines: list[str] = []
+    completed = int(result.get("completed_improvements") or 0)
+    required = int(result.get("required_improvements") or 0)
+    if completed or required:
+        lines.append(f"代码优化: {completed}/{required}")
+    for item in list(result.get("iterations") or []):
+        iteration = _result_value(item, "iteration") or "?"
+        actions = list(_result_value(item, "applied_actions") or [])
+        changed_files = list(_result_value(item, "changed_files") or [])
+        validation_passed = bool(_result_value(item, "validation_passed"))
+        if actions:
+            lines.append(f"第 {iteration} 轮: {'; '.join(str(action) for action in actions[:3])}")
+        if changed_files:
+            lines.append("修改文件: " + ", ".join(Path(str(path)).name for path in changed_files[:5]))
+        lines.append(f"验证: {'通过' if validation_passed else '未通过'}")
+    return "\n".join(lines) or "任务已完成并通过验证。"
+
+
 def _result_value(value, key: str):
     if isinstance(value, dict):
         return value.get(key)
@@ -463,7 +492,7 @@ def _run_once_mode(
         ui.show_full_task_graph_timeline()
 
         if result.get("success"):
-            ui.show_success("Goal completed successfully!")
+            ui.show_success("Goal completed successfully!", _format_success_details(result))
             return 0
 
         ui.show_error("Execution failed", _format_failure_details(result))
@@ -927,14 +956,15 @@ def _execute_autopilot(
         ui.show_full_task_graph_timeline()
 
         if result.get("success"):
+            success_details = _format_success_details(result)
             warning = result.get("iteration_error")
             if warning:
                 ui.show_success(
                     "Goal completed with iteration warning",
-                    warning,
+                    f"{success_details}\n迭代警告: {warning}",
                 )
             else:
-                ui.show_success("Goal completed!")
+                ui.show_success("Goal completed!", success_details)
         else:
             ui.show_error("Autopilot execution failed", _format_failure_details(result))
         return result

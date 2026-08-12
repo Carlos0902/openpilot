@@ -849,6 +849,11 @@ and does not wait for the application window or reuse the validation timeout.
 The confirmation handle is excluded from durable metadata and cannot authorize
 ordinary automatic or dry-run commands.
 
+CLI success output unwraps the durable `session_result` when present and shows
+accepted iteration count, concrete actions, changed filenames, and validation
+status. This is presentation-only; it does not infer success or add execution
+authority.
+
 Tool-planning prompts project the current typed `Task.write_files` list as the
 authoritative write scope. README generation is optional post-processing: an
 unscoped README need is dropped when the same plan still contains authorized
