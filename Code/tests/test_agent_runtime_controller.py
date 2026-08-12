@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from tools.tool_selection import SelectionReason, ToolSelection
@@ -80,6 +81,21 @@ from metadata import (
     ToolInputMetadata,
     ToolResultMetadata,
 )
+
+
+def test_durable_tool_input_excludes_runtime_only_handles() -> None:
+    input_metadata = ToolInputMetadata.from_mapping(
+        "bug_fix_tool",
+        {
+            "command": "python app.py",
+            "_thread_lock": threading.Lock(),
+        },
+    )
+
+    durable = AgentRuntimeController._durable_tool_input(input_metadata)
+
+    assert durable.command == "python app.py"
+    assert durable.runtime_handles == {}
 
 
 def _attach_ready_test_environment(runtime, project: Path) -> Path:

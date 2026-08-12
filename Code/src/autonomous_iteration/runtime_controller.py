@@ -4222,7 +4222,7 @@ class AgentRuntimeController:
             tool_name=str(checkpoint.tool_name),
             reason=SelectionReason.CAPABILITY_MATCH,
             confidence=1.0,
-            input_metadata=checkpoint.tool_input.model_copy(deep=True),
+            input_metadata=self._durable_tool_input(checkpoint.tool_input),
         )
         tool_call = SimpleNamespace(
             call_id=str(checkpoint.tool_call_id or f"{checkpoint.root_task_id}:resume"),
@@ -5163,6 +5163,14 @@ class AgentRuntimeController:
             return LLMRequestHashVersion.PROVIDER_BOUND_V2
         return LLMRequestHashVersion.LEGACY_UNBOUND_V1
 
+    @staticmethod
+    def _durable_tool_input(input_metadata: ToolInputMetadata) -> ToolInputMetadata:
+        """Copy serializable tool facts without runtime-only handles."""
+
+        return ToolInputMetadata.model_validate(
+            input_metadata.model_dump(mode="python", exclude={"runtime_handles"})
+        )
+
     def prepare_tool_call(self, tool_call: Any, selection: ToolSelection) -> bool:
         """Persist mutation intent before the tool is allowed to execute."""
         pending_validation = (
@@ -5194,7 +5202,7 @@ class AgentRuntimeController:
             "tool_name": selection.tool_name,
             "step_id": selection.step_id,
             "call_id": str(getattr(tool_call, "call_id", "") or ""),
-            "tool_input": selection.input_metadata.model_copy(deep=True),
+            "tool_input": self._durable_tool_input(selection.input_metadata),
             "target_files": target_files,
             "expected_target_file_hashes": self._expected_file_hashes(selection),
             "pending_verification": (
@@ -5265,7 +5273,7 @@ class AgentRuntimeController:
         action.setdefault("tool_name", selection.tool_name)
         action.setdefault("step_id", selection.step_id)
         action.setdefault("call_id", str(getattr(tool_call, "call_id", "") or ""))
-        action.setdefault("tool_input", selection.input_metadata.model_copy(deep=True))
+        action.setdefault("tool_input", self._durable_tool_input(selection.input_metadata))
         action.setdefault("target_files", file_mutation_targets(selection))
         action.setdefault("expected_target_file_hashes", self._expected_file_hashes(selection))
         output = getattr(execution_result, "output_metadata", None)
@@ -5379,7 +5387,7 @@ class AgentRuntimeController:
             "tool_name": selection.tool_name,
             "step_id": selection.step_id,
             "call_id": call_id,
-            "tool_input": selection.input_metadata.model_copy(deep=True),
+            "tool_input": self._durable_tool_input(selection.input_metadata),
         }
         return SimpleNamespace(
             success=bool(payload.get("success")),
@@ -5924,7 +5932,7 @@ class AgentRuntimeController:
         action = dict(self._active_tool_checkpoint)
         action.setdefault("tool_name", selection.tool_name)
         action.setdefault("step_id", selection.step_id)
-        action.setdefault("tool_input", selection.input_metadata.model_copy(deep=True))
+        action.setdefault("tool_input", self._durable_tool_input(selection.input_metadata))
         action.setdefault("target_files", [str(selection.input_metadata.file_path)] if selection.input_metadata.file_path else [])
         action.setdefault("expected_target_file_hashes", self._expected_file_hashes(selection))
         success = bool(getattr(execution_result, "success", False))
