@@ -2449,6 +2449,34 @@ PYTHONPATH=Code/src pytest -q Code/tests
   and reusable artifact selection remain separate follow-up PRs; this slice is
   shadow evidence only.
 
+### Reusable compaction prompt-use preflight
+
+- Observed failure: shadow admission alone could prove source/artifact identity,
+  but there was no separate dry-run boundary proving that required candidates,
+  recent suffix, semantic evidence, and atomic replacement would remain safe
+  before a reusable summary was ever considered for prompt use.
+- Reproduction: build an admitted body-free binding and run preflight with a
+  short-summary/long-source fixture. The preflight passes only when every source
+  is governed by the trial summary and required/recent candidates remain kept;
+  admission drift, source hash drift, missing semantic facts/evidence, and
+  required/recent omissions produce typed rejection reasons. The initial fixture
+  was intentionally corrected after the existing record invariant rejected a
+  summary larger than its source, confirming the test exercises the real size
+  boundary rather than bypassing it.
+- Implemented fix: add `ReusableCompactionSemanticFact`, typed preflight status and
+  rejection vocabulary, and `preflight_reusable_compaction_prompt_use`. The
+  function validates bindings and candidate source hashes, performs one atomic
+  trial assembly, records only hashes/IDs/status/size, and hard-codes
+  `used_in_prompt=false`. It does not read artifact bodies, mutate builder state,
+  or authorize prompt/tool/file/mutation use.
+- Validation evidence: preflight, shadow admission, summary contract, metadata,
+  context assembly, memory, projection, and rolling-integration suite **177
+  passed**; `python -m compileall -q Code/src` and `git diff --check` pass.
+  The implementation and regression slice is under 1000 changed lines and below
+  the 3000-line large-PR threshold.
+- Remaining limitation: prompt-use simulation and any actual reusable selection
+  remain separate stacked changes; default runtime behavior is unchanged.
+
 ### Bounded provider completion outcome evidence
 
 - Observed failure: empty, truncated, and failed provider attempts could not be
