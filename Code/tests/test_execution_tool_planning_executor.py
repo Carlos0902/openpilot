@@ -2260,6 +2260,39 @@ def test_tool_event_loop_consumes_provider_completion_usage_once(tmp_path) -> No
     assert state.budget.tool_event_completion_tokens_used == 321
 
 
+def test_tool_event_loop_keeps_full_reservation_when_json_repair_usage_is_partial(tmp_path) -> None:
+    runtime = FakeRuntime(tmp_path, {"decision_needs": []})
+    state = RuntimeStateMetadata(goal="inspect project", phase=AgentPhase.EXECUTE)
+    runtime.runtime_controller = SimpleNamespace(state=state)
+    runner = ToolEventLoopRunner(ToolPlanningTaskExecutor(runtime))
+
+    state.budget.consume_tool_event_completion(4000)
+    runner._reconcile_completion_usage(
+        state.budget,
+        SimpleNamespace(
+            usage={"completion_tokens": 200},
+            provider_details={"json_repair_attempts": 2},
+        ),
+        reserved=4000,
+    )
+
+    assert state.budget.tool_event_completion_tokens_used == 4000
+
+
+def test_tool_event_loop_keeps_full_reservation_after_second_invalid_json(tmp_path) -> None:
+    runtime = FakeRuntime(tmp_path, {"decision_needs": []})
+    state = RuntimeStateMetadata(goal="inspect project", phase=AgentPhase.EXECUTE)
+    runtime.runtime_controller = SimpleNamespace(state=state)
+    runner = ToolEventLoopRunner(ToolPlanningTaskExecutor(runtime))
+    error = InvalidLLMResponseError("still invalid", response_text="")
+    error.context["json_repair_attempt"] = 2
+
+    state.budget.consume_tool_event_completion(4000)
+    runner._reconcile_completion_failure(state.budget, error, reserved=4000)
+
+    assert state.budget.tool_event_completion_tokens_used == 4000
+
+
 def test_tool_event_loop_reconciles_invalid_json_failure_usage_and_grants_length_recovery(tmp_path) -> None:
     runtime = FakeRuntime(tmp_path, {"decision_needs": []})
     state = RuntimeStateMetadata(goal="inspect project", phase=AgentPhase.EXECUTE)
@@ -2293,7 +2326,7 @@ def test_tool_event_loop_refunds_empty_invalid_response_without_usage(tmp_path) 
     assert state.budget.tool_event_completion_recovery_bonus == 0
 
 
-def test_tool_event_loop_limits_json_repair_to_one_provider_attempt(tmp_path) -> None:
+def test_tool_event_loop_allows_one_bounded_json_repair_attempt(tmp_path) -> None:
     class RepairAwareLLM:
         def __init__(self) -> None:
             self.max_retries = []
@@ -2308,7 +2341,7 @@ def test_tool_event_loop_limits_json_repair_to_one_provider_attempt(tmp_path) ->
 
     runner._complete_tool_event_request(SimpleNamespace())
 
-    assert runtime.llm_client.max_retries == [1]
+    assert runtime.llm_client.max_retries == [2]
 
 
 def _recovery_prompt_error(input_metadata: ToolInputMetadata) -> ToolErrorMetadata:

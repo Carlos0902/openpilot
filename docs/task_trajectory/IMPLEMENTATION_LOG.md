@@ -5342,6 +5342,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: only descendants of the active project root may be
   entered; sibling and parent transitions remain fail-closed.
 
+### Bounded tool-planning JSON repair budget
+
+- Observed failure: structured tool planning could consume a second JSON repair
+  attempt without reserving or charging the full bounded completion budget.
+  Invalid final output then understated usage and could grant an incorrect
+  recovery allowance.
+- Reproduction: run a tool-planning request with one JSON repair; assert the
+  client receives at most two attempts and the full reservation remains charged
+  when only final-attempt usage is reported or the second attempt is invalid.
+- Implemented fix: reserve one initial attempt plus one repair when budget
+  permits, fall back to one attempt when it does not, and retain the complete
+  reservation whenever provider details show a repair attempt.
+- Validation evidence: focused tool-planning executor suite **106 passed**;
+  compileall and diff-check passed.
+- Remaining limitation: repair remains bounded to one additional attempt and
+  does not introduce an unbounded planning loop.
+
 ### Multilingual response-claim coverage
 
 - Observed failure: claim coverage joined adjacent claim text with an inserted

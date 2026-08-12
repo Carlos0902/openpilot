@@ -293,12 +293,28 @@ class ToolEventLoopRunner:
                         )
                         if constraint_prompt and constraint_prompt not in rendered_request:
                             raise ContextAssemblyBudgetError(["session_constraints"])
-                    budget.consume_tool_event_completion(completion_limit)
-                    llm_response = self._complete_tool_event_request(request)
-                    self._reconcile_completion_usage(budget, llm_response, reserved=completion_limit)
+                    completion_attempt_limit = self._completion_attempt_limit()
+                    completion_reservation = completion_limit * completion_attempt_limit
+                    if completion_reservation > budget.tool_event_completion_tokens_remaining:
+                        completion_attempt_limit = 1
+                        completion_reservation = completion_limit
+                    budget.consume_tool_event_completion(completion_reservation)
+                    llm_response = self._complete_tool_event_request(
+                        request,
+                        max_retries=completion_attempt_limit,
+                    )
+                    self._reconcile_completion_usage(
+                        budget,
+                        llm_response,
+                        reserved=completion_reservation,
+                    )
                     tool_requests = self.owner._parse_decision_needs(llm_response)
                 except (InvalidLLMResponseError, LLMProviderError, LLMTimeoutError) as exc:
-                    self._reconcile_completion_failure(budget, exc, reserved=completion_limit)
+                    self._reconcile_completion_failure(
+                        budget,
+                        exc,
+                        reserved=completion_reservation,
+                    )
                     fallback = getattr(self.owner, "_fallback_tool_requests", None)
                     tool_requests = fallback(reason=str(exc)) if callable(fallback) else []
                     if not tool_requests:
@@ -665,11 +681,21 @@ class ToolEventLoopRunner:
         budget = getattr(state, "budget", None)
         return budget if isinstance(budget, RuntimeBudgetMetadata) else self._local_completion_budget
 
-    def _complete_tool_event_request(self, request: LLMRequest) -> Any:
+    def _completion_attempt_limit(self) -> int:
         complete = self.runtime.llm_client.complete
         parameters = inspect.signature(complete).parameters
         accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-        kwargs = {"max_retries": 1} if accepts_kwargs or "max_retries" in parameters else {}
+        return 2 if accepts_kwargs or "max_retries" in parameters else 1
+
+    def _complete_tool_event_request(self, request: LLMRequest, *, max_retries: int | None = None) -> Any:
+        complete = self.runtime.llm_client.complete
+        attempt_limit = self._completion_attempt_limit() if max_retries is None else max(1, int(max_retries))
+        parameters = inspect.signature(complete).parameters
+        accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+        # Tool planning requires structured JSON. One initial request plus one
+        # bounded repair gives empty/truncated provider output a recovery path
+        # without allowing an unbounded planning loop.
+        kwargs = {"max_retries": attempt_limit} if accepts_kwargs or "max_retries" in parameters else {}
         return complete(request, **kwargs)
 
     def _reasoning_policy_for_task(self, task: Any) -> ReasoningPolicy:
@@ -685,6 +711,10 @@ class ToolEventLoopRunner:
         provider_details = getattr(response, "provider_details", None)
         if isinstance(provider_details, dict) and provider_details.get("recovery_replay"):
             budget.reconcile_tool_event_completion(reserved=reserved, actual=0)
+            return
+        if isinstance(provider_details, dict) and int(provider_details.get("json_repair_attempts") or 1) > 1:
+            # LLMClient reports usage for the final repair response only. Keep
+            # the full two-attempt reservation rather than understating spend.
             return
         usage = getattr(response, "usage", None)
         if not isinstance(usage, dict):
@@ -702,6 +732,11 @@ class ToolEventLoopRunner:
         *,
         reserved: int,
     ) -> None:
+        context = getattr(error, "context", None)
+        if isinstance(context, dict) and int(context.get("json_repair_attempt") or 1) > 1:
+            # The final error does not aggregate usage from the earlier invalid
+            # response, so retain the full bounded reservation.
+            return
         usage = getattr(error, "usage", None)
         tokens = None
         if isinstance(usage, dict):
