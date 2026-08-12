@@ -21,6 +21,10 @@ from core.provider_read_finalization_transition import (
     ProviderReadFinalizationAction,
     provider_read_finalization_transition,
 )
+from core.provider_no_progress_transition import (
+    ProviderNoProgressAction,
+    provider_no_progress_transition,
+)
 from core.provider_tool_evidence_state import ProviderToolEvidenceState
 from core.provider_tool_batch_admission import admit_provider_tool_calls
 from core.provider_tool_call_signature import provider_tool_call_signature
@@ -58,9 +62,12 @@ class ProviderReadonlyRoundTripRunner:
         max_tokens: int | None = None,
         context_max_prompt_tokens: int | None = None,
         allow_mutations: bool = False,
+        max_no_progress_rounds: int = 2,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
+        if not isinstance(max_no_progress_rounds, int) or isinstance(max_no_progress_rounds, bool) or max_no_progress_rounds < 1:
+            raise ValueError("max_no_progress_rounds must be positive")
         if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes)):
             raise ValueError("tools must be a bounded sequence")
         if any(not isinstance(tool, LLMToolDefinition) for tool in tools):
@@ -84,6 +91,9 @@ class ProviderReadonlyRoundTripRunner:
         self._last_round_progress = False
         self._finalization_pending = False
         self._finalization_requests = 0
+        self._max_no_progress_rounds = max_no_progress_rounds
+        self._no_progress_rounds = 0
+        self._duplicate_only_rounds = 0
 
         if not self.tools:
             raise ValueError("read-only provider round requires at least one tool")
@@ -215,6 +225,44 @@ class ProviderReadonlyRoundTripRunner:
                 current_messages.extend(provider_tool_wire_exchange(response, tool_results))
                 self._record_attempts(response, loop_result, round_index)
                 self._observe_read_evidence(response, loop_result)
+                duplicate_only_covered = (
+                    not partition.new_calls
+                    and bool(partition.duplicate_blocks)
+                    and len(partition.duplicate_blocks) == len(response.tool_calls)
+                    and self._all_scoped_reads_complete()
+                )
+                if duplicate_only_covered:
+                    self._duplicate_only_rounds += 1
+                    self._evidence.record_duplicate_only_round(round_index)
+                no_progress = provider_no_progress_transition(
+                    duplicate_only_covered=duplicate_only_covered,
+                    mutation_tools_exposed=False,
+                    mutation_duplicate_guidance_sent=False,
+                    read_only_tool_set=True,
+                    finalization_requests=self._finalization_requests,
+                    round_made_progress=self._last_round_progress and not duplicate_only_covered,
+                    no_progress_rounds=self._no_progress_rounds,
+                    max_no_progress_rounds=self._max_no_progress_rounds,
+                    duplicate_only_rounds=self._duplicate_only_rounds,
+                    round_index=round_index,
+                    max_rounds=self.max_rounds,
+                )
+                self._no_progress_rounds = no_progress.no_progress_rounds
+                self._duplicate_only_rounds = no_progress.duplicate_only_rounds
+                if no_progress.action is ProviderNoProgressAction.FAIL:
+                    return self._result(
+                        success=False,
+                        final_response=response,
+                        messages=current_messages,
+                        tool_loop_results=loop_results,
+                        rounds_used=round_index,
+                        error_message=no_progress.error_code.value,
+                    )
+                if no_progress.action is ProviderNoProgressAction.REQUEST_FINALIZATION:
+                    self._finalization_pending = True
+                    self._finalization_requests = no_progress.finalization_requests
+                    current_messages.append(LLMMessage(role="user", content=self._finalization_instruction()))
+                    continue
                 transition = provider_read_finalization_transition(
                     page_cap_ready=self._all_scoped_reads_complete(),
                     all_scoped_reads_complete=self._all_scoped_reads_complete(),
@@ -319,12 +367,18 @@ class ProviderReadonlyRoundTripRunner:
             content = summary.get("content") or summary.get("preview") or ""
             if truncated:
                 self._bounded_projection_seen = True
-                self._evidence.record_completed_read(canonical, projection="bounded_preview")
+                is_new = self._evidence.record_completed_read(
+                    canonical,
+                    projection="bounded_preview",
+                )
             else:
-                self._evidence.record_completed_read(canonical, projection="inline")
+                is_new = self._evidence.record_completed_read(
+                    canonical,
+                    projection="inline",
+                )
             if len(str(content)) > 480:
                 self._bounded_projection_seen = True
-            self._last_round_progress = True
+            self._last_round_progress = self._last_round_progress or is_new
 
     def _event_runner(self) -> Any:
         from core.tool_event_loop import ToolEventLoopRunner
@@ -374,6 +428,8 @@ class ProviderReadonlyRoundTripRunner:
         for call in response.tool_calls:
             item = results.get(call.id)
             if item is None:
+                continue
+            if self._attempt_ledger.provider_call_seen(call.id):
                 continue
             self._attempt_ledger.record(
                 ProviderToolAttempt(

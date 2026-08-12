@@ -220,6 +220,35 @@ def test_readonly_roundtrip_rejects_tool_call_during_finalization(monkeypatch):
     assert llm.requests[1].tools == []
 
 
+def test_readonly_roundtrip_does_not_reexecute_and_stops_no_progress(monkeypatch):
+    monkeypatch.setattr(
+        "memory.context_assembly.request_builder.ProviderTokenCounter.from_settings",
+        lambda _settings: _TokenCounter(),
+    )
+    llm = _LLM(
+        [
+            _tool_response(call_id="provider-duplicate-read-1"),
+            _tool_response(call_id="provider-duplicate-read-2"),
+            _tool_response(call_id="provider-duplicate-read-3"),
+        ]
+    )
+    executor = _Executor()
+    runtime = _runtime(llm, executor)
+    result = ProviderReadonlyRoundTripRunner(
+        _Owner(runtime),
+        Task(id="task-duplicate-read", description="Read README"),
+        tools=build_provider_tool_definitions(runtime.tool_registry, ["file_reader"]),
+        read_scope=["README.md", "src/main.py"],
+        max_rounds=3,
+    ).run([LLMMessage(role="user", content="Read the scoped files")])
+
+    assert result.success is False
+    assert result.error_message == "ProviderToolNoProgress"
+    assert len(executor.calls) == 1
+    assert result.evidence_coverage.duplicate_only_rounds == 0
+    assert llm.requests[1].tools
+
+
 def test_readonly_roundtrip_rejects_mutation_tools_at_entry():
     runtime = _runtime(_LLM([]), _Executor())
     with pytest.raises(ValueError, match="read-only"):

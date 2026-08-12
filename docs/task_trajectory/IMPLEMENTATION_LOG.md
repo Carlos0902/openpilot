@@ -4340,3 +4340,31 @@ PYTHONPATH=Code/src pytest -q Code/tests
     no persisted schema or migration changes.
 - Remaining limitation: mutation execution, protocol repair, duplicate/no-
   progress recovery, and complete aggregate parity remain separate slices.
+
+### Read-only provider duplicate and no-progress routing
+
+- Observed failure: the runner partitioned repeated provider calls but then
+  attempted to record the same provider-call identity a second time, and it
+  had no typed no-progress transition. Repeated reads could therefore either
+  re-enter execution or consume rounds without a stable terminal outcome.
+- Validation evidence: the focused read-only/finalization/no-progress set
+  passes 156 tests, including repeated reads with an incomplete declared scope;
+  the executor is called only once and the runner terminates with the typed
+  `ProviderToolNoProgress` code. Compilation and diff validation pass.
+- Implemented fix: consume the existing duplicate partition and
+  `provider_no_progress_transition`, skip duplicate attempt re-recording,
+  preserve bounded duplicate evidence, and count only genuinely new read
+  evidence as round progress. Repeated calls cannot mutate the read execution
+  path.
+- Metadata impact note:
+  - Facts: attempt ledger identity, duplicate partition, declared read scope,
+    new evidence, no-progress count, and round budget.
+  - Authoritative producers: attempt ledger owns provider-call identity;
+    duplicate partition owns replay classification; no-progress policy owns
+    counters and terminal action; runner owns sequencing only.
+  - Lifecycle and control impact: read-only retry termination. No mutation,
+    permission, transport, or persistence authority is added.
+  - Serialization and migration: runtime-only counters and evidence; no
+    persisted schema or migration changes.
+- Remaining limitation: mutation recovery, protocol repair, and full aggregate
+  parity remain separate slices.
