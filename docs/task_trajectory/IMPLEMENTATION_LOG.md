@@ -1,5 +1,23 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Token-aware opt-in prompt-use canary
+
+- Observed failure: token-reduction evidence was not separated from ordinary
+  character-based simulation, making it unclear whether tokenizer metadata was
+  available and whether token accounting was truly opt-in.
+- Reproduction: run the builder-sourced simulation with an offline deterministic
+  token counter and an explicit token-aware assembly policy; assert positive
+  character/token deltas, complete tokenizer metadata, unchanged builder output,
+  no provider calls, and dry-run-only simulation.
+- Implemented fix: add a self-contained BI canary with local canonical hashing,
+  receipt writing, and zero-side-effect accounting. It records tokenizer method,
+  identity, and model without making billing or provider-usage claims.
+- Validation evidence: token-aware canary regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  508 experiment/test lines plus this log entry, below the 3,000-line threshold.
+- Remaining limitation: this is offline token accounting only; it does not
+  call a provider or enable production prompt selection.
+
 ## 2026-08-12 — Builder-sourced prompt-use simulation gate
 
 - Observed failure: the earlier prompt-use simulation used only synthetic
