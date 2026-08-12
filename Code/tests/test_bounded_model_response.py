@@ -154,6 +154,27 @@ def test_invalid_claim_coverage_gets_exactly_one_bounded_repair(tmp_path) -> Non
     assert result.record.root_budget.grounding_repairs_used == 1
 
 
+def test_chinese_claim_segments_cover_response_without_boundary_spaces(tmp_path) -> None:
+    payload = {
+        "response": "你好！有什么我可以帮你的吗？",
+        "claims": [
+            {"text": "你好！"},
+            {"text": "有什么我可以帮你的吗？"},
+        ],
+    }
+    client = _FakeClient([_response(payload), _response(payload)])
+
+    result = BoundedModelResponseController(IterationTurnStore(tmp_path), client).complete(
+        "你好",
+        ingress=_ingress(content="你好"),
+        facts=_facts(),
+    )
+
+    assert result.content == payload["response"]
+    assert result.evidence_required is False
+    assert len(client.calls) == 1
+
+
 def test_pending_provider_request_recovery_fails_closed_without_replay(tmp_path) -> None:
     store = _CrashAfterBoundaryStore(tmp_path, "decision_requested")
     client = _FakeClient(

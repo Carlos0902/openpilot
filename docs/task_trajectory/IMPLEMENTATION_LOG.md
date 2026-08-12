@@ -5301,3 +5301,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
   suites **43 passed**; compileall and diff-check passed.
 - Remaining limitation: this boundary covers zero-tool bounded responses; tool
   execution recovery remains owned by the separate checkpoint/runtime paths.
+
+### Multilingual response-claim coverage
+
+- Observed failure: claim coverage joined adjacent claim text with an inserted
+  space. Chinese responses that legitimately have no boundary space were then
+  rejected and consumed the bounded repair request.
+- Reproduction: return a Chinese response whose claims concatenate exactly to
+  the response without an inter-claim space; assert one provider call and a
+  completed response.
+- Implemented fix: normalize coverage by removing whitespace and comparing
+  case-insensitively while concatenating claims without synthetic separators.
+- Validation evidence: `test_bounded_model_response.py` **22 passed**;
+  compileall and diff-check passed.
+- Remaining limitation: this validates exact normalized coverage only; it does
+  not infer or rewrite claim boundaries.

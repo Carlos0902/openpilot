@@ -1022,8 +1022,11 @@ class BoundedModelResponseController:
 
     @classmethod
     def _validate_claim_coverage(cls, response: _ModelResponse) -> None:
-        combined = " ".join(item.text for item in response.claims)
-        if cls._normalize(combined) != cls._normalize(response.response):
+        def normalize_coverage(value: str) -> str:
+            return "".join(value.split()).casefold()
+
+        combined = "".join(item.text for item in response.claims)
+        if normalize_coverage(combined) != normalize_coverage(response.response):
             raise ValueError("model claims do not cover the complete response")
 
     @staticmethod
