@@ -28,7 +28,10 @@ from memory.session_constraints import (
 )
 from memory.session_dialog import session_turn_ledger_hash
 from memory.rolling_compaction import RollingSummaryRequest, RollingSummaryResult
-from memory.compaction_summary import source_candidate_fingerprint
+from memory.compaction_summary import (
+    source_candidate_binding_hash,
+    source_candidate_fingerprint,
+)
 from metadata import (
     ContextAssemblyPolicy,
     ContextAssemblyResult,
@@ -544,6 +547,9 @@ class MemoryContextBuilder:
                     binding = ContextCompactionBinding(
                         record=record,
                         artifact=reference,
+                        source_binding_hash=source_candidate_binding_hash(
+                            compacted_sources
+                        ),
                     )
                 except Exception as exc:
                     if strict_sources:

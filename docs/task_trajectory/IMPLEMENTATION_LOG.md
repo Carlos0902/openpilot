@@ -1,5 +1,26 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Persist compaction source-binding hashes
+
+- Observed failure: newly created `ContextCompactionBinding` values carried the
+  compaction record and artifact checksum but left `source_binding_hash` empty.
+  Checkpoint reuse therefore required an external compatibility hash and could
+  not prove that the persisted artifact matched the exact source projection.
+- Reproduction: build a context with a compaction sink, checkpoint the binding,
+  replay it through the checkpoint shadow provider, and compare a matching
+  historical binding with a conflicting external hash. Assert the persisted
+  hash is body-free, matching/historical admissions are admitted, conflicts are
+  rejected, and prompt/request/candidate projections remain unchanged.
+- Implemented fix: compute `source_candidate_binding_hash(compacted_sources)`
+  at the existing binding construction boundary and persist it in
+  `ContextCompactionBinding`. No prompt authority or artifact body is added.
+- Validation evidence: source-hash persistence, compaction reuse, shadow, and
+  builder suite **53 passed**; `python -m compileall -q Code/src` and
+  `git diff --check` pass. The implementation diff is 7 additions and 1
+  deletion, with one independent 300-line evidence gate/test pair.
+- Remaining limitation: this only persists and rechecks source identity; it
+  does not authorize reusable summaries for prompt selection.
+
 ## 2026-08-12 — Checkpoint compaction discovery shadow gate
 
 - Observed failure: checkpoint-owned compaction discovery evidence depended on
