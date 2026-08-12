@@ -283,6 +283,11 @@ requires literal mutation opt-in and user confirmation, an explicit write scope,
 an exact validation command, and an authorized post-processing scope at entry;
 it adds no permission or path authority and does not replay an indeterminate
 transport outcome.
+The post-mutation validation runner is a separate bounded handoff. It accepts
+only a completed mutation receipt, rebuilds the narrow post-mutation context,
+exposes `command_executor` alone, admits one exact task-owned validation command,
+and returns the existing validation observation plus mutation transition. A
+successful validation requests finalization; a failed exact command is terminal.
 Final-response routing is another pure transition evaluated before execution.
 A response with tool calls executes tools only when finalization is not pending;
 otherwise it fails as `ProviderToolFinalizationToolCall`. A tool-free response

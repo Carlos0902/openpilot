@@ -4435,3 +4435,33 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: validation failure recovery, protocol repair,
   completion-budget recovery, integration into the autonomous task entry, and
   complete aggregate parity remain separate slices.
+
+### Provider post-mutation validation handoff
+
+- Observed failure: after an admitted mutation receipt, no independent runner
+  rebuilt the narrow post-mutation context and admitted the exact task-owned
+  validation command. Validation could therefore be replanned, omitted, or
+  mixed with the mutation request loop.
+- Validation evidence: the new focused validation suite and the existing
+  mutation/request/context suites pass **61 tests**. Source compilation and
+  `git diff --check` pass.
+- Implemented fix: add `ProviderMutationValidationRoundRunner`. It accepts
+  only a completed mutation round, keeps `command_executor` as the sole
+  provider-visible tool, admits exactly one task-owned command with the existing
+  scope/cwd/permission contracts, executes it through the shared dispatch
+  bridge, and returns `ProviderValidationObservation` plus the existing
+  `ProviderMutationTransition`.
+- Metadata impact note:
+  - Facts: mutation receipt, exact validation command/cwd, provider call
+    identity, validation result, and next mutation transition.
+  - Authoritative producers: post-mutation context owns the bounded prompt;
+    admission owns command identity/permission; dispatch owns execution;
+    validation observation owns success/failure classification; transition owns
+    finalization eligibility; the runner owns sequencing only.
+  - Lifecycle and control impact: one exact validation handoff. No new write,
+    path, command, persistence, replay, or final-answer authority is added.
+  - Serialization and migration: runtime-only result projection; no persisted
+    schema or migration changes.
+- Remaining limitation: final response composition, protocol repair,
+  validation recovery, completion-budget recovery, autonomous task-entry
+  integration, and full aggregate parity remain separate slices.
