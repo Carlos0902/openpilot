@@ -361,3 +361,39 @@ def test_intelligent_autopilot_iterative_improvement_proxy_uses_project_improvem
 
     assert result == {"success": True, "goal": "Improve project"}
     assert proxy.kwargs["session_ingress_state"] is state
+
+
+def test_iterative_improvement_scopes_parent_ingress_to_generated_child(tmp_path) -> None:
+    class FakeProjectImprovementRuntime:
+        def __init__(self):
+            self.kwargs = None
+
+        def run(self, **kwargs):
+            self.kwargs = kwargs
+            return {"success": True}
+
+    parent = tmp_path / "workspace"
+    child = parent / "generated" / "snake"
+    autopilot = IntelligentAutopilot(FakeLLM(), log_file=tmp_path / "autopilot.jsonl")
+    proxy = FakeProjectImprovementRuntime()
+    autopilot.project_improvement_runtime = proxy
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id=autopilot.session_id or "conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root=str(parent),
+        )
+    )
+
+    result = autopilot._run_iterative_improvement(
+        goal="Improve generated project",
+        project_path=child,
+        written_files=[str(child / "app.py")],
+        session_ingress_state=state,
+    )
+
+    assert result == {"success": True}
+    scoped = proxy.kwargs["session_ingress_state"]
+    assert scoped.identity.project_root == str(child.resolve())
+    assert state.identity.project_root == str(parent)

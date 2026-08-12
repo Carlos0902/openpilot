@@ -8,7 +8,7 @@ from memory.session_ingress import (
     SessionTurn,
     validate_resume_identity,
 )
-from metadata import ConversationIdentity
+from metadata import ConversationIdentity, SessionProjectScopeTransition
 from metadata import SessionConstraintLimits
 from autonomous_iteration.intelligent_autopilot import IntelligentAutopilot
 
@@ -110,6 +110,60 @@ def test_assistant_turn_cannot_create_or_activate_constraints() -> None:
 
     assert updated.pending_proposals == []
     assert updated.session_constraints.active_entries == []
+
+
+def test_generated_child_project_scope_transition_preserves_turn_provenance(tmp_path) -> None:
+    parent = tmp_path / "workspace"
+    child = parent / "generated" / "snake"
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root=str(parent),
+        )
+    )
+    state = SessionIngress.open_turn(
+        state,
+        SessionTurn(
+            identity=state.identity.model_copy(update={"turn_index": 1}),
+            message_id="user-1",
+            role="user",
+            content="Create a snake project.",
+        ),
+    )
+
+    scoped = SessionIngress.enter_generated_child_project(state, child)
+
+    assert scoped.identity.project_root == str(child.resolve())
+    assert scoped.session_constraints.project_root == str(child.resolve())
+    assert scoped.turns[0].identity.project_root == str(parent)
+    assert scoped.project_scope_transitions[0].source_project_root == str(parent.resolve())
+    assert scoped.project_scope_transitions[0].target_project_root == str(child.resolve())
+    assert scoped.project_scope_transitions[0].reason == "generated_child_project"
+
+
+def test_generated_child_project_scope_transition_rejects_sibling(tmp_path) -> None:
+    parent = tmp_path / "workspace"
+    sibling = tmp_path / "other-project"
+    state = SessionIngressState(
+        identity=ConversationIdentity(
+            conversation_id="conversation-1",
+            run_id="run-1",
+            turn_index=0,
+            project_root=str(parent),
+        )
+    )
+
+    with pytest.raises(ValueError, match="generated child project"):
+        SessionIngress.enter_generated_child_project(state, sibling)
+
+    with pytest.raises(ValueError, match="generated child"):
+        SessionProjectScopeTransition(
+            source_project_root=str(parent.resolve()),
+            target_project_root=str(sibling.resolve()),
+            turn_index=0,
+        )
 
 
 def test_confirmation_activates_only_selected_proposal() -> None:

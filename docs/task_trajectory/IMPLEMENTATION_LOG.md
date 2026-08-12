@@ -5323,6 +5323,25 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: this slice consumes already-produced evidence receipts;
   provider transport and weather lookup remain owned by their dedicated tools.
 
+### Generated-project session scope lineage
+
+- Observed failure: when a task created a generated child project, session
+  ingress could either retain the parent root without an audited transition or
+  reject the request because cwd/project-path normalization happened before
+  ingress identity was considered. Historical turns then risked being treated
+  as belonging to the new child.
+- Reproduction: enter a generated child under the active root, assert the
+  parent turn keeps its original project root, assert the active identity and
+  constraints move to the child, and reject sibling/outside targets.
+- Implemented fix: add a typed `SessionProjectScopeTransition` lineage,
+  preserve `initial_project_root`, scope iterative improvement through the
+  generated-child reducer, and apply ingress-aware project admission before
+  identity validation.
+- Validation evidence: focused session-ingress and project-improvement runtime
+  suite **21 passed**; compileall and diff-check passed.
+- Remaining limitation: only descendants of the active project root may be
+  entered; sibling and parent transitions remain fail-closed.
+
 ### Multilingual response-claim coverage
 
 - Observed failure: claim coverage joined adjacent claim text with an inserted

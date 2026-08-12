@@ -78,6 +78,7 @@ from metadata import (
 from autonomous_iteration.improvement_context import ImprovementContextHelper
 from autonomous_iteration.project_improvement_runtime import ProjectImprovementRuntime
 from memory.session_dialog import session_turn_ledger_hash
+from memory.session_ingress import SessionIngress
 from autonomous_iteration.task_executor import AutonomousTaskExecutor
 from autonomous_iteration.agents.execution_orchestrator import AgentOrchestrator
 from autonomous_iteration.agents.execution_task_decomposer import TaskDecomposer
@@ -498,7 +499,15 @@ class IntelligentAutopilot:
         """
         self.stats["start_time"] = datetime.now()
         context = self._normalize_execution_context(context or {})
-        requested_root = str(context.get("project_path") or context.get("cwd") or "").strip()
+        raw_ingress = context.get("session_ingress_state")
+        if raw_ingress is not None and not isinstance(raw_ingress, SessionIngressState):
+            raise TypeError("session_ingress_state must be a validated SessionIngressState")
+        requested_root = str(
+            context.get("project_path")
+            or (raw_ingress.identity.project_root if isinstance(raw_ingress, SessionIngressState) else "")
+            or context.get("cwd")
+            or ""
+        ).strip()
         if requested_root:
             decision = resolve_project_execution_scope(goal, requested_root)
             if decision.kind == ProjectScopeKind.REQUIRE_EXPLICIT_PROJECT:
@@ -509,9 +518,12 @@ class IntelligentAutopilot:
             context["cwd"] = str(decision.effective_root)
             if decision.kind == ProjectScopeKind.GENERATED_CHILD_PROJECT:
                 self.console.print(f"[cyan]Project scope:[/cyan] {decision.effective_root}")
-        raw_ingress = context.get("session_ingress_state")
-        if raw_ingress is not None and not isinstance(raw_ingress, SessionIngressState):
-            raise TypeError("session_ingress_state must be a validated SessionIngressState")
+                if isinstance(raw_ingress, SessionIngressState):
+                    raw_ingress = SessionIngress.enter_generated_child_project(
+                        raw_ingress,
+                        decision.effective_root,
+                    )
+                    context["session_ingress_state"] = raw_ingress
         if isinstance(raw_ingress, SessionIngressState):
             for identity_key in ("conversation_id", "session_id"):
                 supplied_identity = str(context.get(identity_key) or "").strip()
@@ -1936,6 +1948,20 @@ class IntelligentAutopilot:
         session_ingress_state: SessionIngressState | None = None,
     ) -> dict[str, Any] | None:
         """Run fixed-count validation and improvement loop."""
+        active_ingress = (
+            session_ingress_state
+            if session_ingress_state is not None
+            else (
+                self._current_execution_context.get("session_ingress_state")
+                if isinstance(getattr(self, "_current_execution_context", None), dict)
+                else None
+            )
+        )
+        if active_ingress is not None:
+            active_ingress = SessionIngress.enter_generated_child_project(
+                active_ingress,
+                project_path,
+            )
         return self.project_improvement_runtime.run(
             goal=goal,
             project_path=project_path,
@@ -1949,15 +1975,7 @@ class IntelligentAutopilot:
                 if getattr(getattr(self, "runtime_controller", None), "state", None) is not None
                 else None
             ),
-            session_ingress_state=(
-                session_ingress_state
-                if session_ingress_state is not None
-                else (
-                    self._current_execution_context.get("session_ingress_state")
-                    if isinstance(getattr(self, "_current_execution_context", None), dict)
-                    else None
-                )
-            ),
+            session_ingress_state=active_ingress,
         )
 
     def _sync_project_environment(

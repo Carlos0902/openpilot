@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
@@ -437,15 +438,41 @@ class SessionTurn(BaseModel):
     content: str = Field(max_length=64_000)
 
 
+class SessionProjectScopeTransition(BaseModel):
+    """Audited transition from a session-owned project to its generated child."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
+
+    source_project_root: str = Field(min_length=1)
+    target_project_root: str = Field(min_length=1)
+    reason: Literal["generated_child_project"] = "generated_child_project"
+    turn_index: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _target_is_canonical_child(self) -> "SessionProjectScopeTransition":
+        source = Path(self.source_project_root).expanduser().resolve(strict=False)
+        target = Path(self.target_project_root).expanduser().resolve(strict=False)
+        if str(source) != self.source_project_root or str(target) != self.target_project_root:
+            raise ValueError("session project scope transition roots must be canonical")
+        if target == source or not target.is_relative_to(source):
+            raise ValueError("session project scope transition target must be a generated child")
+        return self
+
+
 class SessionIngressState(BaseModel):
     """Conversation-scoped ingress state, separate from long-term memory."""
 
     model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
 
     identity: ConversationIdentity
+    initial_project_root: str = ""
     turns: list[SessionTurn] = Field(default_factory=list)
     pending_proposals: list[SessionConstraintProposal] = Field(default_factory=list)
     session_constraints: SessionConstraintState = Field(default_factory=SessionConstraintState)
+    project_scope_transitions: list[SessionProjectScopeTransition] = Field(
+        default_factory=list,
+        max_length=16,
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -469,6 +496,8 @@ class SessionIngressState(BaseModel):
                 "session_id": str(identity_conversation_id or ""),
                 "project_root": str(identity_project_root or ""),
             }
+        if not migrated.get("initial_project_root") and identity_project_root:
+            migrated["initial_project_root"] = str(identity_project_root)
         return migrated
 
     @model_validator(mode="after")
@@ -492,9 +521,25 @@ class SessionIngressState(BaseModel):
             _validate_constraint_value_limits(proposal.value, limits)
         if any(proposal.session_id != self.identity.conversation_id for proposal in self.pending_proposals):
             raise ValueError("session ingress proposal conversation identity differs")
+        if not self.initial_project_root:
+            raise ValueError("session ingress initial project root is required")
+        permitted_project_roots = {self.initial_project_root, self.identity.project_root}
+        expected_source: str | None = self.initial_project_root
+        previous_transition_turn = -1
+        for transition in self.project_scope_transitions:
+            if transition.source_project_root != expected_source:
+                raise ValueError("session project scope transition lineage is discontinuous")
+            permitted_project_roots.add(transition.source_project_root)
+            permitted_project_roots.add(transition.target_project_root)
+            expected_source = transition.target_project_root
+            if transition.turn_index < previous_transition_turn or transition.turn_index > self.identity.turn_index:
+                raise ValueError("session project scope transition turn index is invalid")
+            previous_transition_turn = transition.turn_index
+        if expected_source != self.identity.project_root:
+            raise ValueError("session project scope transition does not reach active identity")
         if any(
             turn.identity.conversation_id != self.identity.conversation_id
-            or turn.identity.project_root != self.identity.project_root
+            or turn.identity.project_root not in permitted_project_roots
             for turn in self.turns
         ):
             raise ValueError("session ingress turn identity differs")

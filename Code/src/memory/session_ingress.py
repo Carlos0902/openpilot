@@ -7,6 +7,7 @@ unconfirmed proposal as runtime authority.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from metadata import (
@@ -14,6 +15,7 @@ from metadata import (
     SessionConstraintProposalStatus,
     SessionConstraintState,
     SessionIngressState,
+    SessionProjectScopeTransition,
     SessionTurn,
 )
 from memory.session_constraints import (
@@ -102,6 +104,35 @@ class SessionIngress:
                 "turns": [*state.turns, turn],
                 "pending_proposals": proposals,
                 "session_constraints": constraints,
+            }
+        )
+        return _validated_state(updated)
+
+    @staticmethod
+    def enter_generated_child_project(
+        state: SessionIngressState,
+        project_root: str | Path,
+    ) -> SessionIngressState:
+        """Scope a session to one generated descendant without admitting siblings."""
+
+        source_root = Path(state.identity.project_root).expanduser().resolve(strict=False)
+        target_root = Path(project_root).expanduser().resolve(strict=False)
+        if target_root == source_root:
+            return state
+        if not target_root.is_relative_to(source_root):
+            raise ValueError("generated child project must remain inside the active session project root")
+        transition = SessionProjectScopeTransition(
+            source_project_root=state.identity.project_root,
+            target_project_root=str(target_root),
+            turn_index=state.identity.turn_index,
+        )
+        identity = state.identity.model_copy(update={"project_root": str(target_root)})
+        constraints = state.session_constraints.model_copy(update={"project_root": str(target_root)})
+        updated = state.model_copy(
+            update={
+                "identity": identity,
+                "session_constraints": constraints,
+                "project_scope_transitions": [*state.project_scope_transitions, transition],
             }
         )
         return _validated_state(updated)
