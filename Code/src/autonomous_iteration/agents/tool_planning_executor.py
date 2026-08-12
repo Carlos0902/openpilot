@@ -230,6 +230,28 @@ class ToolPlanningTaskExecutor:
             selection,
         )
 
+    def execute_provider_readonly_task(
+        self,
+        task: Task,
+        context: TaskExecutionContext,
+        *,
+        tool_names: list[str],
+        max_rounds: int | None = None,
+    ) -> TaskExecutionResult:
+        """Run the explicit provider read-only entry without changing the default planner."""
+
+        from autonomous_iteration.provider_readonly_task_entry import (
+            execute_provider_readonly_task,
+        )
+
+        return execute_provider_readonly_task(
+            self,
+            task,
+            context,
+            tool_names=tool_names,
+            max_rounds=max_rounds,
+        )
+
     def _reasoning_policy_for_task(self, task: Task | None = None) -> ReasoningPolicy:
         active_task = task or getattr(self, "_active_task", None)
         routine = False

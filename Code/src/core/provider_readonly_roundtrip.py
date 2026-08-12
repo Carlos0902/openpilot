@@ -42,6 +42,7 @@ class ProviderReadonlyRoundTripRunner:
         *,
         tools: Sequence[LLMToolDefinition],
         read_scope: Sequence[str] | None = None,
+        project_path: str | None = None,
         max_rounds: int = 3,
         max_tokens: int | None = None,
         context_max_prompt_tokens: int | None = None,
@@ -62,6 +63,7 @@ class ProviderReadonlyRoundTripRunner:
         self.task = task
         self.tools = tuple(tool.model_copy(deep=True) for tool in tools)
         self.read_scope = tuple(read_scope or ())
+        self.project_path = str(project_path or "").strip() or None
         self.max_rounds = max_rounds
         self.max_tokens = max_tokens
         self.context_max_prompt_tokens = context_max_prompt_tokens
@@ -146,7 +148,7 @@ class ProviderReadonlyRoundTripRunner:
                     response.tool_calls,
                     ledger=self._attempt_ledger,
                     round_index=round_index,
-                    project_path=None,
+                    project_path=self.project_path,
                 )
                 admissions = admit_provider_tool_calls(
                     list(partition.new_calls),
@@ -158,6 +160,7 @@ class ProviderReadonlyRoundTripRunner:
                     user_confirmed=False,
                     allow_mutations=False,
                     read_scope=self.read_scope,
+                    project_path=self.project_path,
                 )
                 loop_result = dispatch_provider_execution_batch(
                     self._event_runner(),

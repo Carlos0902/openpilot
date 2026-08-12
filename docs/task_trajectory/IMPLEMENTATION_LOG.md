@@ -4284,3 +4284,31 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: task-entry integration, mutation execution, explicit
   finalization, duplicate/no-progress recovery, and full aggregate parity are
   separate follow-up slices.
+
+### Explicit read-only provider task entry
+
+- Observed failure: the bounded read-only runner was callable in isolation but
+  was not exposed through the task executor, so a real task could not opt into
+  the verified provider route. The default JSON planner also had no typed
+  read-only boundary at that entry point.
+- Validation evidence: eight focused tests pass for default-off behavior,
+  successful canary execution, write-scope rejection, mutation-tool rejection,
+  and project-root forwarding. The adjacent read-only runner/request suite
+  passes; source compilation and diff validation are run before submission.
+- Implemented fix: add a thin `ToolPlanningTaskExecutor` proxy and a typed
+  read-only entry adapter. It requires the explicit provider flag, non-empty
+  read scope, a unique read-only tool allowlist, a canary/real-read-only
+  budget profile, an active runtime controller, and forwards project root to
+  the runner. It does not alter the default planner or expose mutation tools.
+- Metadata impact note:
+  - Facts: existing settings flag, task read/write scopes, tool registry
+    capabilities, runtime budget, project root, and provider result envelope.
+  - Authoritative producers: settings own enablement/budget, task owns scopes,
+    registry owns capabilities, runner owns request/execution sequencing, and
+    the adapter owns only entry validation/result mapping.
+  - Lifecycle and control impact: explicit read-only task entry only; no new
+    mutation, confirmation, persistence, or transport authority.
+  - Serialization and migration: task result attributes are runtime output;
+    no persisted schema or migration changes.
+- Remaining limitation: mutation task entry, finalization, duplicate/no-progress
+  recovery, and full aggregate integration remain separate slices.
