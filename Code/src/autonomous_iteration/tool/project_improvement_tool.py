@@ -787,13 +787,23 @@ def _read_project_previews(project_path: Path, written_files: list[str]) -> list
         if not path.exists() or path.is_dir():
             continue
         text = _read_text(path)
-        preview = _truncate_text(
-            text,
-            PROJECT_FILE_PREVIEW_LIMIT,
-            suffix="\n[Preview truncated; inspect the actual file before concluding code is missing.]",
-        )
+        preview = _head_tail_preview(text, PROJECT_FILE_PREVIEW_LIMIT)
         previews.append(f"FILE: {path.name}\n{preview}")
     return previews
+
+
+def _head_tail_preview(text: str, limit: int) -> str:
+    suffix = "\n[Middle omitted; use both visible regions before concluding behavior is missing.]\n"
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(suffix):
+        return text[:limit]
+    available = max(0, limit - len(suffix))
+    head_limit = available // 2
+    tail_limit = available - head_limit
+    return text[:head_limit].rstrip() + suffix + text[-tail_limit:].lstrip()
 
 
 def _truncate_text(text: str, limit: int, suffix: str = "\n[Truncated.]") -> str:

@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from autonomous_iteration.tool.project_improvement_tool import project_improvement_tool_executor
+from autonomous_iteration.tool.project_improvement_tool import (
+    _head_tail_preview,
+    project_improvement_tool_executor,
+)
 from memory.session_dialog import session_turn_ledger_hash
 from metadata import ConversationIdentity, SessionIngressState, SessionTurn, ToolInputMetadata
 
@@ -86,6 +89,39 @@ def test_project_improvement_accepts_only_a_bounded_analysis_delta_and_maps_lega
     assert "evidence_ids" in rendered
     assert "prompt_context" not in result.annotations
     assert "MUST_NOT_ESCAPE_THE_MODEL_BOUNDARY" not in str(result.to_json_dict())
+
+
+def test_project_improvement_request_includes_bounded_head_and_tail_project_evidence(tmp_path) -> None:
+    llm = _DeltaLLM(
+        parsed_json={
+            "changed_signals": ["A remaining gap exists."],
+            "proposed_actions": ["Implement one remaining gap."],
+            "next_decision_or_goal": "Implement the remaining gap.",
+            "must_satisfy": ["Preserve existing behavior."],
+            "blocking_risks": [],
+            "evidence_ids": [],
+            "stack_preset_patch": {},
+        }
+    )
+    source = tmp_path / "game.py"
+    source.write_text(
+        "HEAD_SENTINEL\n" + ("x = 1\n" * 500) + "TAIL_SCORE_AND_RESTART_SENTINEL\n",
+        encoding="utf-8",
+    )
+
+    _execute(tmp_path, llm, written_files=[str(source)])
+
+    request, _ = llm.requests[0]
+    rendered = "\n".join(message.content for message in request.messages)
+    assert "HEAD_SENTINEL" in rendered
+    assert "TAIL_SCORE_AND_RESTART_SENTINEL" in rendered
+    assert "Do not propose behavior already present" in rendered
+
+
+def test_head_tail_preview_remains_bounded_when_limit_is_smaller_than_marker() -> None:
+    preview = _head_tail_preview("0123456789" * 20, 8)
+
+    assert len(preview) <= 8
 
 
 def test_project_improvement_request_consumes_ingress_dialog_and_typed_constraints(tmp_path) -> None:

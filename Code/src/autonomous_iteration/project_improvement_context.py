@@ -538,7 +538,9 @@ def build_project_improvement_analysis_candidates(
             content=(
                 "You are OpenPilot's Project Improvement Agent. Assess the next "
                 "highest-value improvement after hard validation. Return only valid "
-                "JSON and preserve all stated safety and product constraints."
+                "JSON and preserve all stated safety and product constraints. "
+                "Do not propose behavior already present in the supplied project "
+                "evidence; choose a concrete remaining gap instead."
             ),
             priority=100,
             source_order=0,
