@@ -4368,3 +4368,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
     persisted schema or migration changes.
 - Remaining limitation: mutation recovery, protocol repair, and full aggregate
   parity remain separate slices.
+
+### Admitted provider mutation round execution
+
+- Observed failure: mutation admission, patch-artifact binding, execution
+  bridge, and receipt projection existed as separate helpers, but no narrow
+  adapter composed them into one independently testable mutation round.
+  Integrating mutation execution directly into the read-only runner would have
+  widened its authority boundary.
+- Validation evidence: 131 focused mutation/provider tests pass, including
+  successful patch execution and body-free receipt projection, rejected missing
+  validation/scope facts, rejected read admissions, single-round preflight and
+  execution failures, artifact binding, and result/wire projection. Source
+  compilation and `git diff --check` pass.
+- Implemented fix: add a typed mutation-round adapter that requires only
+  admitted `file_patch_writer` calls, an exact validation command, and a
+  non-empty authorized post-processing write scope; it reuses the existing
+  single-round preflight/execution bridge and `provider_mutation_receipt`.
+  Mutation request planning, validation execution, and recovery remain out of
+  scope.
+- Metadata impact note:
+  - Facts: admitted mutation calls, response identity, round index, artifact
+    ledger, validation command, post-processing scope, execution evidence, and
+    mutation receipt.
+  - Authoritative producers: admission owns permission; artifact binding owns
+    code-reference resolution; single-round execution owns lifecycle effects;
+    receipt projection owns body-free mutation evidence; the adapter owns only
+    sequencing and stage errors.
+  - Lifecycle and control impact: one already-authorized mutation round. It
+    grants no new permission and does not execute validation.
+  - Serialization and migration: runtime-only result and receipt; no persisted
+    schema or migration changes.
+- Remaining limitation: mutation request-loop integration, validation
+  observation/transition, recovery, and complete aggregate parity remain
+  separate slices.
