@@ -12,7 +12,7 @@ This package contains reusable utilities inspired by Claude Code best practices:
 - tree_viz: Tree visualization for nested structures
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.0.dev11"
 
 # Import commonly used utilities for convenience
 from .cache import (

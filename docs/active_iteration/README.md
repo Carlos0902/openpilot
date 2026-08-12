@@ -6,6 +6,7 @@
 
 | 目的 | 文档 | 定位 |
 |---|---|---|
+| 当前开发版发布说明 | [DEVELOPMENT_RELEASE_0_1_0_DEV11.md](./DEVELOPMENT_RELEASE_0_1_0_DEV11.md) | `0.1.0.dev11` 的包身份、覆盖边界和独立版本校验 |
 | 对外或管理层汇报 | [ACTIVE_ITERATION_PROGRESS_REPORT_CN.md](./ACTIVE_ITERATION_PROGRESS_REPORT_CN.md) | 中文进度、结论、边界和下一步 |
 | 技术评审 | [ACTIVE_ITERATION_EXPERIMENT_REVIEW.md](./ACTIVE_ITERATION_EXPERIMENT_REVIEW.md) | 当前完整证据综述和复现入口 |
 | 实验审计 | [ACTIVE_ITERATION_EXPERIMENT_LOG.md](./ACTIVE_ITERATION_EXPERIMENT_LOG.md) | 追加式协议、失败、结果和证据等级账本 |
