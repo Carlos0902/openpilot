@@ -4253,3 +4253,34 @@ PYTHONPATH=Code/src pytest -q Code/tests
     or migration changes.
 - Remaining limitation: the read-only runner still needs explicit
   finalization, duplicate/recovery, and task-entry integration slices.
+
+### Bounded read-only provider round-trip runner
+
+- Observed failure: provider-native tool contracts and execution bridges were
+  present, but no standalone runner performed the real request -> admission ->
+  read execution -> typed result -> continuation cycle. The aggregate runner
+  behavior therefore could not be reproduced from the stacked branch.
+- Validation evidence: seven focused regression tests pass for one successful
+  read continuation, mutation rejection at entry, empty provider responses,
+  continuation assembly, and the adjacent request/result boundaries. The
+  broader provider execution subset passes 39 tests; source compilation and
+  `git diff --check` pass.
+- Implemented fix: add a bounded read-only runner that consumes the immutable
+  request plan and request builder, admits only read calls, dispatches through
+  the existing execution bridge, projects exact result identities, appends the
+  provider wire exchange, and records typed attempt evidence. It performs no
+  mutation, finalization, protocol repair, or task-entry routing.
+- Metadata impact note:
+  - Facts: existing runtime budget, task/session identity, read scope,
+    registered tool contracts, provider responses, and tool-loop evidence.
+  - Authoritative producers: request plan owns request facts; admission owns
+    permission; execution bridge owns lifecycle side effects; result batch and
+    wire exchange own provider-visible projections; runner owns only their
+    sequencing.
+  - Lifecycle and control impact: read-only provider execution only. Mutation
+    authority is rejected at constructor entry.
+  - Serialization and migration: runtime-only runner/result alias; no
+    persisted schema or migration changes.
+- Remaining limitation: task-entry integration, mutation execution, explicit
+  finalization, duplicate/no-progress recovery, and full aggregate parity are
+  separate follow-up slices.
