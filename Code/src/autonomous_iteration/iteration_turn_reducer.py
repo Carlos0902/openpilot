@@ -7,13 +7,17 @@ from metadata import (
     AssistantLedgerCommitState,
     AssistantTurnCommit,
     CompletedResponseOutcome,
+    CompletionObligation,
+    ControlledStopOutcome,
     GroundingDecision,
     IterationBoundary,
     IterationControlCursor,
+    IterationPendingProviderRequest,
     IterationTurnRecordMetadata,
     NoTaskBinding,
     PreparedTaskBinding,
     ResponseCandidate,
+    RootDecisionBudget,
 )
 
 
@@ -48,8 +52,12 @@ class IterationTurnReducer:
         outcome: CompletedResponseOutcome,
         assistant_commit: AssistantTurnCommit,
     ) -> IterationTurnRecordMetadata:
-        if record.outcome is not None or record.response_candidate is not None:
+        if record.outcome is not None:
             raise IterationTurnTransitionError("response preparation requires an incomplete turn")
+        if record.response_candidate is not None and (
+            record.response_candidate != candidate or record.grounding_decision != grounding
+        ):
+            raise IterationTurnTransitionError("response preparation differs from durable candidate")
         if not isinstance(record.task_binding, NoTaskBinding):
             raise IterationTurnTransitionError("task-bound turn cannot prepare a response")
         if assistant_commit.state != AssistantLedgerCommitState.PENDING:
@@ -63,6 +71,111 @@ class IterationTurnReducer:
             grounding_decision=grounding,
             outcome=outcome,
             assistant_commit=assistant_commit,
+        )
+
+    @classmethod
+    def record_response_candidate(
+        cls,
+        record: IterationTurnRecordMetadata,
+        *,
+        cursor: IterationControlCursor,
+        candidate: ResponseCandidate,
+        grounding: GroundingDecision,
+        obligations: tuple[CompletionObligation, ...],
+    ) -> IterationTurnRecordMetadata:
+        if record.response_candidate is not None or record.outcome is not None:
+            raise IterationTurnTransitionError("response candidate is already durable")
+        return cls._validated_copy(
+            record,
+            record_id=f"{record.record_id}-candidate",
+            boundary=IterationBoundary.COMPLETION_CANDIDATE_RECORDED,
+            cursor=cursor,
+            obligations=obligations,
+            response_candidate=candidate,
+            grounding_decision=grounding,
+        )
+
+    @classmethod
+    def request_provider(
+        cls,
+        record: IterationTurnRecordMetadata,
+        *,
+        request: IterationPendingProviderRequest,
+        root_budget: RootDecisionBudget,
+    ) -> IterationTurnRecordMetadata:
+        if record.cursor.pending_provider_request is not None:
+            raise IterationTurnTransitionError("provider request is already pending")
+        cls._validate_budget_progress(record.root_budget, root_budget)
+        if (
+            root_budget.root_provider_calls_used
+            != record.root_budget.root_provider_calls_used + 1
+            or root_budget.decision_rounds_used != record.root_budget.decision_rounds_used + 1
+        ):
+            raise IterationTurnTransitionError(
+                "provider request must consume one root call and decision round"
+            )
+        cursor = record.cursor.model_copy(
+            update={
+                "decision_ordinal": record.cursor.decision_ordinal + 1,
+                "phase": "ground_response",
+                "pending_provider_request": request,
+            }
+        )
+        return cls._validated_copy(
+            record,
+            record_id=f"{record.record_id}-request-{request.request_ordinal}",
+            boundary=IterationBoundary.DECISION_REQUESTED,
+            cursor=cursor,
+            root_budget=root_budget,
+        )
+
+    @classmethod
+    def finish_provider_request(
+        cls,
+        record: IterationTurnRecordMetadata,
+        *,
+        root_budget: RootDecisionBudget,
+        progress_signature: str,
+    ) -> IterationTurnRecordMetadata:
+        if record.cursor.pending_provider_request is None:
+            raise IterationTurnTransitionError("provider observation requires a pending request")
+        cls._validate_budget_progress(record.root_budget, root_budget)
+        cursor = record.cursor.model_copy(
+            update={
+                "pending_provider_request": None,
+                "decision_progress_signature": progress_signature,
+            }
+        )
+        return cls._validated_copy(
+            record,
+            record_id=f"{record.record_id}-observed",
+            boundary=IterationBoundary.DECISION_RECORDED,
+            cursor=cursor,
+            root_budget=root_budget,
+        )
+
+    @classmethod
+    def stop(
+        cls,
+        record: IterationTurnRecordMetadata,
+        *,
+        outcome: ControlledStopOutcome,
+    ) -> IterationTurnRecordMetadata:
+        if record.outcome is not None:
+            raise IterationTurnTransitionError("turn already has a terminal outcome")
+        cursor = record.cursor.model_copy(
+            update={
+                "phase": "stopped",
+                "current_disposition": "controlled_stop",
+                "pending_provider_request": None,
+            }
+        )
+        return cls._validated_copy(
+            record,
+            record_id=f"{record.record_id}-stopped",
+            boundary=IterationBoundary.DECISION_RECORDED,
+            cursor=cursor,
+            outcome=outcome,
         )
 
     @classmethod
@@ -116,6 +229,22 @@ class IterationTurnReducer:
             }
         )
         return IterationTurnRecordMetadata.model_validate(candidate.model_dump(mode="python"))
+
+    @staticmethod
+    def _validate_budget_progress(
+        before: RootDecisionBudget,
+        after: RootDecisionBudget,
+    ) -> None:
+        fields = (
+            "decision_rounds_used",
+            "root_provider_calls_used",
+            "response_completion_tokens_used",
+            "grounding_repairs_used",
+            "decomposition_calls_used",
+            "no_progress_rounds",
+        )
+        if any(getattr(after, field) < getattr(before, field) for field in fields):
+            raise IterationTurnTransitionError("root decision budget usage cannot decrease")
 
 
 __all__ = ["IterationTurnReducer", "IterationTurnTransitionError"]

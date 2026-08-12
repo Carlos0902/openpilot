@@ -13,6 +13,7 @@ from metadata import (
     IterationAuthorityState,
     IterationControlCursor,
     IterationTurnRecordMetadata,
+    IterationPendingProviderRequest,
     PreTaskState,
     PreparedTaskBinding,
     RootDecisionBudget,
@@ -93,3 +94,29 @@ def test_reducer_rejects_skipped_or_identity_changing_task_transition() -> None:
     changed = active.model_copy(update={"task_id": "other-task"})
     with pytest.raises(IterationTurnTransitionError, match="identity"):
         IterationTurnReducer.activate_task(prepared_record, changed)
+
+
+def test_reducer_enforces_monotonic_root_provider_budget() -> None:
+    record = _record()
+    request = IterationPendingProviderRequest(
+        request_id="request-1",
+        request_ordinal=1,
+        request_hash="sha256:" + "1" * 64,
+        request_ref=_artifact("provider_request"),
+        purpose="response",
+    )
+    consumed = record.root_budget.model_copy(
+        update={"decision_rounds_used": 1, "root_provider_calls_used": 1}
+    )
+    requested = IterationTurnReducer.request_provider(
+        record, request=request, root_budget=consumed
+    )
+
+    assert requested.cursor.pending_provider_request == request
+    assert requested.root_budget.root_provider_calls_used == 1
+    with pytest.raises(IterationTurnTransitionError, match="consume one"):
+        IterationTurnReducer.request_provider(
+            record,
+            request=request,
+            root_budget=record.root_budget,
+        )

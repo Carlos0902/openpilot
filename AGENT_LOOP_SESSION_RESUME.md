@@ -31,6 +31,20 @@ materialization, current session-authority freshness/revocation checks, and the
 transition to an active `RuntimeCheckpointMetadata` remain mandatory gates
 before the unified entry can be enabled.
 
+The deterministic response subset uses these primitives behind the default-off
+unified-entry flag. General model responses and evidence/task materialization
+remain offline until their later handoff gates pass.
+
+A bounded model response persists its zero-tool provider request before
+transport and clears that pending request only with a bounded provider-response
+artifact/progress signature. At most one repair request is legal. A project or
+current-external claim produces an evidence-required candidate rather than an
+assistant ledger commit. Provider failure, unexpected tool calls, schema/claim
+coverage failure after repair, or token-budget exhaustion produces a durable
+controlled stop; free-form provider errors never authorize retry or task
+materialization. Full provider-response crash replay is added with the later
+recovery package and must not be inferred from a prepared request alone.
+
 ## Source of truth
 
 `RuntimeStateMetadata.recovery_status` is the current operational status;
