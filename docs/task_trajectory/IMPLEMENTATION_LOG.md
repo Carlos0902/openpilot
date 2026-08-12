@@ -5214,6 +5214,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
   of this PR; this change only carries the runtime contract and controller
   behavior.
 
+### Durable checkpoint tool-input projection
+
+- Observed failure: checkpoint creation and recovery copied tool input metadata
+  including runtime-only handles such as locks and execution contexts. Those
+  values are not durable facts and can break serialization or replay.
+- Reproduction: construct a tool input with a transient handle, pass it through
+  the checkpoint input projection, and assert that serializable command facts
+  remain while `runtime_handles` is empty.
+- Implemented fix: add one canonical durable-input copier and use it for
+  checkpoint creation, result observation, validation handoff, and recovery
+  replay.
+- Validation evidence: `test_agent_runtime_controller.py` **85 passed**;
+  compileall and diff-check passed.
+- Remaining limitation: runtime-only handles remain available to the live tool
+  call; this change only prevents them from entering durable checkpoint state.
+
 ### Interactive validation safety
 
 - Observed failure: GUI/game validation used import-only execution, which could
