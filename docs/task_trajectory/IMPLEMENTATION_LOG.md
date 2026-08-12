@@ -5213,3 +5213,18 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: the development-only three-arm experiment is not part
   of this PR; this change only carries the runtime contract and controller
   behavior.
+
+### Interactive validation safety
+
+- Observed failure: GUI/game validation used import-only execution, which could
+  still start a window or block the validator; an unguarded top-level event loop
+  was not rejected before subprocess launch.
+- Reproduction: evaluate a guarded pygame entry and an unguarded top-level loop;
+  assert the guarded case uses one bounded `py_compile` command and the
+  unguarded case fails before execution.
+- Implemented fix: detect unprotected interactive startup statically and use
+  bounded compile-only smoke validation for interactive Python projects.
+- Validation evidence: `test_project_evaluator.py` **23 passed**; compileall and
+  diff-check passed.
+- Remaining limitation: this PR does not launch applications; launch is a
+  separate user-confirmed delivery action.
