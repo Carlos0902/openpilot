@@ -3960,3 +3960,36 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: the multi-round controller still needs to consume this
   action and compose it with result, finalization, and no-progress transitions.
+
+### Typed provider completion outcome
+
+- Observed failure: the aggregate loop inferred completion from several response
+  fields inline. A truncated response carrying tool calls could be treated as
+  progress, while blank content and malformed finish reasons were not distinct
+  typed outcomes.
+- Validation evidence: the regression suite first fails because no standalone
+  completion classifier exists. Eight focused tests pass after implementation
+  for normal completion, tool progress, truncation precedence, empty response,
+  case normalization, and invalid response facts. The adjacent
+  completion/repair/recovery set passes 45 and the complete provider-focused set
+  passes 612. The complete repository suite passes 1,708 in an isolated
+  detached worktree, followed by successful source compilation and diff
+  validation.
+- Implemented fix: add one pure classifier returning `normal`, `tool_progress`,
+  `truncated`, or `empty_response`. It validates finish reason, applies explicit
+  precedence, and performs no continuation, request, or execution.
+- Metadata impact note:
+  - Facts: existing `LLMResponse` content, tool calls, and finish reason.
+  - Authoritative producer: provider transport owns the response; this module
+    derives one runtime outcome.
+  - Lifecycle and control impact: runtime continuation routing only. No request,
+    tool execution, state mutation, file I/O, or persistence.
+  - Existing contracts reviewed: `LLMResponse`, completion outcome vocabulary,
+    final-response transition, public metadata inventory, and metadata
+    development conventions.
+  - Decision: use a strict core enum rather than repeat response-field branches
+    in the multi-round controller.
+  - Serialization and migration: runtime-only value; no persisted shape or
+    migration changes.
+- Remaining limitation: the multi-round controller still needs to consume this
+  outcome together with finalization, repair, and no-progress transitions.

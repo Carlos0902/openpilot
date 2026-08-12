@@ -175,6 +175,9 @@ terminal; the policy performs no retry or execution.
 The separate repair transition gates model-visible protocol repair: at most one
 eligible request, with explicit exhausted and no-budget failures. Disabled or
 non-repairable protocol failures do not request repair.
+Provider response classification is centralized in one enum. Truncation wins
+over simultaneous tool calls, tool progress wins over content, and blank
+tool-free responses remain explicit empty responses.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

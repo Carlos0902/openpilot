@@ -308,6 +308,10 @@ failure is in the repairable protocol subset, it permits one repair request;
 repeated attempts return `ProviderToolProtocolRepairExhausted`, and an eligible
 failure on the last round returns `ProviderToolProtocolRepairBudgetUnavailable`.
 Disabled or non-repairable failures produce no repair action.
+Completion outcome is a separate pure enum: `normal`, `tool_progress`,
+`truncated`, or `empty_response`. A `length`/`max_tokens` finish reason takes
+precedence over tool calls, then tool calls take precedence over content; a
+tool-free blank response is never normal completion.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

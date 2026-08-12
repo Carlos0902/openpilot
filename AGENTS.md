@@ -110,6 +110,9 @@ update this file together with `API.md`.
 - Model-visible protocol repair must use one bounded transition: disabled or
   non-repairable failures do nothing, one eligible repair may be requested, and
   repeated/last-round cases fail with stable typed codes.
+- Provider completion outcome must be classified once from strict response
+  facts. Truncation takes precedence over tool progress; empty content is not
+  normal completion; free-form finish-reason text cannot control other states.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
