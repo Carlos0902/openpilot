@@ -172,6 +172,9 @@ can continue, a bounded protocol-repair subset can request repair, and execution
 errors continue only with explicit file-read-only capabilities. Mutation, shell,
 checkpoint, indeterminate-side-effect, and non-recoverable failures are
 terminal; the policy performs no retry or execution.
+The separate repair transition gates model-visible protocol repair: at most one
+eligible request, with explicit exhausted and no-budget failures. Disabled or
+non-repairable protocol failures do not request repair.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

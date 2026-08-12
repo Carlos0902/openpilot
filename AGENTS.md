@@ -107,6 +107,9 @@ update this file together with `API.md`.
   capability evidence. Only recoverable admission failures or read-only tool
   failures may continue; protocol repair is a separate action, while mutation,
   shell, checkpoint, and indeterminate-side-effect failures remain terminal.
+- Model-visible protocol repair must use one bounded transition: disabled or
+  non-repairable failures do nothing, one eligible repair may be requested, and
+  repeated/last-round cases fail with stable typed codes.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

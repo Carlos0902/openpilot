@@ -3926,3 +3926,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: protocol-repair budget and the bounded multi-round
   controller still need to consume this recovery action.
+
+### Typed provider protocol-repair transition
+
+- Observed failure: aggregate model-visible protocol repair used repeated-call,
+  failure-count, feature-flag, and round-budget branches inline. A second
+  protocol failure could therefore consume another repair opportunity or fall
+  through to a generic round-limit error.
+- Validation evidence: the regression suite first fails because no standalone
+  protocol-repair transition exists. Fourteen focused tests pass after
+  implementation for one repair request, disabled/nonrepairable paths, repeated
+  and count-exhausted failure, last-round budget failure, and invalid state
+  facts. The adjacent repair/recovery/no-progress set passes 59 and the complete
+  provider-focused set passes 604. The complete repository suite passes 1,700
+  in an isolated detached worktree, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add one pure transition returning none, request repair, or
+  fail with stable exhausted/budget-unavailable enum codes. It performs no retry,
+  request, tool execution, state mutation, or I/O.
+- Metadata impact note:
+  - Facts: existing repair feature flag, repeated protocol identity, repairable
+    failure classification, failure count, and round budget.
+  - Authoritative producers: failure policy owns repairability; attempt ledger
+    owns repeated/count facts; controller owns feature flag and round position.
+  - Lifecycle and control impact: runtime retry routing only. It adds no
+    authority and cannot invoke a provider or tool.
+  - Existing contracts reviewed: failure recovery policy, attempt/protocol
+    identity, provider round bounds, public metadata inventory, and metadata
+    development conventions.
+  - Decision: use strict core enums and a frozen derived value rather than inline
+    retry counters or a new persisted metadata kind.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: the multi-round controller still needs to consume this
+  action and compose it with result, finalization, and no-progress transitions.
