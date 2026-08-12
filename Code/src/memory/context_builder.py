@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -27,6 +28,7 @@ from memory.session_constraints import (
 )
 from memory.session_dialog import session_turn_ledger_hash
 from memory.rolling_compaction import RollingSummaryRequest, RollingSummaryResult
+from memory.compaction_summary import source_candidate_fingerprint
 from metadata import (
     ContextAssemblyPolicy,
     ContextAssemblyResult,
@@ -38,6 +40,9 @@ from metadata import (
     ContextCandidateTrust,
     ContextCandidateTruncation,
     ContextCompactionBinding,
+    ContextCompactionReuseAdmission,
+    ContextCompactionReuseShadowFailure,
+    ContextCompactionReuseShadowFailureReason,
     ContextCompactionRecord,
     ContextSelectionMetadata,
     DurableArtifactReference,
@@ -82,6 +87,11 @@ class MemoryContextBuilder:
         ]
         | None = None,
         rolling_summary_token_limit: int = 256,
+        compaction_reuse_shadow_provider: Callable[
+            [dict[str, Any]],
+            list[ContextCompactionReuseAdmission | Mapping[str, Any]] | None,
+        ]
+        | None = None,
     ) -> None:
         self.short_memory = short_memory or ShortMemory()
         self.memory_store = memory_store or MemoryStore()
@@ -94,6 +104,7 @@ class MemoryContextBuilder:
         self.rolling_summary_adapter = rolling_summary_adapter
         self.rolling_summary_request_factory = rolling_summary_request_factory
         self.rolling_summary_token_limit = max(1, int(rolling_summary_token_limit))
+        self.compaction_reuse_shadow_provider = compaction_reuse_shadow_provider
         self.context_assembler = ContextAssembler(
             renderer=self._prompt_text,
             token_counter=token_counter,
@@ -281,6 +292,22 @@ class MemoryContextBuilder:
             raise ContextAssemblyBudgetError(
                 assembly.selection.omitted_required_candidate_ids
             )
+        session_constraints_hash = (
+            session_constraints.canonical_hash if session_constraints is not None else ""
+        )
+        session_turn_source_hash = (
+            self._session_ingress_turn_ledger_hash(session_ingress_state)
+            if session_ingress_state is not None
+            else ""
+        )
+        assembly = self._apply_compaction_reuse_shadow(
+            candidates=candidates,
+            assembly=assembly,
+            request_hash=request_hash,
+            session_turn_source_hash=session_turn_source_hash,
+            session_constraints_hash=session_constraints_hash,
+            strict_sources=strict_sources,
+        )
         selected = self._compatibility_payload(
             payload,
             candidates=candidates,
@@ -288,16 +315,8 @@ class MemoryContextBuilder:
             assembly=assembly,
             compaction_bindings=compaction_bindings,
             request_hash=request_hash,
-            session_turn_source_hash=(
-                self._session_ingress_turn_ledger_hash(session_ingress_state)
-                if session_ingress_state is not None
-                else ""
-            ),
-            session_constraints_hash=(
-                session_constraints.canonical_hash
-                if session_constraints is not None
-                else ""
-            ),
+            session_turn_source_hash=session_turn_source_hash,
+            session_constraints_hash=session_constraints_hash,
         )
         if self._context_snapshot_sink is not None:
             try:
@@ -550,6 +569,161 @@ class MemoryContextBuilder:
                 if candidate.candidate_id in set(compacted_ids)
             ]
         return candidates, sources, initial, []
+
+    @staticmethod
+    def _candidate_shadow_digest(candidate: ContextCandidate) -> dict[str, Any]:
+        """Return candidate identity metadata without exposing its body."""
+
+        return {
+            "candidate_id": candidate.candidate_id,
+            "kind": str(getattr(candidate.kind, "value", candidate.kind)),
+            "source_id": candidate.source_id,
+            "role": candidate.role,
+            "retention": str(getattr(candidate.retention, "value", candidate.retention)),
+            "trust": str(getattr(candidate.trust, "value", candidate.trust)),
+            "freshness": str(getattr(candidate.freshness, "value", candidate.freshness)),
+            "truncation": str(getattr(candidate.truncation, "value", candidate.truncation)),
+            "source_order": candidate.source_order,
+            "content_sha256": "sha256:" + hashlib.sha256(
+                candidate.content.encode("utf-8")
+            ).hexdigest(),
+            "compacted_candidate_ids": list(candidate.compacted_candidate_ids),
+        }
+
+    @staticmethod
+    def _source_fingerprint_shadow_index(
+        candidates: Sequence[ContextCandidate],
+    ) -> dict[str, str]:
+        """Expose bounded assistant-dialog fingerprints for shadow checks."""
+
+        assistant_dialog = [
+            candidate
+            for candidate in candidates
+            if candidate.kind == ContextCandidateKind.DIALOG
+            and candidate.role == "assistant"
+        ]
+        index: dict[str, str] = {}
+        for start in range(len(assistant_dialog)):
+            for end in range(start + 2, min(len(assistant_dialog), start + 64) + 1):
+                window = assistant_dialog[start:end]
+                key = json.dumps(
+                    [candidate.candidate_id for candidate in window],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                index.setdefault(key, source_candidate_fingerprint(window))
+        return index
+
+    def _apply_compaction_reuse_shadow(
+        self,
+        *,
+        candidates: list[ContextCandidate],
+        assembly: ContextAssemblyResult,
+        request_hash: str,
+        session_turn_source_hash: str,
+        session_constraints_hash: str,
+        strict_sources: bool = False,
+    ) -> ContextAssemblyResult:
+        """Attach body-free reuse admissions without changing prompt authority."""
+
+        if self.compaction_reuse_shadow_provider is None:
+            return assembly
+        provider_payload = {
+            "schema": "memory-context-compaction-reuse-shadow-v1",
+            "context_request_hash": request_hash,
+            "session_turn_source_hash": session_turn_source_hash,
+            "session_constraints_hash": session_constraints_hash,
+            "prompt_hash": "sha256:" + hashlib.sha256(
+                assembly.prompt_text.encode("utf-8")
+            ).hexdigest(),
+            "candidate_digests": [
+                self._candidate_shadow_digest(candidate) for candidate in candidates
+            ],
+            "selected_candidate_ids": [
+                candidate.candidate_id for candidate in assembly.selected_candidates
+            ],
+            "assembly_status": str(
+                getattr(assembly.selection.assembly_status, "value", assembly.selection.assembly_status)
+            ),
+            "source_fingerprint_by_candidate_ids": self._source_fingerprint_shadow_index(
+                candidates
+            ),
+        }
+        try:
+            raw_admissions = self.compaction_reuse_shadow_provider(provider_payload)
+        except Exception as exc:
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                ContextCompactionReuseShadowFailureReason.PROVIDER_EXCEPTION,
+                type(exc).__name__,
+            )
+        if raw_admissions is None or raw_admissions == []:
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                ContextCompactionReuseShadowFailureReason.PROVIDER_EMPTY,
+                None,
+            )
+        if not isinstance(raw_admissions, (list, tuple)):
+            exc = TypeError("shadow provider must return a list or tuple")
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                ContextCompactionReuseShadowFailureReason.INVALID_PROVIDER_RESULT,
+                type(exc).__name__,
+            )
+        try:
+            admissions = [
+                item
+                if isinstance(item, ContextCompactionReuseAdmission)
+                else ContextCompactionReuseAdmission.model_validate(item)
+                for item in raw_admissions
+            ]
+            selection_payload = assembly.selection.model_dump(mode="python")
+            selection_payload["compaction_reuse_admissions"] = [
+                *selection_payload.get("compaction_reuse_admissions", []),
+                *[admission.model_dump(mode="python") for admission in admissions],
+            ]
+            selection = ContextSelectionMetadata.model_validate(selection_payload)
+            return ContextAssemblyResult(
+                prompt_text=assembly.prompt_text,
+                selected_candidates=list(assembly.selected_candidates),
+                selection=selection,
+            )
+        except Exception as exc:
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                ContextCompactionReuseShadowFailureReason.INVALID_PROVIDER_RESULT,
+                type(exc).__name__,
+            )
+
+    @staticmethod
+    def _append_compaction_reuse_shadow_failure(
+        assembly: ContextAssemblyResult,
+        reason: ContextCompactionReuseShadowFailureReason,
+        exception_type: str | None,
+    ) -> ContextAssemblyResult:
+        failure = ContextCompactionReuseShadowFailure(
+            failure_id=f"compaction-reuse-shadow:{reason.value}",
+            reason=reason,
+            exception_type=exception_type,
+            strict_sources=False,
+            fallback_applied=True,
+        )
+        selection_payload = assembly.selection.model_dump(mode="python")
+        selection_payload["compaction_reuse_shadow_failures"] = [
+            *selection_payload.get("compaction_reuse_shadow_failures", []),
+            failure.model_dump(mode="python"),
+        ]
+        return ContextAssemblyResult(
+            prompt_text=assembly.prompt_text,
+            selected_candidates=list(assembly.selected_candidates),
+            selection=ContextSelectionMetadata.model_validate(selection_payload),
+        )
 
     @classmethod
     def _dialog_compaction_record(

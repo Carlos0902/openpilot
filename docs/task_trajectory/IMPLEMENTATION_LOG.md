@@ -2,6 +2,33 @@
 
 ## 2026-08-12 — Governed decomposition and preselected evidence handoff
 
+## 2026-08-12 — Body-free compaction reuse shadow wiring
+
+- Observed failure: reusable compaction admission had typed contracts and
+  offline preflight/simulation evidence, but `MemoryContextBuilder` had no
+  provider-facing shadow hook to exercise the admission path during real
+  context assembly. A missing hook made prompt-authority regressions and
+  provider fallback behavior unobservable.
+- Reproduction: build the same context once without a shadow provider and once
+  with a provider returning empty or rejected admissions; assert identical
+  prompt text, selected candidate projections, and request hash. Inspect the
+  provider payload and assert that it contains candidate identity/fingerprint
+  metadata but no candidate bodies or prompt text.
+- Implemented fix: add an opt-in `compaction_reuse_shadow_provider` hook that
+  receives body-free candidate digests, selected IDs, prompt hash, session
+  lineage hashes, and bounded source fingerprints. Valid admissions are stored
+  only in `ContextSelectionMetadata`; empty, invalid, or exceptional providers
+  produce typed shadow-failure evidence and preserve the existing assembly.
+  Strict source mode converts provider exceptions into the existing typed
+  context-source error path.
+- Validation evidence: focused compaction/context/metadata suite **181 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` passed. The change
+  is 194 changed lines including one regression-test module and remains below
+  the 3000-line PR threshold.
+- Remaining limitation: this slice does not select reusable artifacts for the
+  prompt, perform provider I/O itself, or change compaction authority; those
+  behaviors remain in dependent preflight/simulation and future selection work.
+
 - Observed failure: response-evidence tasks could be re-planned by the model
   even after the runtime had selected a typed read-only task. This caused an
   unnecessary provider request, allowed empty-plan failures, and did not reject
