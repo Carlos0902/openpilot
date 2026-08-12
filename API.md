@@ -841,6 +841,14 @@ replaces the launch with the same interpreter's `-m py_compile` command before
 constructing `Task`; an ungrounded target fails closed. This does not reinterpret
 pytest, existing bounded checks, or ordinary terminating scripts.
 
+Interactive application launch is a separate delivery operation. The command
+tool accepts `mode="interactive"` only when a runtime-only
+`ToolExecutionContext.user_confirmed is True` handle is attached. It starts the
+approved command in a new process session, returns a PID and `detached=true`,
+and does not wait for the application window or reuse the validation timeout.
+The confirmation handle is excluded from durable metadata and cannot authorize
+ordinary automatic or dry-run commands.
+
 Tool-planning prompts project the current typed `Task.write_files` list as the
 authoritative write scope. README generation is optional post-processing: an
 unscoped README need is dropped when the same plan still contains authorized

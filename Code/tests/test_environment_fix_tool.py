@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
+import shlex
+import signal
+import sys
+
 import pytest
 
 from core.command_approval import CommandApprovalGate
 from memory.memory_models import MemoryType
 from memory.memory_store import MemoryStore
+from core.tool_contracts import ToolExecutionContext
 from metadata import ResultStatus, ToolInputMetadata
 from tools.command_tool import command_executor
 from tools.environment_fix_tool import (
@@ -295,6 +301,48 @@ def test_command_executor_runs_after_user_approves_high_risk_command(tmp_path) -
 
     assert approvals == ["sudo --version"]
     assert result.result.attributes["command_approval"]["requires_confirmation"] is True
+
+
+def test_command_executor_interactive_launch_requires_explicit_confirmation(tmp_path) -> None:
+    with pytest.raises(PermissionError, match="explicit user confirmation"):
+        command_executor(
+            ToolInputMetadata.from_mapping(
+                "command_executor",
+                {
+                    "command": f"{shlex.quote(sys.executable)} -c 'print(1)'",
+                    "mode": "interactive",
+                    "cwd": str(tmp_path),
+                },
+            )
+        )
+
+
+def test_command_executor_interactive_launch_detaches_persistent_process(tmp_path) -> None:
+    input_metadata = ToolInputMetadata.from_mapping(
+        "command_executor",
+        {
+            "command": f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(30)')}",
+            "mode": "interactive",
+            "cwd": str(tmp_path),
+        },
+    )
+    execution_context = ToolExecutionContext(
+        tool_name="command_executor",
+        input_metadata=input_metadata,
+        user_confirmed=True,
+    )
+    input_metadata = input_metadata.model_copy(
+        update={"runtime_handles": {"_tool_execution_context": execution_context}}
+    )
+    result = command_executor(input_metadata)
+
+    process_id = int(result.result.attributes["process_id"])
+    try:
+        assert result.result.attributes["detached"] is True
+        assert process_id > 0
+        os.kill(process_id, 0)
+    finally:
+        os.killpg(process_id, signal.SIGTERM)
 
 
 def test_command_executor_blocks_project_external_absolute_command_path(tmp_path) -> None:

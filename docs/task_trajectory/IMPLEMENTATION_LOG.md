@@ -4567,3 +4567,20 @@ PYTHONPATH=Code/src pytest -q Code/tests
   permission, path, command, network, persistence, or replay authority is added.
 - Remaining limitation: `py_compile` proves syntax only; stronger headless smoke
   checks require an explicitly terminating task-owned validation command.
+
+### Persistent interactive application launch
+
+- Observed failure: after a generated Snake task's validation completed, direct
+  launch either timed out inside validation or the process/window ended with the
+  CLI. The user could not see a persistent application handoff.
+- Validation evidence: command-tool focused tests cover missing confirmation and
+  a real detached process; source compilation and `git diff --check` pass.
+- Implemented fix: add a dedicated interactive execution path that requires a
+  typed runtime-only confirmation context, starts the command with
+  `start_new_session=True`, redirects stdio, probes startup briefly, and returns
+  a bounded PID/detached receipt without waiting for application lifetime.
+- Metadata impact note: PID and detached state are runtime result facts; the
+  confirmation context is excluded from durable input metadata. No additional
+  mutation, path, network, persistence, or replay authority is introduced.
+- Remaining limitation: CLI success messaging and the explicit post-completion
+  launch prompt remain a separate follow-up slice.
