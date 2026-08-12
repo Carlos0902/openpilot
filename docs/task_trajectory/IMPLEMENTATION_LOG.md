@@ -5260,3 +5260,24 @@ PYTHONPATH=Code/src pytest -q Code/tests
   diff-check passed.
 - Remaining limitation: this PR does not launch applications; launch is a
   separate user-confirmed delivery action.
+### Interactive delivery environment handoff
+
+- Observed failure: after a successful interactive project task, the runtime
+  had no typed handoff from the durable result to the ready project environment.
+  The CLI therefore could not safely offer a separate launch while preserving
+  explicit confirmation and the existing command-tool authority boundary.
+- Reproduction: provide a successful result with written files and a ready
+  `interactive_runtime` environment; assert that the environment is recovered
+  from both direct and checkpoint-wrapped results. Pass a non-boolean or false
+  confirmation and assert that launch is refused; pass `True` and assert that
+  the command input carries confirmation only in the runtime-only execution
+  context.
+- Implemented fix: add typed delivery-environment selection and a narrow
+  post-completion interactive launch handoff that reuses `command_executor`.
+  Readiness, delivery surface, exact command, cwd, and explicit boolean
+  confirmation are checked before execution.
+- Validation evidence: focused delivery-handoff and existing interactive
+  command tests pass; `compileall` and `git diff --check` pass.
+- Remaining limitation: the CLI success-summary renderer and detached process
+  implementation remain in their earlier dedicated PRs; this slice only adds
+  the runtime integration boundary.

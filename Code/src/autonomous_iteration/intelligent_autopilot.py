@@ -22,6 +22,7 @@ from autonomous_iteration.agents.project_evaluator import ProjectEvaluatorAgent
 from core.llm import LLMClient
 from core.semantic_analyzer import SemanticAnalyzer
 from core.tool_event_emitter import ToolEventEmitter
+from core.tool_contracts import ToolExecutionContext
 from memory.memory_store import MemoryStore
 from autonomous_iteration.task_models import (
     Task,
@@ -48,6 +49,7 @@ from metadata import (
     DecompositionReasonCode,
     EnvironmentOperation,
     EnvironmentReadiness,
+    EnvironmentSyncMetadata,
     ExecutionStateMetadata,
     FailureMetadata,
     ProjectObjectiveMetadata,
@@ -2552,6 +2554,103 @@ class IntelligentAutopilot:
         return self.project_iteration.project_environment_context(
             project_path,
             getattr(self, "_project_environments", {}),
+        )
+
+    def project_delivery_environment(
+        self,
+        result: dict[str, Any],
+    ) -> EnvironmentSyncMetadata | None:
+        """Return the ready typed environment for an interactive project handoff."""
+
+        if not bool(result.get("success")):
+            return None
+        session_result = result.get("session_result")
+        delivery_result = session_result if isinstance(session_result, dict) else result
+        if delivery_result.get("success") is not True:
+            return None
+        task_results = delivery_result.get("results")
+        if not isinstance(task_results, list):
+            return None
+        written_files = self._collect_written_files(task_results)
+        project_path = self._infer_project_path_from_files(
+            str(delivery_result.get("goal") or result.get("goal") or ""),
+            written_files,
+        )
+        if project_path is None:
+            return None
+        payload = self._project_environment_context(project_path)
+        if not payload:
+            return None
+        try:
+            environment = EnvironmentSyncMetadata.model_validate(payload)
+        except (TypeError, ValueError):
+            return None
+        preset = environment.stack_preset
+        if (
+            environment.readiness != EnvironmentReadiness.READY
+            or not environment.run_command.strip()
+            or preset is None
+            or preset.delivery_surface != "interactive_runtime"
+        ):
+            return None
+        return environment
+
+    def launch_interactive_application(
+        self,
+        environment: EnvironmentSyncMetadata,
+        *,
+        user_confirmed: bool,
+    ) -> ToolExecutionEnvelopeMetadata:
+        """Launch the typed project command only after explicit user confirmation."""
+
+        if not isinstance(environment, EnvironmentSyncMetadata):
+            raise TypeError("environment must be typed EnvironmentSyncMetadata")
+        if user_confirmed is not True:
+            raise PermissionError("Interactive application launch requires explicit user confirmation.")
+        if environment.readiness != EnvironmentReadiness.READY:
+            raise ValueError("Interactive application launch requires a ready project environment.")
+        preset = environment.stack_preset
+        if preset is None or preset.delivery_surface != "interactive_runtime":
+            raise ValueError("Project delivery surface is not an interactive runtime.")
+        task = Task(
+            id=str(uuid.uuid4()),
+            description="Launch the completed interactive application",
+            priority=TaskPriority.HIGH,
+            kind="general",
+        )
+        input_metadata = ToolInputMetadata.from_mapping(
+            "command_executor",
+            {
+                "command": environment.run_command,
+                "requested_command": environment.run_command,
+                "mode": "interactive",
+                "timeout": 5,
+                "cwd": environment.command_cwd or environment.project_path,
+                "env": environment.command_env,
+                "project_path": environment.project_path,
+                "environment_id": environment.environment_id,
+            },
+        )
+        execution_context = ToolExecutionContext(
+            tool_name="command_executor",
+            input_metadata=input_metadata,
+            user_confirmed=True,
+            autonomy_level="user_confirmed_delivery_launch",
+        )
+        input_metadata = input_metadata.model_copy(
+            update={
+                "runtime_handles": {
+                    **input_metadata.runtime_handles,
+                    "_tool_execution_context": execution_context,
+                }
+            }
+        )
+        return self._execute_fast_tool(
+            task=task,
+            step_id="post_completion_interactive_launch",
+            tool_name="command_executor",
+            input_metadata=input_metadata,
+            timeout_override=5,
         )
 
     def _resolve_project_improvement_iterations(self, goal: str, project_path: str | Path) -> bool:
