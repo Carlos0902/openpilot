@@ -48,6 +48,13 @@ class RuntimeExecutionModeSource(str, Enum):
     LEGACY_ASSUMPTION = "legacy_assumption"
 
 
+class RuntimeTaskPurpose(str, Enum):
+    """Lifecycle purpose controlling task completion/report semantics."""
+
+    PROJECT_TASK = "project_task"
+    RESPONSE_EVIDENCE = "response_evidence"
+
+
 class ToolEventCompletionOutcome(str, Enum):
     """Typed response outcome that may inform the next completion budget."""
 
@@ -2169,6 +2176,7 @@ class RuntimeStateMetadata(MetadataBase):
 
     kind: Literal[MetadataKind.RUNTIME_STATE] = MetadataKind.RUNTIME_STATE
     goal: str
+    task_purpose: RuntimeTaskPurpose = RuntimeTaskPurpose.PROJECT_TASK
     execution_mode: RuntimeExecutionMode = RuntimeExecutionMode.MUTATION_ALLOWED
     execution_mode_source: RuntimeExecutionModeSource = RuntimeExecutionModeSource.DEFAULT
     execution_mode_reason: str = "No root-level read-only constraint was identified."
@@ -2199,6 +2207,10 @@ class RuntimeStateMetadata(MetadataBase):
     project_improvement_failure: str | None = None
     session_constraints: SessionConstraintState = Field(default_factory=SessionConstraintState)
     budget: RuntimeBudgetMetadata = Field(default_factory=RuntimeBudgetMetadata)
+    decomposition_decisions: list[DecompositionPolicyDecision] = Field(
+        default_factory=list,
+        max_length=32,
+    )
     replan_count: int = 0
     no_progress_rounds: int = 0
     completion_reason: str | None = None
@@ -2280,10 +2292,27 @@ class RuntimeStateMetadata(MetadataBase):
     def record_guard_decision(self, decision: GuardDecisionMetadata) -> None:
         self.guard_history.append(decision)
 
-    def request_replan(self, reason: str) -> None:
+    def record_decomposition_decision(self, decision: DecompositionPolicyDecision) -> None:
+        self.decomposition_decisions.append(decision)
+
+    def request_replan(
+        self,
+        reason: str,
+        decision: DecompositionPolicyDecision | None = None,
+    ) -> None:
         if self.budget.replan_rounds_used >= self.budget.max_replan_rounds:
             self.block("replan budget exhausted")
             return
+        if decision is None:
+            decision = DecompositionPolicyDecision(
+                kind=DecompositionDecisionKind.REPLAN_DECOMPOSITION,
+                reason_code=DecompositionReasonCode.REPLAN_REQUIRED,
+                source=DecompositionDecisionSource.LOCAL_RECOVERY,
+                evidence=(f"runtime_guard:{reason[:240]}",),
+            )
+        if decision.kind != DecompositionDecisionKind.REPLAN_DECOMPOSITION:
+            raise ValueError("request_replan requires a replan_decomposition decision")
+        self.record_decomposition_decision(decision)
         self.replan_count += 1
         self.budget.consume_replan_round()
         self.phase = AgentPhase.REPLAN
@@ -2326,11 +2355,69 @@ class ObservedFileMutationResult(BaseModel):
 class SessionStage(str, Enum):
     """Durable position inside the monolithic runtime session."""
 
+    PLAN_RECORDED = "plan_recorded"
     DECOMPOSITION_RECORDED = "decomposition_recorded"
     TASK_EXECUTION = "task_execution"
     TASKS_EXECUTED = "tasks_executed"
     RESULT_ASSEMBLY = "result_assembly"
     COMPLETED = "completed"
+
+
+class DecompositionDecisionKind(str, Enum):
+    """Governed construction path for one task plan."""
+
+    SINGLE_TASK = "single_task"
+    INITIAL_DECOMPOSITION = "initial_decomposition"
+    LOCAL_PROBLEM_DECOMPOSITION = "local_problem_decomposition"
+    REPLAN_DECOMPOSITION = "replan_decomposition"
+
+
+class DecompositionDecisionSource(str, Enum):
+    """Typed owner/source of a decomposition decision."""
+
+    RUNTIME_POLICY = "runtime_policy"
+    USER_INTENT = "user_intent"
+    PRE_TASK_HANDOFF = "pre_task_handoff"
+    LOCAL_RECOVERY = "local_recovery"
+    LEGACY_CURSOR = "legacy_cursor"
+
+
+class DecompositionReasonCode(str, Enum):
+    """Stable reason codes that may drive decomposition admission."""
+
+    SINGLE_BOUNDED_READ = "single_bounded_read"
+    PRESELECTED_READ_TASK = "preselected_read_task"
+    USER_REQUESTED_PLAN = "user_requested_plan"
+    MULTIPLE_DELIVERABLES = "multiple_deliverables"
+    MUTATION_SCOPE_REQUIRES_PLANNING = "mutation_scope_requires_planning"
+    UNSUPPORTED_SINGLE_TASK_TYPE = "unsupported_single_task_type"
+    LOCAL_PROBLEM = "local_problem"
+    REPLAN_REQUIRED = "replan_required"
+    LEGACY_CURSOR = "legacy_cursor"
+
+
+class DecompositionPolicyDecision(BaseModel):
+    """Owned routing fact retained with the exact session plan."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    kind: DecompositionDecisionKind
+    reason_code: DecompositionReasonCode
+    source: DecompositionDecisionSource
+    evidence: tuple[str, ...] = Field(default=(), max_length=32)
+
+    @property
+    def provider_required(self) -> bool:
+        return self.kind != DecompositionDecisionKind.SINGLE_TASK
+
+
+def _legacy_decomposition_decision() -> DecompositionPolicyDecision:
+    return DecompositionPolicyDecision(
+        kind=DecompositionDecisionKind.INITIAL_DECOMPOSITION,
+        reason_code=DecompositionReasonCode.LEGACY_CURSOR,
+        source=DecompositionDecisionSource.LEGACY_CURSOR,
+        evidence=("legacy_cursor_without_decomposition_decision",),
+    )
 
 
 class SessionSemanticSnapshot(BaseModel):
@@ -2375,6 +2462,10 @@ class SessionExecutionCursor(BaseModel):
     mode: Literal["standard", "enhanced_ui"] = "standard"
     stage: SessionStage
     plan_hash: str
+    plan_hash_version: Literal["metadata_v1", "task_fields_v2"] = "metadata_v1"
+    decomposition_decision: DecompositionPolicyDecision = Field(
+        default_factory=_legacy_decomposition_decision
+    )
     semantic: SessionSemanticSnapshot
     original_task: TaskGraphNodeMetadata
     tasks: list[TaskGraphNodeMetadata]
@@ -2391,6 +2482,16 @@ class SessionExecutionCursor(BaseModel):
             raise ValueError("execution_order must contain every session task exactly once")
         if self.next_task_index > len(self.execution_order):
             raise ValueError("next_task_index exceeds execution_order")
+        if (
+            self.decomposition_decision.kind == DecompositionDecisionKind.SINGLE_TASK
+            and len(task_ids) != 1
+        ):
+            raise ValueError("single-task cursor must contain exactly one plan node")
+        if (
+            self.decomposition_decision.kind == DecompositionDecisionKind.SINGLE_TASK
+            and self.stage == SessionStage.DECOMPOSITION_RECORDED
+        ):
+            raise ValueError("single-task cursor cannot claim a decomposition boundary")
         result_ids = [result.task_id for result in self.results]
         if len(result_ids) != len(set(result_ids)) or not set(result_ids).issubset(set(task_ids)):
             raise ValueError("session results must uniquely reference planned tasks")

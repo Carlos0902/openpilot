@@ -225,7 +225,15 @@ def test_runtime_blocks_dependency_after_failed_previous_task(tmp_path) -> None:
 def test_runtime_decomposes_hard_planning_gap_before_final_failure(tmp_path) -> None:
     runtime = FakeRuntime(tmp_path)
     runtime.decompose_for = {"a"}
-    tasks = [Task(id="a", description="Implement complex frontend/backend architecture")]
+    tasks = [
+        Task(
+            id="a",
+            description="Implement complex frontend/backend architecture",
+            read_files=["app.py"],
+            write_files=["app.py"],
+            validation_command="python -m compileall .",
+        )
+    ]
 
     results = IntelligentAutopilot._execute_tasks(runtime, tasks, "goal")
 
@@ -241,6 +249,34 @@ def test_runtime_decomposes_hard_planning_gap_before_final_failure(tmp_path) -> 
     assert any(
         event["event_type"] == "task_problem_decomposition_completed" and event["payload"]["success"]
         for event in events
+    )
+
+
+def test_local_problem_decomposition_cannot_expand_root_write_scope(tmp_path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    runtime.decompose_for = {"a"}
+    tasks = [
+        Task(
+            id="a",
+            description="Inspect the architecture",
+            read_files=["app.py"],
+            write_files=[],
+        )
+    ]
+
+    results = IntelligentAutopilot._execute_tasks(runtime, tasks, "goal")
+
+    assert results[0].status == TaskStatus.FAILED
+    assert runtime.executed == ["a"]
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "runtime_task_execution.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    rejected = next(
+        event for event in events if event["event_type"] == "task_problem_decomposition_scope_rejected"
+    )
+    assert rejected["payload"]["input_summary"]["decomposition_decision"]["kind"] == (
+        "local_problem_decomposition"
     )
 
 

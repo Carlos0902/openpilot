@@ -10,6 +10,7 @@ import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
+from tools.tool_selection import SelectionReason, ToolSelection
 
 from autonomous_iteration.checkpoint_store import RuntimeCheckpointStore
 from autonomous_iteration.runtime_controller import (
@@ -57,6 +58,7 @@ from metadata import (
     RuntimeFinalizationStage,
     RuntimePromptContextSnapshot,
     RuntimeStateMetadata,
+    RuntimeTaskPurpose,
     SessionConstraintState,
     SessionIngressState,
     SessionTurn,
@@ -505,9 +507,6 @@ def test_runtime_finalization_recovers_after_real_process_exit(tmp_path) -> None
     assert latest.safe_boundary == CheckpointBoundary.RUNTIME_FINALIZED
     events = hooks.recorder.load_trajectory_events(run_id)
     assert len([event for event in events if event["event_type"] == "task_finished"]) == 1
-from tools.tool_selection import SelectionReason, ToolSelection
-
-
 def test_runtime_state_serializes_budget_and_phase() -> None:
     state = RuntimeStateMetadata(goal="Refactor runtime")
     state.add_fact("goal understood")
@@ -1263,6 +1262,165 @@ def test_agent_runtime_controller_returns_runtime_state_and_report() -> None:
     assert state["modified_files"] == ["app.py"]
     assert result["runtime_report"]["goal"] == "Build app"
     assert result["runtime_report"]["modified_files"] == ["app.py"]
+
+
+def test_response_evidence_task_has_no_core_success_or_runtime_report() -> None:
+    class FakeSessionRunner:
+        def run(self, goal, context, mode="standard"):
+            return {
+                "success": True,
+                "core_success": None,
+                "stats": {"tasks_completed": 1, "tasks_failed": 0},
+                "written_files": [],
+            }
+
+    controller = AgentRuntimeController(
+        SimpleNamespace(tool_registry=None),
+        session_executor=FakeSessionRunner(),
+    )
+
+    result = controller.run(
+        "Inspect repository",
+        {
+            "project_path": "/tmp/project",
+            "task_purpose": RuntimeTaskPurpose.RESPONSE_EVIDENCE,
+        },
+    )
+
+    assert result["success"] is True
+    assert result["core_success"] is None
+    assert "runtime_report" not in result
+    assert result["agent_runtime_state"]["task_purpose"] == "response_evidence"
+    assert result["agent_runtime_state"]["execution_mode"] == "read_only"
+    assert result["agent_runtime_state"]["project_improvement_policy"]["requirement"] == "disabled"
+
+
+def test_response_evidence_runtime_attaches_prepared_checkpoint_generation(tmp_path) -> None:
+    class FakeSessionRunner:
+        def run(self, goal, context, mode="standard"):
+            return {"success": True, "core_success": None, "written_files": []}
+
+    run_id = "evidence-run"
+    task_id = "evidence-task"
+    state = RuntimeStateMetadata(
+        goal="Inspect repository",
+        task_purpose=RuntimeTaskPurpose.RESPONSE_EVIDENCE,
+        execution_mode=RuntimeExecutionMode.READ_ONLY,
+        execution_mode_source=RuntimeExecutionModeSource.ROOT_TASK_CARD,
+        core_success=None,
+    )
+    checkpoint = RuntimeCheckpointMetadata(
+        checkpoint_id="evidence-initial",
+        generation=1,
+        run_id=run_id,
+        root_task_id=task_id,
+        session_id=run_id,
+        checkpoint_reason="evidence task materialized",
+        safe_boundary=CheckpointBoundary.DECOMPOSITION_RECORDED,
+        runtime_state=state,
+        mutation_class="read_only",
+        project_fingerprint=ProjectFingerprint(project_root=str(tmp_path)),
+    )
+    store = RuntimeCheckpointStore(tmp_path / "checkpoints")
+    checkpoint = store.save(checkpoint, expected_generation=0)
+    runtime = SimpleNamespace(tool_registry=None, runtime_diagnostics_hooks=None, session_id=run_id)
+    controller = AgentRuntimeController(
+        runtime,
+        session_executor=FakeSessionRunner(),
+        checkpoint_store=store,
+    )
+
+    result = controller.run(
+        state.goal,
+        {
+            "task_id": task_id,
+            "run_id": run_id,
+            "project_path": str(tmp_path),
+            "checkpointing_enabled": True,
+            "prepared_task_checkpoint_id": checkpoint.checkpoint_id,
+            "task_purpose": RuntimeTaskPurpose.RESPONSE_EVIDENCE,
+        },
+    )
+
+    assert result["success"] is True
+    assert result["core_success"] is None
+    latest = store.load_latest(run_id)
+    assert latest is not None
+    assert latest.generation == 2
+    assert latest.root_task_id == task_id
+    assert latest.runtime_state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
+
+
+def test_response_evidence_controller_binds_bridge_after_applied_tool_checkpoint(tmp_path) -> None:
+    class Bridge:
+        def __init__(self) -> None:
+            self.observed = []
+            self.bound = []
+
+        def observe(self, selection, execution_result):
+            self.observed.append((selection, execution_result))
+            return SimpleNamespace(marker="evidence:artifact:sha256:" + "a" * 64)
+
+        def bind_checkpoint(self, pending, checkpoint):
+            self.bound.append((pending, checkpoint))
+
+    bridge = Bridge()
+    store = RuntimeCheckpointStore(tmp_path / "checkpoints")
+    runtime = SimpleNamespace(
+        tool_registry=None,
+        runtime_diagnostics_hooks=None,
+        session_id="evidence-run",
+    )
+    controller = AgentRuntimeController(
+        runtime,
+        checkpoint_store=store,
+        evidence_bridge=bridge,
+    )
+    controller.state = RuntimeStateMetadata(
+        goal="Collect response evidence",
+        task_purpose=RuntimeTaskPurpose.RESPONSE_EVIDENCE,
+        execution_mode=RuntimeExecutionMode.READ_ONLY,
+        execution_mode_source=RuntimeExecutionModeSource.ROOT_TASK_CARD,
+        core_success=None,
+    )
+    controller._checkpointing_enabled = True
+    controller._checkpoint_run_id = "evidence-run"
+    controller._active_task_id = "evidence-task"
+    controller._checkpoint_context = {"project_path": str(tmp_path), "cwd": str(tmp_path)}
+    selection = ToolSelection(
+        step_id="evidence-step",
+        tool_name="multi_file_reader",
+        reason=SelectionReason.CAPABILITY_MATCH,
+        confidence=1.0,
+        input_metadata=ToolInputMetadata.from_mapping(
+            "multi_file_reader",
+            {
+                "directory_path": str(tmp_path),
+                "obligation_id": "ground:claim-1",
+                "source_class": "project",
+                "read_only": True,
+            },
+        ),
+    )
+    execution_result = SimpleNamespace(
+        success=True,
+        output_metadata=ToolResultMetadata(
+            tool_name="multi_file_reader",
+            status=ResultStatus.SUCCESS,
+            result=FileArtifactMetadata(file_path=str(tmp_path), content="evidence"),
+        ),
+        error=None,
+    )
+
+    controller._handle_tool_result_applied(controller.state, selection, execution_result)
+
+    latest = store.load_latest("evidence-run")
+    assert latest is not None
+    assert latest.safe_boundary == CheckpointBoundary.TOOL_RESULT_APPLIED
+    assert latest.tool_name == "multi_file_reader"
+    assert bridge.observed == [(selection, execution_result)]
+    assert bridge.bound[0][1] == latest
+    assert bridge.bound[0][0].marker in latest.runtime_state.known_facts
 
 
 def test_runtime_controller_persists_read_only_safe_boundaries_and_mirrors_events(tmp_path) -> None:

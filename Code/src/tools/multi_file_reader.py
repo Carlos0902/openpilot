@@ -58,6 +58,7 @@ def multi_file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultM
     """Read multiple files and combine them into one text payload."""
     project_path = params.get("project_path")
     file_paths = params.get("file_paths") or params.get("files")
+    read_only_listing = params.get("read_only_listing") is True
     sketch_files: list[str] = []
     if not file_paths:
         directory_path_value = params.get("directory_path")
@@ -78,12 +79,21 @@ def multi_file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultM
         if not directory_path.is_dir():
             raise NotADirectoryError(f"Not a directory: {directory_path}")
 
-        sketch_files.append(_ensure_directory_sketch(directory_path))
+        if not read_only_listing:
+            sketch_files.append(_ensure_directory_sketch(directory_path))
         pattern = params.get("pattern", "*完成报告*.md")
         recursive = params.get("recursive", False)
         max_files = params.get("max_files", 100)
         iterator = directory_path.rglob(pattern) if recursive else directory_path.glob(pattern)
-        file_paths = sorted(str(path) for path in iterator if path.is_file())[:max_files]
+        file_paths = sorted(
+            str(path)
+            for path in iterator
+            if path.is_file()
+            and (
+                not read_only_listing
+                or not any(part.startswith(".") for part in path.relative_to(directory_path).parts)
+            )
+        )[:max_files]
     else:
         if isinstance(file_paths, str):
             file_paths = [file_paths]
@@ -99,7 +109,21 @@ def multi_file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultM
                 )
                 for file_path in file_paths
             ]
-        sketch_files.extend(_ensure_parent_sketches(file_paths))
+        if not read_only_listing:
+            sketch_files.extend(_ensure_parent_sketches(file_paths))
+
+    if read_only_listing:
+        return {
+            "content": "",
+            "files": list(file_paths),
+            "skipped_files": [],
+            "count": len(file_paths),
+            "truncated": False,
+            "encoding": str(params.get("encoding", "utf-8")),
+            "sketch_files": [],
+            "sketch_refreshed": False,
+            "read_only_listing": True,
+        }
 
     encoding = params.get("encoding", "utf-8")
     max_total_chars = params.get("max_total_chars", 50000)

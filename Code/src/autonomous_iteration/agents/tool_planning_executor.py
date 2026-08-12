@@ -318,8 +318,20 @@ class ToolPlanningTaskExecutor:
             planning_surface = self._planning_surface_for_prompt(task.description, goal, context=context)
             prompt = self._build_tool_plan_prompt(task.description, goal, planning_surface, context)
 
-            initial_tool_requests = self._typed_validation_tool_requests(task)
-            if initial_tool_requests is None:
+            preselected_tool_requests = self._preselected_tool_requests(task)
+            initial_tool_requests = (
+                preselected_tool_requests
+                if preselected_tool_requests is not None
+                else self._typed_validation_tool_requests(task)
+            )
+            if preselected_tool_requests is not None:
+                self._log(
+                    "preselected_tool_planning_started",
+                    input_summary={"task_id": task.id, "goal": goal},
+                    output_summary={"tool_count": len(initial_tool_requests)},
+                    success=None,
+                )
+            elif initial_tool_requests is None:
                 self.runtime.logger.log_event(
                     "llm_tool_planning",
                     {"task_id": task.id, "task_description": task.description},
@@ -496,6 +508,95 @@ class ToolPlanningTaskExecutor:
                 duration_ms=int(duration * 1000),
             )
             return result
+
+    def _preselected_tool_requests(self, task: Task) -> list[dict[str, Any]] | None:
+        raw_needs = task.attributes.get("preselected_decision_needs")
+        if raw_needs is None:
+            return None
+        if not isinstance(raw_needs, list) or not raw_needs:
+            raise DecisionNeedResolutionError(
+                "Preselected evidence task has no typed decision needs.",
+                {"task_id": task.id, "failure_stage": "Preselected Tool Routing"},
+            )
+        validated_needs: list[DecisionNeedMetadata] = []
+        for index, raw_need in enumerate(raw_needs):
+            try:
+                validated_needs.append(DecisionNeedMetadata.model_validate(raw_need))
+            except (TypeError, ValueError, ValidationError) as exc:
+                raise DecisionNeedResolutionError(
+                    "Preselected evidence need is invalid.",
+                    {
+                        "task_id": task.id,
+                        "failure_stage": "Preselected Tool Routing",
+                        "need_index": index,
+                    },
+                ) from exc
+
+        _controller, _router, planning_state = self._planning_runtime_state({})
+        remaining_tool_calls = planning_state.budget.tool_calls_remaining
+        remaining_file_reads = planning_state.budget.file_reads_remaining
+        project_read_count = sum(
+            1 for need in validated_needs if need.attributes.get("source_class") == "project"
+        )
+        if len(validated_needs) > remaining_tool_calls or project_read_count > remaining_file_reads:
+            raise DecisionNeedResolutionError(
+                "Preselected evidence needs exceed the remaining runtime budget.",
+                {
+                    "task_id": task.id,
+                    "failure_stage": "Preselected Tool Routing",
+                    "need_count": len(validated_needs),
+                    "project_read_count": project_read_count,
+                    "remaining_tool_calls": remaining_tool_calls,
+                    "remaining_file_reads": remaining_file_reads,
+                },
+            )
+
+        requests: list[dict[str, Any]] = []
+        obligation_ids: list[str] = []
+        for index, need in enumerate(validated_needs):
+            obligation_id = str(need.attributes.get("obligation_id") or "").strip()
+            source_class = str(need.attributes.get("source_class") or "").strip()
+            if (
+                need.attributes.get("read_only") is not True
+                or not obligation_id
+                or need.decision_to_unlock != obligation_id
+                or source_class not in {"project", "current_external"}
+            ):
+                raise DecisionNeedResolutionError(
+                    "Preselected evidence need lost its read-only obligation identity.",
+                    {
+                        "task_id": task.id,
+                        "failure_stage": "Preselected Tool Routing",
+                        "need_index": index,
+                    },
+                )
+            routed = self._route_decision_needs(
+                {"decision_needs": [need.model_dump(mode="json")]}
+            )
+            if len(routed) != 1:
+                raise DecisionNeedResolutionError(
+                    "Required preselected evidence need did not route one-to-one.",
+                    {
+                        "task_id": task.id,
+                        "failure_stage": "Preselected Tool Routing",
+                        "obligation_id": obligation_id,
+                        "selection_count": len(routed),
+                    },
+                )
+            requests.extend(routed)
+            obligation_ids.append(obligation_id)
+        if len(set(obligation_ids)) != len(obligation_ids):
+            raise DecisionNeedResolutionError(
+                "Preselected evidence needs contain duplicate obligations.",
+                {"task_id": task.id, "failure_stage": "Preselected Tool Routing"},
+            )
+        self._log(
+            "preselected_evidence_tools_routed",
+            input_summary={"task_id": task.id, "obligation_ids": obligation_ids},
+            output_summary={"tool_count": len(requests)},
+            success=True,
+        )
+        return requests
 
     def _typed_validation_tool_requests(
         self,

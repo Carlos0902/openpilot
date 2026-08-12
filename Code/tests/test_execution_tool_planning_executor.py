@@ -493,6 +493,92 @@ def test_tool_planning_executor_success_and_chained_file_writer(tmp_path) -> Non
     assert any(payload.get("source_name") == "autonomous_iteration.agents.tool_planning_executor" for payload in payloads)
 
 
+def test_preselected_evidence_needs_skip_planning_provider_and_preserve_identity(tmp_path) -> None:
+    obligation_id = "ground:claim-1"
+    task = Task(
+        id="evidence-task",
+        description="Collect response evidence",
+        kind="inspect",
+        expected_outputs=[obligation_id],
+        tags=["response-evidence", "read-only"],
+        attributes={
+            "preselected_decision_needs": [
+                DecisionNeedMetadata(
+                    need_type="project_structure",
+                    question="Inspect the current project",
+                    phase=AgentPhase.UNDERSTAND_PROJECT,
+                    decision_to_unlock=obligation_id,
+                    attributes={
+                        "obligation_id": obligation_id,
+                        "source_class": "project",
+                        "read_only": True,
+                    },
+                ).model_dump(mode="json")
+            ]
+        },
+    )
+    runtime = FakeRuntime(tmp_path, {"decision_needs": []})
+    context = TaskExecutionContext(
+        task=task,
+        parent_context={"goal": task.description, "project_path": str(tmp_path)},
+        shared_state={},
+        execution_history=[],
+    )
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, context)
+
+    assert result.status == TaskStatus.COMPLETED
+    assert runtime.llm_client.requests == []
+    assert [selection.tool_name for selection in runtime.tool_executor.selections] == [
+        "multi_file_reader"
+    ]
+    attributes = runtime.tool_executor.selections[0].input_metadata.attributes
+    assert attributes["obligation_id"] == obligation_id
+    assert attributes["source_class"] == "project"
+    assert attributes["read_only"] is True
+
+
+def test_preselected_evidence_needs_fail_before_exceeding_runtime_read_budget(tmp_path) -> None:
+    needs = []
+    for index in range(31):
+        obligation_id = f"ground:claim-{index}"
+        needs.append(
+            DecisionNeedMetadata(
+                need_type="project_structure",
+                question=f"Inspect claim {index}",
+                phase=AgentPhase.UNDERSTAND_PROJECT,
+                decision_to_unlock=obligation_id,
+                attributes={
+                    "obligation_id": obligation_id,
+                    "source_class": "project",
+                    "read_only": True,
+                    "read_only_listing": True,
+                },
+            ).model_dump(mode="json")
+        )
+    task = Task(
+        id="evidence-budget-task",
+        description="Collect too many response observations",
+        kind="inspect",
+        expected_outputs=[f"ground:claim-{index}" for index in range(31)],
+        tags=["response-evidence", "read-only"],
+        attributes={"preselected_decision_needs": needs},
+    )
+    runtime = FakeRuntime(tmp_path, {"decision_needs": []})
+    runtime.runtime_controller = SimpleNamespace(
+        state=RuntimeStateMetadata(goal=task.description),
+        router=ToolRouter(runtime.tool_registry),
+    )
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
+
+    assert result.status == TaskStatus.FAILED
+    assert result.result_metadata.failure.error_type == "DecisionNeedResolutionError"
+    assert "budget" in result.error.lower()
+    assert runtime.llm_client.requests == []
+    assert runtime.tool_executor.selections == []
+
+
 def test_inspect_subtask_does_not_downgrade_mutating_root_runtime_state(tmp_path) -> None:
     task = Task(
         id="inspect",

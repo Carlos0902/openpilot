@@ -1,5 +1,24 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Governed decomposition and preselected evidence handoff
+
+- Observed failure: response-evidence tasks could be re-planned by the model
+  even after the runtime had selected a typed read-only task. This caused an
+  unnecessary provider request, allowed empty-plan failures, and did not reject
+  an oversized preselected evidence batch before tool execution.
+- Implemented fix: add a typed decomposition policy for bounded single-task
+  selection, preserve `support_context_files` on task and graph-node contracts,
+  constrain local recovery decomposition to the parent scope, and route
+  preselected evidence needs directly through the existing tool loop. The
+  preselected route validates obligation identity, enforces the remaining tool
+  and file-read budgets, and requires one-to-one tool routing without invoking
+  the planning model.
+- Validation evidence: focused decomposition, task-runner, and tool-planning
+  suite **123 passed**; compile checks and diff whitespace checks are run before
+  publication.
+- Remaining limitations: this slice does not add Provider-native mutation
+  execution or final CLI release wiring; those remain separate stacked slices.
+
 ## 2026-08-12 — Bounded decomposition-contract failure evidence
 
 - Observed failure: malformed decomposition payloads could raise during task

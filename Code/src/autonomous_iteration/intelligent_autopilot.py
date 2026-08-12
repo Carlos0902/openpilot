@@ -7,7 +7,6 @@ import hashlib
 import os
 import re
 import shlex
-import sys
 import time
 import uuid
 from types import SimpleNamespace
@@ -43,6 +42,10 @@ from tools.executor_models import ExecutionError, ExecutionStatus
 from core.openpilot_log import OpenPilotLogger
 from core.exceptions import ErrorCategory, OpenPilotError, classify_error
 from metadata import (
+    DecompositionDecisionKind,
+    DecompositionDecisionSource,
+    DecompositionPolicyDecision,
+    DecompositionReasonCode,
     EnvironmentOperation,
     EnvironmentReadiness,
     ExecutionStateMetadata,
@@ -123,6 +126,7 @@ class IntelligentAutopilot:
         reference_provider: Callable[..., list[Any]] | None = None,
         runtime_diagnostics_hooks: RuntimeDiagnosticsHooks | None = None,
         skill_roots: list[str | Path] | None = None,
+        evidence_bridge: Any | None = None,
     ):
         """Initialize intelligent autopilot.
 
@@ -342,7 +346,10 @@ class IntelligentAutopilot:
             logger=self.logger,
             session_id_getter=lambda: self.session_id,
         )
-        self.runtime_controller = AgentRuntimeController(self)
+        self.runtime_controller = AgentRuntimeController(
+            self,
+            evidence_bridge=evidence_bridge,
+        )
 
         # Register task executor
         self.orchestrator.set_task_executor(self._execute_task)
@@ -4011,6 +4018,18 @@ class IntelligentAutopilot:
             return result
 
         failure_details = IntelligentAutopilot._failure_details(result)
+        decomposition_decision = DecompositionPolicyDecision(
+            kind=DecompositionDecisionKind.LOCAL_PROBLEM_DECOMPOSITION,
+            reason_code=DecompositionReasonCode.LOCAL_PROBLEM,
+            source=DecompositionDecisionSource.LOCAL_RECOVERY,
+            evidence=(
+                f"parent_task:{task.id}",
+                f"problem_depth:{depth}",
+            ),
+        )
+        runtime_state = getattr(getattr(runtime, "runtime_controller", None), "state", None)
+        if runtime_state is not None and hasattr(runtime_state, "record_decomposition_decision"):
+            runtime_state.record_decomposition_decision(decomposition_decision)
         try:
             runtime._log_task_execution_event(
                 "task_problem_decomposition_started",
@@ -4018,6 +4037,7 @@ class IntelligentAutopilot:
                     "task_id": task.id,
                     "resolution_plan": resolution_plan,
                     "problem_signal": failure_details.get("problem_signal"),
+                    "decomposition_decision": decomposition_decision.model_dump(mode="json"),
                 },
                 success=None,
             )
@@ -4051,6 +4071,22 @@ class IntelligentAutopilot:
                 error="Problem decomposition produced no subtasks",
             )
             return result
+        scope_violations = IntelligentAutopilot._local_decomposition_scope_violations(
+            task,
+            subtasks,
+        )
+        if scope_violations:
+            runtime._log_task_execution_event(
+                "task_problem_decomposition_scope_rejected",
+                input_summary={
+                    "task_id": task.id,
+                    "decomposition_decision": decomposition_decision.model_dump(mode="json"),
+                    "violations": scope_violations,
+                },
+                success=False,
+                error="Local problem decomposition exceeded root task scope",
+            )
+            return result
         for subtask in subtasks:
             subtask.attributes["problem_resolution_depth"] = depth + 1
             subtask.attributes["problem_resolution_parent_task_id"] = task.id
@@ -4061,6 +4097,7 @@ class IntelligentAutopilot:
         payload = {
             "original_task_id": task.id,
             "resolution_strategy": "decompose",
+            "decomposition_decision": decomposition_decision.model_dump(mode="json"),
             "subtask_count": len(subtasks),
             "subtask_results": [
                 {
@@ -4111,6 +4148,36 @@ class IntelligentAutopilot:
             duration=duration,
             attributes={"problem_resolution": payload},
         )
+
+    @staticmethod
+    def _local_decomposition_scope_violations(
+        root: Task,
+        subtasks: list[Task],
+    ) -> list[str]:
+        allowed_writes = IntelligentAutopilot._normalized_task_write_files(root)
+        allowed_reads = {
+            IntelligentAutopilot._normalize_task_file_key(path)
+            for path in [*root.read_files, *root.support_context_files, *root.write_files]
+            if str(path).strip()
+        }
+        subtask_ids = {subtask.id for subtask in subtasks}
+        violations: list[str] = []
+        for subtask in subtasks:
+            writes = IntelligentAutopilot._normalized_task_write_files(subtask)
+            reads = {
+                IntelligentAutopilot._normalize_task_file_key(path)
+                for path in [*subtask.read_files, *subtask.support_context_files]
+                if str(path).strip()
+            }
+            if not writes.issubset(allowed_writes):
+                violations.append(f"write_scope:{subtask.id}")
+            if not reads.issubset(allowed_reads):
+                violations.append(f"read_scope:{subtask.id}")
+            if subtask.validation_command and subtask.validation_command != root.validation_command:
+                violations.append(f"validation_scope:{subtask.id}")
+            if any(dependency not in subtask_ids for dependency in subtask.dependencies):
+                violations.append(f"dependency_scope:{subtask.id}")
+        return violations
 
     @staticmethod
     def _failure_resolution_plan(result: TaskExecutionResult) -> dict[str, Any]:

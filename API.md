@@ -847,6 +847,17 @@ typed `recoverable`/`recoverability` fields, and a retry recommendation. CLI
 failure formatting accepts only an already-redacted `response_preview`; raw
 provider `response_text` is never displayed.
 
+Governed decomposition selects a single bounded read task when the semantic
+snapshot shows one read-only deliverable and no write scope. Mutation or
+multi-deliverable goals remain on the initial decomposition path. A preselected
+read-only task is materialized without another planning-provider request; its
+typed evidence needs must preserve the exact obligation identity and fit the
+remaining tool/file-read budget before routing. `Task` and
+`TaskGraphNodeMetadata` keep `support_context_files` as model-facing context
+only; it does not grant read or write authority. Local problem decomposition is
+limited to the parent task's read/write/validation/dependency scope and one
+recovery depth.
+
 Recognized questions about authoritative runtime facts use a separate
 read-only completion path. `RuntimeFactResolver` projects provider, model,
 canonical project path, execution mode, checkpoint status, improvement policy,

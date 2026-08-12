@@ -44,6 +44,7 @@ from metadata import (
     ProjectImprovementRequirement,
     RuntimeCheckpointMetadata,
     RuntimeStateMetadata,
+    RuntimeTaskPurpose,
     SessionIngressState,
     TaskGraphNodeMetadata,
 )
@@ -92,6 +93,201 @@ class EvidenceArtifactPayload(BaseModel):
     source_class: ClaimSourceClass
     observed_at: datetime
     evidence: dict[str, Any] = Field(min_length=1)
+
+
+class PendingEvidenceObservation(BaseModel):
+    """Artifact marker awaiting one exact task-owned applied checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    obligation_id: str = Field(min_length=1)
+    source_class: ClaimSourceClass
+    artifact_ref: DurableArtifactReference
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observed_at: datetime
+    marker: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    step_id: str = Field(min_length=1)
+
+
+class EvidenceRuntimeBridge:
+    """Bind exact governed tool observations to CRU-2D evidence receipts."""
+
+    def __init__(
+        self,
+        controller: "EvidenceEscalationController",
+        record: IterationTurnRecordMetadata,
+        *,
+        current_ingress: SessionIngressState,
+        current_project_fingerprint: ProjectFingerprint,
+    ) -> None:
+        if record.task_binding.state != "active":
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "evidence runtime bridge requires an active task binding",
+            )
+        self.controller = controller
+        self.record = record
+        self.current_ingress = current_ingress.model_copy(deep=True)
+        self.current_project_fingerprint = current_project_fingerprint.model_copy(deep=True)
+        self._expected_needs = {
+            str(need.decision_to_unlock): need for need in controller.decision_needs(record)
+        }
+        self._receipts: dict[str, EvidenceReceipt] = {}
+        self._pending: dict[str, PendingEvidenceObservation] = {}
+
+    @property
+    def receipts(self) -> tuple[EvidenceReceipt, ...]:
+        return tuple(
+            self._receipts[obligation.obligation_id]
+            for obligation in self.record.obligations
+            if obligation.is_blocking and obligation.obligation_id in self._receipts
+        )
+
+    def observe(self, selection: Any, execution_result: Any) -> PendingEvidenceObservation:
+        input_metadata = getattr(selection, "input_metadata", None)
+        attributes = getattr(input_metadata, "attributes", None)
+        if not isinstance(attributes, dict):
+            attributes = {}
+        obligation_id = str(attributes.get("obligation_id") or "").strip()
+        source_value = str(attributes.get("source_class") or "").strip()
+        need = self._expected_needs.get(obligation_id)
+        if (
+            need is None
+            or attributes.get("read_only") is not True
+            or need.decision_to_unlock != obligation_id
+            or need.attributes.get("source_class") != source_value
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "tool observation differs from the active evidence obligation",
+            )
+        try:
+            source_class = ClaimSourceClass(source_value)
+        except ValueError as exc:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "tool observation has an unsupported evidence source",
+            ) from exc
+        tool_name = str(getattr(selection, "tool_name", "") or "").strip()
+        compatible_tools = (
+            {"file_reader", "multi_file_reader"}
+            if source_class == ClaimSourceClass.PROJECT
+            else {"web_searcher"}
+        )
+        output = getattr(execution_result, "output_metadata", None)
+        if (
+            tool_name not in compatible_tools
+            or not bool(getattr(execution_result, "success", False))
+            or output is None
+            or not callable(getattr(output, "to_json_dict", None))
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "evidence obligation was not satisfied by a successful compatible tool",
+            )
+        if obligation_id in self._pending or obligation_id in self._receipts:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                "evidence obligation already has an observed artifact",
+            )
+        observed_at = self.controller._utc(self.controller.now())
+        payload_model = EvidenceArtifactPayload(
+            obligation_id=obligation_id,
+            source_class=source_class,
+            observed_at=observed_at,
+            evidence={
+                "tool_name": tool_name,
+                "step_id": str(getattr(selection, "step_id", "") or ""),
+                "input": input_metadata.to_json_dict(),
+                "output": output.to_json_dict(),
+            },
+        )
+        payload = payload_model.model_dump(mode="json")
+        reference = self.controller.turn_store.save_artifact(
+            self.record.identity.conversation_id,
+            self.record.identity.run_id,
+            kind="observed_evidence",
+            payload=payload,
+        )
+        content_hash = self.controller.evidence_payload_hash(payload)
+        pending = PendingEvidenceObservation(
+            obligation_id=obligation_id,
+            source_class=source_class,
+            artifact_ref=reference,
+            content_hash=content_hash,
+            observed_at=observed_at,
+            marker=f"evidence:{reference.artifact_id}:{content_hash}",
+            tool_name=tool_name,
+            step_id=str(getattr(selection, "step_id", "") or ""),
+        )
+        self._pending[obligation_id] = pending
+        return pending
+
+    def bind_checkpoint(
+        self,
+        pending: PendingEvidenceObservation,
+        checkpoint: RuntimeCheckpointMetadata,
+    ) -> EvidenceReceipt:
+        if self._pending.get(pending.obligation_id) != pending:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                "evidence observation is not pending for this bridge",
+            )
+        expected_project_hash = self.controller.project_fingerprint_hash(
+            self.current_project_fingerprint
+        )
+        if (
+            checkpoint.run_id != self.record.identity.run_id
+            or checkpoint.root_task_id != self.record.task_binding.task_id
+            or checkpoint.session_id != self.record.identity.run_id
+            or checkpoint.safe_boundary != "tool_result_applied"
+            or checkpoint.side_effect_state != "applied"
+            or checkpoint.mutation_class != "read_only"
+            or checkpoint.tool_name != pending.tool_name
+            or checkpoint.step_id != pending.step_id
+            or pending.marker not in checkpoint.runtime_state.known_facts
+            or checkpoint.session_ingress_state != self.current_ingress
+            or self.controller.project_fingerprint_hash(checkpoint.project_fingerprint)
+            != expected_project_hash
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CHECKPOINT_INVALID,
+                "evidence checkpoint does not contain the exact artifact marker and task identity",
+            )
+        receipt = EvidenceReceipt(
+            obligation_id=pending.obligation_id,
+            source_class=pending.source_class,
+            artifact_ref=pending.artifact_ref,
+            content_hash=pending.content_hash,
+            checkpoint_id=checkpoint.checkpoint_id,
+            checkpoint_digest=str(checkpoint.integrity_checksum),
+            project_fingerprint_hash=(
+                expected_project_hash
+                if pending.source_class == ClaimSourceClass.PROJECT
+                else None
+            ),
+            observed_at=pending.observed_at,
+        )
+        self._receipts[pending.obligation_id] = receipt
+        del self._pending[pending.obligation_id]
+        return receipt
+
+    def complete(self) -> IterationTurnRecordMetadata:
+        if self._pending or set(self._receipts) != set(self._expected_needs):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CHECKPOINT_INVALID,
+                "evidence runtime did not durably bind every required obligation",
+            )
+        return self.controller.absorb_and_complete(
+            self.record,
+            current_ingress=self.current_ingress,
+            current_project_fingerprint=self.current_project_fingerprint,
+            receipts=self.receipts,
+        )
+
+    def response_content(self, record: IterationTurnRecordMetadata) -> str:
+        return self.controller.response_content(record)
 
 
 class EvidenceEscalationController:
@@ -152,6 +348,11 @@ class EvidenceEscalationController:
                         "claim_id": claim_id,
                         "source_class": source.value,
                         "read_only": True,
+                        **(
+                            {"read_only_listing": True}
+                            if source == ClaimSourceClass.PROJECT
+                            else {}
+                        ),
                     },
                 )
             )
@@ -187,6 +388,7 @@ class EvidenceEscalationController:
         )
         runtime_state = RuntimeStateMetadata(
             goal=node.description,
+            task_purpose=RuntimeTaskPurpose.RESPONSE_EVIDENCE,
             execution_mode="read_only",
             execution_mode_source="root_goal",
             execution_mode_reason="Evidence escalation cannot exceed response-only authority.",
@@ -227,6 +429,40 @@ class EvidenceEscalationController:
             self.checkpoint_store,
         ).materialize(record, snapshot=snapshot, current_ingress=current_ingress)
         return active, needs
+
+    def active_task_node(
+        self,
+        record: IterationTurnRecordMetadata,
+    ) -> TaskGraphNodeMetadata:
+        snapshot = self._snapshot(record)
+        if len(snapshot.task_graph) != 1:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "evidence task snapshot must contain exactly one task node",
+            )
+        return snapshot.task_graph[0].model_copy(deep=True)
+
+    def response_content(self, record: IterationTurnRecordMetadata) -> str:
+        candidate = record.response_candidate
+        if candidate is None:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "evidence completion has no response candidate",
+            )
+        payload = self.turn_store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            candidate.response_ref,
+        )
+        if (
+            not self._valid_assistant_payload(payload)
+            or assistant_payload_hash(payload) != candidate.response_hash
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                "evidence response payload is unavailable or checksum-mismatched",
+            )
+        return str(payload["content"])
 
     def absorb_and_complete(
         self,
@@ -287,7 +523,6 @@ class EvidenceEscalationController:
             )
         closed: list[CompletionObligation] = []
         evidence_refs: list[str] = []
-        evidence_checkpoint: RuntimeCheckpointMetadata | None = None
         project_hash = self.project_fingerprint_hash(snapshot.initial_checkpoint.project_fingerprint)
         if self.project_fingerprint_hash(current_project_fingerprint) != project_hash:
             raise EvidenceEscalationError(
@@ -377,12 +612,6 @@ class EvidenceEscalationController:
                     EvidenceEscalationFailureCode.AUTHORITY_STALE,
                     "evidence checkpoint does not bind current session authority",
                 )
-            if evidence_checkpoint is not None and evidence_checkpoint != checkpoint:
-                raise EvidenceEscalationError(
-                    EvidenceEscalationFailureCode.CHECKPOINT_INVALID,
-                    "all evidence receipts must bind one task checkpoint",
-                )
-            evidence_checkpoint = checkpoint
             if self.project_fingerprint_hash(checkpoint.project_fingerprint) != project_hash:
                 raise EvidenceEscalationError(
                     EvidenceEscalationFailureCode.PROJECT_STALE,
@@ -727,4 +956,6 @@ __all__ = [
     "EvidenceEscalationError",
     "EvidenceEscalationFailureCode",
     "EvidenceReceipt",
+    "EvidenceRuntimeBridge",
+    "PendingEvidenceObservation",
 ]

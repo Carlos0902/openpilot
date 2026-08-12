@@ -14,6 +14,10 @@ from types import SimpleNamespace
 from typing import Any, Callable, Literal
 
 from autonomous_iteration.checkpoint_store import RuntimeCheckpointStore
+from autonomous_iteration.decomposition_policy import (
+    DecompositionPolicyResolver,
+    SingleTaskPlanBuilder,
+)
 from autonomous_iteration.task_models import (
     Task,
     TaskDecompositionResult,
@@ -34,6 +38,9 @@ from metadata import (
     ContextCompactionBinding,
     ContextCompactionRecord,
     ContextSelectionMetadata,
+    DecompositionDecisionKind,
+    DecompositionDecisionSource,
+    DecompositionPolicyDecision,
     FinalizationFaultPoint,
     DecisionNeedMetadata,
     DurableArtifactReference,
@@ -64,6 +71,7 @@ from metadata import (
     RuntimeCheckpointMetadata,
     RuntimeExecutionMode,
     RuntimeExecutionModeSource,
+    RuntimeTaskPurpose,
     RuntimeFinalizationCursor,
     RuntimeFinalizationStage,
     RuntimeReportMetadata,
@@ -93,6 +101,7 @@ from utils.path_boundary import resolve_project_path
 
 WRITE_TOOLS = {"file_writer", "file_patch_writer", "file_delete_tool"}
 READ_TOOLS = {"file_reader", "multi_file_reader"}
+RESPONSE_EVIDENCE_TOOLS = READ_TOOLS | {"web_searcher"}
 EXECUTION_TOOLS = {"command_executor", "code_executor"}
 FILE_CREATE_OPERATIONS = {"create_file", "file_create", "directory_generate"}
 NON_EXECUTABLE_FILE_SUFFIXES = {
@@ -1421,6 +1430,8 @@ class _RuntimeSessionExecutor:
         self.runtime = runtime
         self.session_cursor_sink = session_cursor_sink
         self.session_bootstrap_sink = session_bootstrap_sink
+        self.decomposition_policy = DecompositionPolicyResolver()
+        self.single_task_builder = SingleTaskPlanBuilder()
 
     def run(
         self,
@@ -1475,7 +1486,7 @@ class _RuntimeSessionExecutor:
         stages = [
             "Semantic Analysis",
             "Memory Retrieval",
-            "Task Decomposition",
+            "Task Planning",
             "Execution",
             "Evaluation",
             "Iteration 1",
@@ -1559,30 +1570,31 @@ class _RuntimeSessionExecutor:
                 self._log("session_fast_path_completed", output_summary={"mode": "enhanced_ui"}, success=True)
                 return fast_result
 
-            stage_statuses["Task Decomposition"] = "running"
+            stage_statuses["Task Planning"] = "running"
             runtime.enhanced_ui.set_task_graph_state(
                 stage_statuses=stage_statuses,
-                current_stage="Task Decomposition",
+                current_stage="Task Planning",
             )
             runtime.enhanced_ui.set_current_task_state(
-                title="Task Decomposition",
-                details="Breaking down task into executable subtasks",
+                title="Task Planning",
+                details="Selecting a governed single-task or decomposition path",
                 status="running",
             )
             decomposition_failure: dict[str, Any] | None = None
-            with runtime.tracker.track_task("Task Decomposition", {"goal": goal}):
+            with runtime.tracker.track_task("Task Planning", {"goal": goal}):
                 try:
-                    decomposition = runtime.task_decomposer.decompose(
-                        task_description=goal,
+                    decomposition_decision, decomposition = self._select_initial_plan(
+                        goal,
+                        semantic=semantic,
                         context=context,
                     )
                 except (InvalidLLMResponseError, ValueError, TypeError, KeyError) as exc:
                     decomposition_failure = self._decomposition_failure_result(goal, context, exc)
             if decomposition_failure is not None:
-                stage_statuses["Task Decomposition"] = "failed"
+                stage_statuses["Task Planning"] = "failed"
                 runtime.enhanced_ui.set_task_graph_state(stage_statuses=stage_statuses)
                 runtime.enhanced_ui.set_current_task_state(
-                    title="Task Decomposition",
+                    title="Task Planning",
                     details=decomposition_failure["failure_reason"],
                     status="failed",
                 )
@@ -1604,16 +1616,32 @@ class _RuntimeSessionExecutor:
                     execution_order=execution_order,
                     next_task_index=0,
                     results=[],
+                    decomposition_decision=decomposition_decision,
                     mode="enhanced_ui",
-                ).model_copy(update={"stage": SessionStage.DECOMPOSITION_RECORDED})
+                ).model_copy(
+                    update={
+                        "stage": (
+                            SessionStage.PLAN_RECORDED
+                            if decomposition_decision.kind == DecompositionDecisionKind.SINGLE_TASK
+                            else SessionStage.DECOMPOSITION_RECORDED
+                        )
+                    }
+                )
             )
 
-            stage_statuses["Task Decomposition"] = "completed"
+            stage_statuses["Task Planning"] = "completed"
             runtime.enhanced_ui.set_task_graph_state(
                 stage_statuses=stage_statuses,
                 tasks=runtime._dashboard_task_items(decomposition.subtasks),
             )
-            runtime.enhanced_ui.log_activity("success", f"Created {len(decomposition.subtasks)} subtasks")
+            runtime.enhanced_ui.log_activity(
+                "success",
+                (
+                    "Selected one governed bounded task"
+                    if decomposition_decision.kind == DecompositionDecisionKind.SINGLE_TASK
+                    else f"Created {len(decomposition.subtasks)} subtasks"
+                ),
+            )
 
             breakdown_info = f"Created {len(decomposition.subtasks)} subtasks:\n\n"
             for i, subtask in enumerate(decomposition.subtasks[:5], 1):
@@ -1621,7 +1649,7 @@ class _RuntimeSessionExecutor:
             if len(decomposition.subtasks) > 5:
                 breakdown_info += f"\n... and {len(decomposition.subtasks) - 5} more tasks"
             runtime.enhanced_ui.set_current_task_state(
-                title="Task Decomposition",
+                title="Task Planning",
                 details=breakdown_info,
                 status="completed",
             )
@@ -1653,6 +1681,7 @@ class _RuntimeSessionExecutor:
                         execution_order=order,
                         next_task_index=next_index,
                         results=current_results,
+                        decomposition_decision=decomposition_decision,
                         mode="enhanced_ui",
                     )
                 ),
@@ -1777,6 +1806,48 @@ class _RuntimeSessionExecutor:
             confidence=float(getattr(semantic, "confidence", 0.0) or 0.0),
         )
 
+    def _select_initial_plan(
+        self,
+        goal: str,
+        *,
+        semantic: Any,
+        context: dict[str, Any],
+    ) -> tuple[DecompositionPolicyDecision, TaskDecompositionResult]:
+        semantic_snapshot = self._semantic_snapshot(semantic)
+        decision = self.decomposition_policy.resolve(
+            goal,
+            semantic=semantic_snapshot,
+            context=context,
+        )
+        if decision.kind == DecompositionDecisionKind.SINGLE_TASK:
+            decomposition = self.single_task_builder.build(
+                goal,
+                semantic=semantic_snapshot,
+                decision=decision,
+                context=context,
+            )
+        else:
+            decomposition = self.runtime.task_decomposer.decompose(
+                task_description=goal,
+                context=context,
+            )
+        runtime_state = getattr(getattr(self.runtime, "runtime_controller", None), "state", None)
+        if isinstance(runtime_state, RuntimeStateMetadata):
+            runtime_state.record_decomposition_decision(decision)
+        self._log(
+            "session_plan_selected",
+            input_summary={"goal": goal, "task_type": semantic_snapshot.task_type},
+            output_summary={
+                "decision": decision.kind,
+                "reason_code": decision.reason_code,
+                "source": decision.source,
+                "task_count": len(decomposition.subtasks),
+                "provider_decomposition": decision.provider_required,
+            },
+            success=True,
+        )
+        return decision, decomposition
+
     @staticmethod
     def _task_node(task: Task) -> TaskGraphNodeMetadata:
         return TaskGraphNodeMetadata(
@@ -1832,14 +1903,41 @@ class _RuntimeSessionExecutor:
         original_task: TaskGraphNodeMetadata,
         tasks: list[TaskGraphNodeMetadata],
         execution_order: list[str],
+        decomposition_decision: DecompositionPolicyDecision | None = None,
+        *,
+        version: Literal["metadata_v1", "task_fields_v2"] = "metadata_v1",
     ) -> str:
+        if version == "task_fields_v2":
+            original_payload = _RuntimeSessionExecutor._task_plan_payload(original_task)
+            task_payloads = [
+                _RuntimeSessionExecutor._task_plan_payload(task) for task in tasks
+            ]
+        else:
+            original_payload = original_task.to_json_dict()
+            task_payloads = [task.to_json_dict() for task in tasks]
         payload = {
-            "original_task": original_task.to_json_dict(),
-            "tasks": [task.to_json_dict() for task in tasks],
+            "original_task": original_payload,
+            "tasks": task_payloads,
             "execution_order": execution_order,
         }
+        if decomposition_decision is not None:
+            payload["decomposition_decision"] = decomposition_decision.model_dump(mode="json")
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _task_plan_payload(task: TaskGraphNodeMetadata) -> dict[str, Any]:
+        return task.model_dump(
+            mode="json",
+            exclude={
+                "kind",
+                "schema_version",
+                "source",
+                "correlation",
+                "created_at",
+                "annotations",
+            },
+        )
 
     def _execution_order(self, tasks: list[Task]) -> list[str]:
         try:
@@ -1885,6 +1983,7 @@ class _RuntimeSessionExecutor:
         execution_order: list[str],
         next_task_index: int,
         results: list[TaskExecutionResult],
+        decomposition_decision: DecompositionPolicyDecision,
         mode: Literal["standard", "enhanced_ui"] = "standard",
     ) -> SessionExecutionCursor:
         original = self._task_node(decomposition.original_task)
@@ -1896,7 +1995,15 @@ class _RuntimeSessionExecutor:
                 if next_task_index == len(execution_order)
                 else SessionStage.TASK_EXECUTION
             ),
-            plan_hash=self._session_plan_hash(original, tasks, execution_order),
+            plan_hash=self._session_plan_hash(
+                original,
+                tasks,
+                execution_order,
+                decomposition_decision,
+                version="task_fields_v2",
+            ),
+            plan_hash_version="task_fields_v2",
+            decomposition_decision=decomposition_decision,
             semantic=self._semantic_snapshot(semantic),
             original_task=original,
             tasks=tasks,
@@ -1913,10 +2020,17 @@ class _RuntimeSessionExecutor:
         self,
         cursor: SessionExecutionCursor,
     ) -> tuple[Any, TaskDecompositionResult, list[TaskExecutionResult]]:
+        decision_for_hash = (
+            None
+            if cursor.decomposition_decision.source == DecompositionDecisionSource.LEGACY_CURSOR
+            else cursor.decomposition_decision
+        )
         if cursor.plan_hash != self._session_plan_hash(
             cursor.original_task,
             cursor.tasks,
             cursor.execution_order,
+            decision_for_hash,
+            version=cursor.plan_hash_version,
         ):
             raise ValueError("session cursor plan hash mismatch")
         semantic = SimpleNamespace(
@@ -2003,10 +2117,11 @@ class _RuntimeSessionExecutor:
                     self._log("session_fast_path_completed", output_summary={"mode": "standard"}, success=True)
                     return fast_result
 
-                runtime.console.print("[bold cyan]🔍 Decomposing task...[/bold cyan]")
+                runtime.console.print("[bold cyan]🔍 Selecting governed task plan...[/bold cyan]")
                 try:
-                    decomposition = runtime.task_decomposer.decompose(
-                        task_description=goal,
+                    decomposition_decision, decomposition = self._select_initial_plan(
+                        goal,
+                        semantic=semantic,
                         context=context,
                     )
                 except (InvalidLLMResponseError, ValueError, TypeError, KeyError) as exc:
@@ -2028,7 +2143,16 @@ class _RuntimeSessionExecutor:
                     execution_order=execution_order,
                     next_task_index=0,
                     results=[],
-                ).model_copy(update={"stage": SessionStage.DECOMPOSITION_RECORDED})
+                    decomposition_decision=decomposition_decision,
+                ).model_copy(
+                    update={
+                        "stage": (
+                            SessionStage.PLAN_RECORDED
+                            if decomposition_decision.kind == DecompositionDecisionKind.SINGLE_TASK
+                            else SessionStage.DECOMPOSITION_RECORDED
+                        )
+                    }
+                )
                 self._emit_cursor(initial_cursor)
 
                 runtime.console.print(f"  • Original task: {decomposition.original_task.description}")
@@ -2055,6 +2179,7 @@ class _RuntimeSessionExecutor:
                 if resume_cursor.mode != session_mode:
                     raise ValueError("session cursor mode does not match requested execution mode")
                 semantic, decomposition, prior_results = self._restore_cursor(resume_cursor)
+                decomposition_decision = resume_cursor.decomposition_decision
                 execution_order = list(resume_cursor.execution_order)
                 start_index = resume_cursor.next_task_index
                 runtime.console.print(
@@ -2077,6 +2202,7 @@ class _RuntimeSessionExecutor:
                         execution_order=order,
                         next_task_index=next_index,
                         results=current_results,
+                        decomposition_decision=decomposition_decision,
                         mode=session_mode,
                     )
                 ),
@@ -2195,6 +2321,13 @@ class _RuntimeSessionExecutor:
         all_tasks_completed: bool,
     ) -> tuple[Any, list[str], Any, dict[str, Any] | None]:
         runtime = self.runtime
+        runtime_state = getattr(getattr(runtime, "runtime_controller", None), "state", None)
+        if (
+            isinstance(runtime_state, RuntimeStateMetadata)
+            and runtime_state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
+        ):
+            written_files = runtime._collect_written_files(results)
+            return None, written_files, None, None
         readme_result = runtime._finalize_project_readme(goal, results) if all_tasks_completed else None
         written_files = runtime._collect_written_files(results)
         project_path = runtime._infer_project_path_from_files(goal, written_files) if written_files else None
@@ -2467,11 +2600,20 @@ class _RuntimeSessionExecutor:
         execution_failure: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         runtime = self.runtime
+        runtime_state = getattr(getattr(runtime, "runtime_controller", None), "state", None)
+        evidence_only = (
+            isinstance(runtime_state, RuntimeStateMetadata)
+            and runtime_state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
+        )
         result = {
             "success": success,
-            "core_success": all(
-                getattr(task, "status", None) == TaskStatus.COMPLETED
-                for task in decomposition.subtasks
+            "core_success": (
+                None
+                if evidence_only
+                else all(
+                    getattr(task, "status", None) == TaskStatus.COMPLETED
+                    for task in decomposition.subtasks
+                )
             ),
             "goal": goal,
             "semantic_analysis": semantic,
@@ -2601,6 +2743,7 @@ class AgentRuntimeController:
             None,
         ]
         | None = None,
+        evidence_bridge: Any | None = None,
     ) -> None:
         self.runtime = runtime
         self.runtime_guard = runtime_guard or RuntimeGuard()
@@ -2623,12 +2766,14 @@ class AgentRuntimeController:
         self.checkpoint_store = checkpoint_store
         self._checkpoint_fault_injector = checkpoint_fault_injector
         self._finalization_fault_injector = finalization_fault_injector
+        self.evidence_bridge = evidence_bridge
         self.state: RuntimeStateMetadata | None = None
         self._checkpointing_enabled = False
         self._checkpoint_generation = 0
         self._checkpoint_status = CheckpointStatus.DISABLED
         self._checkpoint_run_id = ""
         self._checkpoint_context: dict[str, Any] = {}
+        self._last_persisted_checkpoint: RuntimeCheckpointMetadata | None = None
         self._resume_attempt_id: str | None = None
         self._resume_source_checkpoint_id: str | None = None
         self._active_tool_checkpoint: dict[str, Any] = {}
@@ -2661,6 +2806,7 @@ class AgentRuntimeController:
         self._active_prompt_context_snapshot = None
         self._prompt_context_replay_enabled = False
         self._active_finalization_cursor = None
+        self._last_persisted_checkpoint = None
         self._resume_source_checkpoint_id = None
         reset_llm_ordinals = getattr(getattr(self.runtime, "llm_client", None), "reset_recovery_ordinals", None)
         if callable(reset_llm_ordinals):
@@ -2715,9 +2861,20 @@ class AgentRuntimeController:
                 raise ValueError("session ingress and runtime constraint state differ")
             raw_session_constraints = raw_session_ingress.session_constraints
             self._active_session_ingress_state = raw_session_ingress.model_copy(deep=True)
+        raw_task_purpose = context.get("task_purpose", RuntimeTaskPurpose.PROJECT_TASK)
+        if not isinstance(raw_task_purpose, RuntimeTaskPurpose):
+            raise TypeError("task_purpose must be a RuntimeTaskPurpose")
+        improvement_policy = _project_improvement_policy(self.runtime)
+        if raw_task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE:
+            improvement_policy = ProjectImprovementPolicy(
+                requirement=ProjectImprovementRequirement.DISABLED,
+                target_successes=0,
+                max_attempts=0,
+            )
         state = RuntimeStateMetadata(
             goal=goal,
-            project_improvement_policy=_project_improvement_policy(self.runtime),
+            task_purpose=raw_task_purpose,
+            project_improvement_policy=improvement_policy,
             session_constraints=(
                 raw_session_constraints.model_copy(deep=True)
                 if isinstance(raw_session_constraints, SessionConstraintState)
@@ -2728,12 +2885,19 @@ class AgentRuntimeController:
         )
         self.state = state
         self._active_task_id = str(context.get("task_id") or getattr(self.runtime, "session_id", "") or "")
-        read_only_mode = apply_read_only_runtime_mode(
-            state,
-            goal,
-            tags=[str(tag) for tag in context.get("tags") or []],
-            task_type=str(context.get("task_type") or ""),
-        )
+        if raw_task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE:
+            state.execution_mode = RuntimeExecutionMode.READ_ONLY
+            state.execution_mode_source = RuntimeExecutionModeSource.ROOT_TASK_CARD
+            state.execution_mode_reason = "Response-evidence tasks are read-only by contract."
+            state.add_fact("Response-evidence task admitted with a read-only authority ceiling.")
+            read_only_mode = True
+        else:
+            read_only_mode = apply_read_only_runtime_mode(
+                state,
+                goal,
+                tags=[str(tag) for tag in context.get("tags") or []],
+                task_type=str(context.get("task_type") or ""),
+            )
         state.add_fact(f"User goal captured: {goal}")
         if context.get("project_path"):
             state.add_fact(f"Project path: {context['project_path']}")
@@ -4017,6 +4181,7 @@ class AgentRuntimeController:
         payload: dict[str, Any],
     ) -> bool:
         if not self._checkpointing_enabled:
+            self._last_persisted_checkpoint = None
             return True
         if self.state is None or self.checkpoint_store is None or not self._checkpoint_run_id:
             self._record_checkpoint_failure(
@@ -4139,6 +4304,44 @@ class AgentRuntimeController:
             self._checkpoint_run_id = str(run.run_id)
         if self.checkpoint_store is None and recorder is not None:
             self.checkpoint_store = RuntimeCheckpointStore(recorder.trajectory_dir)
+        prepared_checkpoint_id = str(context.get("prepared_task_checkpoint_id") or "").strip()
+        if not prepared_checkpoint_id:
+            return
+        requested_run_id = str(context.get("run_id") or "").strip()
+        if (
+            not read_only_mode
+            or self.state is None
+            or self.state.task_purpose != RuntimeTaskPurpose.RESPONSE_EVIDENCE
+            or not requested_run_id
+            or self.checkpoint_store is None
+        ):
+            raise ValueError("prepared evidence checkpoint requires a durable read-only runtime")
+        prepared = self.checkpoint_store.load(requested_run_id, prepared_checkpoint_id)
+        if prepared is None:
+            raise ValueError("prepared evidence checkpoint is unavailable")
+        project_root = str(context.get("project_path") or "").strip()
+        if (
+            prepared.run_id != requested_run_id
+            or prepared.root_task_id != self._active_task_id
+            or prepared.session_id != requested_run_id
+            or prepared.runtime_state.task_purpose != RuntimeTaskPurpose.RESPONSE_EVIDENCE
+            or prepared.runtime_state.execution_mode != RuntimeExecutionMode.READ_ONLY
+            or prepared.runtime_state.core_success is not None
+            or Path(prepared.project_fingerprint.project_root).expanduser().resolve(strict=False)
+            != Path(project_root).expanduser().resolve(strict=False)
+        ):
+            raise ValueError("prepared evidence checkpoint differs from the requested task")
+        if (
+            self._active_session_ingress_state is not None
+            and prepared.session_ingress_state != self._active_session_ingress_state
+        ):
+            raise ValueError("prepared evidence checkpoint session ingress is stale")
+        latest = self.checkpoint_store.load_latest(requested_run_id)
+        if latest is None or latest.checkpoint_id != prepared.checkpoint_id:
+            raise ValueError("prepared evidence checkpoint is not the current task boundary")
+        self._checkpoint_run_id = requested_run_id
+        self._checkpoint_generation = prepared.generation
+        self._checkpoint_status = CheckpointStatus.DURABLE
 
     def _persist_checkpoint(
         self,
@@ -4276,6 +4479,7 @@ class AgentRuntimeController:
         try:
             saved = self.checkpoint_store.save(checkpoint, expected_generation=self._checkpoint_generation)
         except Exception as exc:
+            self._last_persisted_checkpoint = None
             self._record_checkpoint_failure(safe_boundary, str(exc))
             return False
         if self._checkpoint_fault_injector is not None:
@@ -4286,6 +4490,7 @@ class AgentRuntimeController:
             )
         self._checkpoint_generation = saved.generation
         self._checkpoint_status = CheckpointStatus.DURABLE
+        self._last_persisted_checkpoint = saved.model_copy(deep=True)
         hooks = getattr(self.runtime, "runtime_diagnostics_hooks", None)
         if hooks and hasattr(hooks, "on_checkpoint_created"):
             hooks.on_checkpoint_created(saved)
@@ -4461,6 +4666,12 @@ class AgentRuntimeController:
 
     def _checkpointed_mutation_class(self, selection: ToolSelection) -> str | None:
         if selection.tool_name in READ_TOOLS:
+            return "read_only"
+        if (
+            selection.tool_name == "web_searcher"
+            and self.state is not None
+            and self.state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
+        ):
             return "read_only"
         if selection.tool_name in FILE_MUTATION_TOOLS:
             return "mutating"
@@ -4859,7 +5070,8 @@ class AgentRuntimeController:
         previous_verification_status = str(state.verification_status or "")
         success = bool(result.get("success"))
         core_success = bool(result.get("core_success", success))
-        state.core_success = core_success
+        evidence_only = state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
+        state.core_success = None if evidence_only else core_success
         status = result.get("project_improvement_status")
         if status is not None:
             state.project_improvement_status = ProjectImprovementStatus(status)
@@ -4871,14 +5083,26 @@ class AgentRuntimeController:
                     state.add_fact(f"{key}: {stats[key]}")
         for file_path in result.get("written_files") or result.get("changed_files") or []:
             state.add_modified_file(str(file_path))
+        if evidence_only and state.modified_files:
+            state.phase = AgentPhase.BLOCKED
+            state.completion_reason = "response-evidence task observed an unauthorized mutation"
+            state.add_unknown(state.completion_reason)
+            success = False
         if state.modified_files:
-            state.verification_status = "passed" if core_success else "failed"
-        state.phase = AgentPhase.SUMMARIZE if success else AgentPhase.RECOVER
-        state.completion_reason = (
-            "runtime session completed"
-            if success
-            else str(result.get("error") or result.get("failure_reason") or "runtime session failed")
-        )
+            state.verification_status = (
+                "failed" if evidence_only else ("passed" if core_success else "failed")
+            )
+        if state.phase != AgentPhase.BLOCKED:
+            state.phase = AgentPhase.SUMMARIZE if success else AgentPhase.RECOVER
+            state.completion_reason = (
+                "response evidence collected"
+                if success and evidence_only
+                else (
+                    "runtime session completed"
+                    if success
+                    else str(result.get("error") or result.get("failure_reason") or "runtime session failed")
+                )
+            )
         if _phase_value(state.phase) != previous_phase:
             self._emit_runtime_phase_change(previous_phase, _phase_value(state.phase), state.verification_status, state.completion_reason, state)
         if str(state.verification_status or "") != previous_verification_status:
@@ -5019,6 +5243,12 @@ class AgentRuntimeController:
         state: RuntimeStateMetadata,
         session_result: dict[str, Any],
     ) -> dict[str, Any]:
+        if state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE:
+            return self._runtime_result(
+                state,
+                session_result,
+                emit_task_finished=False,
+            )
         if not self._checkpointing_enabled:
             return self._runtime_result(state, session_result)
         if self._checkpoint_status == CheckpointStatus.UNAVAILABLE:
@@ -5118,6 +5348,27 @@ class AgentRuntimeController:
         report: RuntimeReportMetadata | None = None,
         emit_task_finished: bool = True,
     ) -> dict[str, Any]:
+        if state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE:
+            success = bool(session_result.get("success")) and not state.modified_files
+            result = {
+                "success": success,
+                "goal": state.goal,
+                "agent_runtime_state": state.to_json_dict(),
+                "session_result": session_result,
+                "core_success": None,
+                **(
+                    {
+                        "session_ingress_state": self._active_session_ingress_state.model_dump(
+                            mode="json"
+                        )
+                    }
+                    if self._active_session_ingress_state is not None
+                    else {}
+                ),
+            }
+            if self._checkpointing_enabled:
+                result["checkpoint_status"] = self._checkpoint_status
+            return result
         report = report or self.reporter.report(state)
         hooks = getattr(self.runtime, "runtime_diagnostics_hooks", None)
         if hooks and emit_task_finished:
@@ -5198,7 +5449,17 @@ class AgentRuntimeController:
         selection: ToolSelection,
         execution_result: Any,
     ) -> None:
-        if selection.tool_name in READ_TOOLS:
+        evidence_only = state.task_purpose == RuntimeTaskPurpose.RESPONSE_EVIDENCE
+        evidence_source_tool = selection.tool_name in RESPONSE_EVIDENCE_TOOLS
+        if selection.tool_name in READ_TOOLS or (evidence_only and evidence_source_tool):
+            pending_evidence = None
+            if evidence_only:
+                if self.evidence_bridge is None:
+                    raise RuntimeError("response-evidence tool result has no evidence bridge")
+                if not self._checkpointing_enabled:
+                    raise RuntimeError("response-evidence tool result requires durable checkpointing")
+                pending_evidence = self.evidence_bridge.observe(selection, execution_result)
+                state.add_fact(str(pending_evidence.marker))
             active_call_id = str(self._active_tool_checkpoint.get("call_id") or "")
             self._read_tool_replay_entries = [
                 entry.model_copy(update={"applied": True})
@@ -5206,7 +5467,7 @@ class AgentRuntimeController:
                 else entry
                 for entry in self._read_tool_replay_entries
             ]
-            self._persist_checkpoint(
+            persisted = self._persist_checkpoint(
                 state,
                 reason=f"read-only tool result applied: {selection.tool_name}",
                 safe_boundary=CheckpointBoundary.TOOL_RESULT_APPLIED,
@@ -5215,6 +5476,15 @@ class AgentRuntimeController:
                 mutation_class="read_only",
                 side_effect_state="applied",
             )
+            if not persisted:
+                raise RuntimeError("response-evidence applied checkpoint is unavailable")
+            if pending_evidence is not None:
+                if self._last_persisted_checkpoint is None:
+                    raise RuntimeError("response-evidence applied checkpoint was not retained")
+                self.evidence_bridge.bind_checkpoint(
+                    pending_evidence,
+                    self._last_persisted_checkpoint,
+                )
             return
         if selection.tool_name not in FILE_MUTATION_TOOLS:
             if selection.tool_name == "command_executor" and self._active_tool_checkpoint:

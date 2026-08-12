@@ -54,6 +54,7 @@ There are 79 public concrete contracts, one for each `MetadataKind`.
 | Bug and environment repair (`metadata/bugfix.py`) | `BugFixAttemptMetadata`, `BugFixResultMetadata`, `EnvironmentFailureMetadata`, `EnvironmentFixResultMetadata` | Bounded repair attempts and their final evidence. |
 | Warning analysis (`metadata/warnings.py`) | `WarningItemMetadata`, `WarningCheckResultMetadata` | Structured warning classification and the aggregate warning-check result. |
 | Generated-agent data flow (`metadata/data.py`) | `CollectedDataMetadata`, `ProcessedDataMetadata`, `PresentationMetadata` | Collection, processing, and presentation-stage exchange for generated agents. |
+| Conversation iteration (`metadata/iteration.py`) | `IterationTurnRecordMetadata` | Durable per-turn record for the conversation-owned iteration ledger; preserves identity, typed task purpose, assistant/user payload boundaries, and completion evidence without becoming a second runtime-state authority. |
 
 ## Similar-looking contracts that are not currently duplicates
 
