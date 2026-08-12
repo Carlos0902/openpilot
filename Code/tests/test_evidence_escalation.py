@@ -167,6 +167,376 @@ def _receipt_and_checkpoint(
     return receipt, checkpoint
 
 
+def _external_receipt_from_summary(
+    turn_store,
+    checkpoint_store,
+    controller,
+    ingress,
+    active,
+    fingerprint,
+    *,
+    summary: str,
+    source_domain: str = "wttr.in",
+):
+    obligation = next(item for item in active.obligations if item.is_blocking)
+    observed_at = datetime(2026, 8, 11, tzinfo=UTC)
+    payload = {
+        "obligation_id": obligation.obligation_id,
+        "source_class": "current_external",
+        "observed_at": observed_at.isoformat(),
+        "evidence": {
+            "tool_name": "web_searcher",
+            "output": {
+                "status": "success",
+                "result": {
+                    "kind": "search_artifact",
+                    "query": "今天常熟的天气怎么样",
+                    "effective_query": "今天常熟的天气怎么样",
+                    "provider": "wttr_in",
+                    "count": 1,
+                    "results": [
+                        {
+                            "rank": 1,
+                            "title": "常熟当前天气",
+                            "url": "https://wttr.in/Changshu",
+                            "snippet": summary,
+                            "source_domain": source_domain,
+                        }
+                    ],
+                    "research_summary": summary,
+                    "key_points": [summary],
+                    "source_notes": [],
+                    "follow_up_queries": [],
+                    "warnings": [],
+                },
+            },
+        },
+    }
+    reference = turn_store.save_artifact(
+        "conversation-1",
+        "run-1",
+        kind="observed_evidence",
+        payload=payload,
+    )
+    content_hash = controller.evidence_payload_hash(payload)
+    initial = checkpoint_store.load_latest("run-1")
+    state = initial.runtime_state.model_copy(deep=True)
+    state.known_facts.append(f"evidence:{reference.artifact_id}:{content_hash}")
+    checkpoint = checkpoint_store.save(
+        RuntimeCheckpointMetadata(
+            checkpoint_id="external-evidence-checkpoint",
+            generation=2,
+            run_id="run-1",
+            root_task_id=initial.root_task_id,
+            session_id="run-1",
+            checkpoint_reason="external evidence observed",
+            safe_boundary="tool_result_applied",
+            runtime_state=state,
+            session_ingress_state=ingress,
+            side_effect_state="applied",
+            tool_name="web_searcher",
+            mutation_class="read_only",
+            project_fingerprint=fingerprint,
+        ),
+        expected_generation=1,
+    )
+    return EvidenceReceipt(
+        obligation_id=obligation.obligation_id,
+        source_class="current_external",
+        artifact_ref=reference,
+        content_hash=content_hash,
+        checkpoint_id=checkpoint.checkpoint_id,
+        checkpoint_digest=checkpoint.integrity_checksum,
+        observed_at=observed_at,
+    )
+
+
+def _materialized_changshu_weather(tmp_path):
+    turn_store = IterationTurnStore(tmp_path / "turns")
+    checkpoint_store = RuntimeCheckpointStore(tmp_path / "checkpoints")
+    question = "今天常熟的天气怎么样"
+    initial_answer = "抱歉，我无法提供常熟今天的实时天气信息。"
+    candidate = BoundedModelResponseController(
+        turn_store,
+        _Client(
+            {
+                "response": initial_answer,
+                "claims": [{"text": initial_answer}],
+            }
+        ),
+    ).complete(question, ingress=_ingress(question), facts=_facts())
+    controller = EvidenceEscalationController(
+        turn_store,
+        checkpoint_store,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    fingerprint = ProjectFingerprint(
+        project_root="/tmp/project",
+        git_head="abc123",
+        environment_id="env-1",
+    )
+    active, needs = controller.materialize_read_only_task(
+        candidate.record,
+        current_ingress=candidate.ingress,
+        project_fingerprint=fingerprint,
+    )
+    return turn_store, checkpoint_store, controller, candidate, active, needs, fingerprint
+
+
+def test_current_external_decision_need_uses_original_user_question(tmp_path) -> None:
+    _turn_store, _checkpoint_store, _controller, _candidate_result, _active, needs, _fingerprint = (
+        _materialized_changshu_weather(tmp_path)
+    )
+
+    assert len(needs) == 1
+    assert needs[0].query == "今天常熟的天气怎么样"
+
+
+def test_current_external_evidence_rewrites_response_from_search_summary(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, candidate, active, _needs, fingerprint = (
+        _materialized_changshu_weather(tmp_path)
+    )
+    summary = "常熟当前26°C，体感28°C，湿度94%；今天有阵雨，最高30°C，最低25°C。"
+    receipt = _external_receipt_from_summary(
+        turn_store,
+        checkpoint_store,
+        controller,
+        candidate.ingress,
+        active,
+        fingerprint,
+        summary=summary,
+    )
+
+    completed = controller.absorb_and_complete(
+        active,
+        current_ingress=candidate.ingress,
+        current_project_fingerprint=fingerprint,
+        receipts=(receipt,),
+    )
+
+    assert controller.response_content(completed) == summary
+    assert completed.response_candidate.response_hash != active.response_candidate.response_hash
+    assert completed.grounding_decision.response_hash == completed.response_candidate.response_hash
+
+
+def test_irrelevant_current_external_evidence_fails_closed(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, candidate, active, _needs, fingerprint = (
+        _materialized_changshu_weather(tmp_path)
+    )
+    receipt = _external_receipt_from_summary(
+        turn_store,
+        checkpoint_store,
+        controller,
+        candidate.ingress,
+        active,
+        fingerprint,
+        summary="巴黎证券市场今日小幅上涨。",
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=candidate.ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE
+
+
+def test_current_external_summary_without_a_source_fails_closed(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, candidate, active, _needs, fingerprint = (
+        _materialized_changshu_weather(tmp_path)
+    )
+    receipt = _external_receipt_from_summary(
+        turn_store,
+        checkpoint_store,
+        controller,
+        candidate.ingress,
+        active,
+        fingerprint,
+        summary="常熟当前26°C。",
+        source_domain="",
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=candidate.ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE
+
+
+def test_external_subject_tokens_do_not_remove_english_substrings() -> None:
+    assert EvidenceEscalationController._external_subject_tokens(
+        "What is the weather in Bristol today?"
+    ) == ("bristol",)
+
+
+def test_multiple_current_external_claims_rewrite_one_grounded_response(tmp_path) -> None:
+    turn_store = IterationTurnStore(tmp_path / "turns")
+    checkpoint_store = RuntimeCheckpointStore(tmp_path / "checkpoints")
+    question = "今天常熟的天气怎么样"
+    candidate = BoundedModelResponseController(
+        turn_store,
+        _Client(
+            {
+                "response": "抱歉，我无法获取实时天气。建议使用天气应用查询常熟天气。",
+                "claims": [
+                    {"text": "抱歉，我无法获取实时天气。"},
+                    {"text": "建议使用天气应用查询常熟天气。"},
+                ],
+            }
+        ),
+    ).complete(question, ingress=_ingress(question), facts=_facts())
+    controller = EvidenceEscalationController(
+        turn_store,
+        checkpoint_store,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    fingerprint = ProjectFingerprint(
+        project_root="/tmp/project",
+        git_head="abc123",
+        environment_id="env-1",
+    )
+    active, _needs = controller.materialize_read_only_task(
+        candidate.record,
+        current_ingress=candidate.ingress,
+        project_fingerprint=fingerprint,
+    )
+    summary = "常熟当前26°C，体感28°C，湿度94%；今天有阵雨，最高30°C，最低25°C。"
+    state = checkpoint_store.load_latest("run-1").runtime_state.model_copy(deep=True)
+    receipts = []
+    for generation, obligation in enumerate(
+        (item for item in active.obligations if item.is_blocking),
+        start=2,
+    ):
+        observed_at = datetime(2026, 8, 11, tzinfo=UTC)
+        payload = {
+            "obligation_id": obligation.obligation_id,
+            "source_class": "current_external",
+            "observed_at": observed_at.isoformat(),
+            "evidence": {
+                "tool_name": "web_searcher",
+                "output": {
+                    "status": "success",
+                    "result": {
+                        "kind": "search_artifact",
+                        "query": question,
+                        "effective_query": question,
+                        "provider": "wttr_in",
+                        "count": 1,
+                        "results": [
+                            {
+                                "rank": 1,
+                                "title": "常熟当前天气",
+                                "url": "https://wttr.in/Changshu",
+                                "snippet": summary,
+                                "source_domain": "wttr.in",
+                            }
+                        ],
+                        "research_summary": summary,
+                        "key_points": [summary],
+                        "source_notes": [],
+                        "follow_up_queries": [],
+                        "warnings": [],
+                    },
+                },
+            },
+        }
+        reference = turn_store.save_artifact(
+            "conversation-1", "run-1", kind="observed_evidence", payload=payload
+        )
+        content_hash = controller.evidence_payload_hash(payload)
+        state.known_facts.append(f"evidence:{reference.artifact_id}:{content_hash}")
+        checkpoint = checkpoint_store.save(
+            RuntimeCheckpointMetadata(
+                checkpoint_id=f"external-checkpoint-{generation}",
+                generation=generation,
+                run_id="run-1",
+                root_task_id=active.task_binding.task_id,
+                session_id="run-1",
+                checkpoint_reason="external evidence observed",
+                safe_boundary="tool_result_applied",
+                runtime_state=state.model_copy(deep=True),
+                session_ingress_state=candidate.ingress,
+                side_effect_state="applied",
+                tool_name="web_searcher",
+                mutation_class="read_only",
+                project_fingerprint=fingerprint,
+            ),
+            expected_generation=generation - 1,
+        )
+        receipts.append(
+            EvidenceReceipt(
+                obligation_id=obligation.obligation_id,
+                source_class="current_external",
+                artifact_ref=reference,
+                content_hash=content_hash,
+                checkpoint_id=checkpoint.checkpoint_id,
+                checkpoint_digest=checkpoint.integrity_checksum,
+                observed_at=observed_at,
+            )
+        )
+
+    completed = controller.absorb_and_complete(
+        active,
+        current_ingress=candidate.ingress,
+        current_project_fingerprint=fingerprint,
+        receipts=tuple(receipts),
+    )
+
+    assert controller.response_content(completed) == summary
+    assert len(completed.response_candidate.claims) == 2
+
+
+def test_external_evidence_rewrite_recovers_after_durable_completion(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, candidate, active, _needs, fingerprint = (
+        _materialized_changshu_weather(tmp_path)
+    )
+    summary = "常熟当前26°C，体感28°C，湿度94%；今天有阵雨，最高30°C，最低25°C。"
+    receipt = _external_receipt_from_summary(
+        turn_store,
+        checkpoint_store,
+        controller,
+        candidate.ingress,
+        active,
+        fingerprint,
+        summary=summary,
+    )
+
+    def crash_after_evidence_complete(boundary: str) -> None:
+        if boundary == "evidence_complete":
+            raise RuntimeError("crash after evidence_complete")
+
+    crashing = EvidenceEscalationController(
+        turn_store,
+        checkpoint_store,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+        after_write=crash_after_evidence_complete,
+    )
+    with pytest.raises(RuntimeError, match="evidence_complete"):
+        crashing.absorb_and_complete(
+            active,
+            current_ingress=candidate.ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt,),
+        )
+
+    completed = controller.absorb_and_complete(
+        active,
+        current_ingress=candidate.ingress,
+        current_project_fingerprint=fingerprint,
+        receipts=(receipt,),
+    )
+
+    assert completed.assistant_commit.state == "committed"
+    assert controller.response_content(completed) == summary
+
+
 def test_open_obligation_becomes_read_only_decision_need_and_task(tmp_path) -> None:
     (
         _turn_store,

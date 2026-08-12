@@ -5302,6 +5302,27 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: this boundary covers zero-tool bounded responses; tool
   execution recovery remains owned by the separate checkpoint/runtime paths.
 
+### External evidence completion and response grounding
+
+- Observed failure: current-external evidence queries were derived from the
+  model's claim text rather than the original user question, and completion
+  accepted evidence without rewriting the answer from a sourced, relevant
+  research summary.
+- Reproduction: ask for current weather, return a bounded refusal candidate,
+  then provide sourced weather evidence, irrelevant evidence, missing-source
+  evidence, stale evidence, and a crash after evidence completion. Assert that
+  only relevant sourced evidence rewrites and commits the final answer.
+- Implemented fix: bind external searches to the durable original question;
+  require successful provider/count/source/summary fields; check subject
+  relevance and freshness; derive a new response candidate and claim manifest
+  from the research summary; preserve retry identity across the rewritten
+  candidate; and checkpoint response-evidence searches without treating them
+  as local file-read replay entries.
+- Validation evidence: focused evidence and runtime checkpoint suite **113
+  passed**; compileall and diff-check passed.
+- Remaining limitation: this slice consumes already-produced evidence receipts;
+  provider transport and weather lookup remain owned by their dedicated tools.
+
 ### Multilingual response-claim coverage
 
 - Observed failure: claim coverage joined adjacent claim text with an inserted

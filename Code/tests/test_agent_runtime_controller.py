@@ -67,6 +67,7 @@ from metadata import (
     RuntimePromptContextSnapshot,
     RuntimeStateMetadata,
     RuntimeTaskPurpose,
+    SearchArtifactMetadata,
     SessionConstraintState,
     SessionIngressState,
     SessionTurn,
@@ -2605,6 +2606,54 @@ def test_runtime_controller_replays_read_result_without_reapplying_budget(tmp_pa
     latest = store.load_latest("run-read")
     assert latest is not None
     assert latest.read_tool_replay_entries[0].applied is True
+
+
+def test_response_evidence_web_search_checkpoints_without_local_read_replay(tmp_path) -> None:
+    store = RuntimeCheckpointStore(tmp_path)
+    runtime = SimpleNamespace(tool_registry=None, runtime_diagnostics_hooks=None, session_id="session-web")
+    controller = AgentRuntimeController(
+        runtime,
+        session_executor=SimpleNamespace(run=lambda *_args, **_kwargs: {"success": True}),
+        checkpoint_store=store,
+    )
+    controller.state = RuntimeStateMetadata(
+        goal="Ground current weather",
+        task_purpose=RuntimeTaskPurpose.RESPONSE_EVIDENCE,
+    )
+    controller._checkpointing_enabled = True
+    controller._checkpoint_run_id = "run-web"
+    controller._active_task_id = "root-web"
+    controller._checkpoint_context = {"project_path": str(tmp_path), "cwd": str(tmp_path)}
+    controller._active_session_cursor = _session_cursor(next_task_index=0)
+    selection = ToolSelection(
+        step_id="step_1_1",
+        tool_name="web_searcher",
+        reason=SelectionReason.CAPABILITY_MATCH,
+        input_metadata=ToolInputMetadata(tool_name="web_searcher", query="常熟天气"),
+    )
+    tool_call = SimpleNamespace(call_id="weather:r1:c1")
+    execution_result = SimpleNamespace(
+        success=True,
+        output_metadata=ToolResultMetadata(
+            tool_name="web_searcher",
+            status=ResultStatus.SUCCESS,
+            result=SearchArtifactMetadata(
+                query="常熟天气",
+                provider="wttr_in",
+                count=1,
+                research_summary="常熟当前26°C。",
+            ),
+        ),
+        error=None,
+    )
+
+    assert controller.prepare_tool_call(tool_call, selection) is True
+    assert controller.observe_tool_result(tool_call, selection, execution_result) is True
+
+    latest = store.load_latest("run-web")
+    assert latest is not None
+    assert latest.safe_boundary == CheckpointBoundary.TOOL_RESULT_OBSERVED
+    assert latest.read_tool_replay_entries == []
 
 
 def test_runtime_controller_exact_resume_restores_identity_state_and_budget(tmp_path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -42,6 +43,8 @@ from metadata import (
     ProjectFingerprint,
     ProjectImprovementPolicy,
     ProjectImprovementRequirement,
+    ResponseCandidate,
+    ResponseClaim,
     RuntimeCheckpointMetadata,
     RuntimeStateMetadata,
     RuntimeTaskPurpose,
@@ -310,6 +313,7 @@ class EvidenceEscalationController:
 
     def decision_needs(self, record: IterationTurnRecordMetadata) -> tuple[DecisionNeedMetadata, ...]:
         manifest = self._claim_manifest(record)
+        original_question = self._original_user_question(record)
         by_id = {item["claim_id"]: item for item in manifest}
         needs: list[DecisionNeedMetadata] = []
         for obligation in record.obligations:
@@ -338,7 +342,7 @@ class EvidenceEscalationController:
                     need_type=need_type,
                     question=f"Collect evidence for claim: {claim['text']}",
                     phase=AgentPhase.UNDERSTAND_PROJECT,
-                    query=claim["text"] if source == ClaimSourceClass.CURRENT_EXTERNAL else None,
+                    query=original_question if source == ClaimSourceClass.CURRENT_EXTERNAL else None,
                     decision_to_unlock=obligation.obligation_id,
                     expected_state_change="Close the source-compatible response evidence obligation.",
                     risk_level="low",
@@ -524,6 +528,7 @@ class EvidenceEscalationController:
             )
         closed: list[CompletionObligation] = []
         evidence_refs: list[str] = []
+        external_artifacts: list[EvidenceArtifactPayload] = []
         project_hash = self.project_fingerprint_hash(snapshot.initial_checkpoint.project_fingerprint)
         if self.project_fingerprint_hash(current_project_fingerprint) != project_hash:
             raise EvidenceEscalationError(
@@ -643,6 +648,7 @@ class EvidenceEscalationController:
                         EvidenceEscalationFailureCode.EXTERNAL_EVIDENCE_STALE,
                         "current-external evidence is outside the freshness window",
                     )
+                external_artifacts.append(artifact)
             evidence_ref = f"artifact:{receipt.artifact_ref.artifact_id}:{receipt.content_hash}"
             evidence_refs.append(evidence_ref)
             closed.append(
@@ -653,9 +659,23 @@ class EvidenceEscalationController:
                     }
                 )
             )
+        candidate = record.response_candidate
+        blocking_obligations = [item for item in record.obligations if item.is_blocking]
+        if (
+            external_artifacts
+            and len(external_artifacts) == len(blocking_obligations)
+            and all(
+                item.kind == CompletionObligationKind.CURRENT_EXTERNAL_FACT
+                for item in blocking_obligations
+            )
+        ):
+            candidate = self._candidate_from_external_evidence(
+                record,
+                artifacts=tuple(external_artifacts),
+            )
         required_ids = tuple(item.obligation_id for item in closed if item.required)
         grounding = GroundingDecision(
-            response_hash=record.response_candidate.response_hash,
+            response_hash=candidate.response_hash,
             status=GroundingStatus.APPROVED,
             obligation_ids=required_ids,
             satisfied_obligation_ids=required_ids,
@@ -669,8 +689,10 @@ class EvidenceEscalationController:
                     "phase": IterationPhase.COMPLETE,
                     "current_disposition": IterationDisposition.COMPLETE_RESPONSE,
                     "open_obligation_ids": (),
+                    "completion_candidate_hash": candidate.response_hash,
                 }
             ),
+            candidate=candidate,
             obligations=tuple(closed),
             grounding=grounding,
         )
@@ -754,7 +776,7 @@ class EvidenceEscalationController:
         current_project_fingerprint: ProjectFingerprint,
         receipts: tuple[EvidenceReceipt, ...],
     ) -> IterationTurnRecordMetadata | None:
-        if latest is None or latest.response_candidate != source.response_candidate:
+        if latest is None:
             return None
         if latest.task_binding.state != "none" or latest.grounding_decision is None:
             return None
@@ -794,6 +816,34 @@ class EvidenceEscalationController:
                 EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
                 "retry receipts differ from the durable evidence completion",
             )
+        if latest.response_candidate != source.response_candidate:
+            if (
+                not receipts
+                or any(
+                    item.source_class != ClaimSourceClass.CURRENT_EXTERNAL
+                    for item in receipts
+                )
+                or len([item for item in source.obligations if item.is_blocking])
+                != len(receipts)
+            ):
+                return None
+            artifacts = []
+            for receipt in receipts:
+                payload = self.turn_store.load_artifact(
+                    source.identity.conversation_id,
+                    source.identity.run_id,
+                    receipt.artifact_ref,
+                )
+                try:
+                    artifacts.append(EvidenceArtifactPayload.model_validate(payload))
+                except (TypeError, ValueError):
+                    return None
+            expected_candidate = self._candidate_from_external_evidence(
+                source,
+                artifacts=tuple(artifacts),
+            )
+            if latest.response_candidate != expected_candidate:
+                return None
         if latest.assistant_commit.state == AssistantLedgerCommitState.COMMITTED:
             return latest
         if latest.assistant_commit.state == AssistantLedgerCommitState.PENDING:
@@ -890,6 +940,175 @@ class EvidenceEscalationController:
                     "response claim manifest differs from candidate hashes",
                 )
         return claims
+
+    def _original_user_question(self, record: IterationTurnRecordMetadata) -> str:
+        payload = self.turn_store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            record.pre_task_state.user_input_ref,
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"message_id", "turn_index", "content"}
+            or payload.get("message_id") != record.pre_task_state.user_message_id
+            or payload.get("turn_index") != record.identity.turn_index
+            or not isinstance(payload.get("content"), str)
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "evidence escalation requires the durable original user input",
+            )
+        question = payload["content"].strip()
+        if not question:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "durable original user input is empty",
+            )
+        return question
+
+    def _candidate_from_external_evidence(
+        self,
+        record: IterationTurnRecordMetadata,
+        *,
+        artifacts: tuple[EvidenceArtifactPayload, ...],
+    ) -> ResponseCandidate:
+        question = self._original_user_question(record)
+        subject_tokens = self._external_subject_tokens(question)
+        summaries = tuple(self._external_research_summary(item) for item in artifacts)
+        if not subject_tokens or any(
+            not any(token in summary.casefold() for token in subject_tokens)
+            for summary in summaries
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "current-external evidence is not relevant to the original user question",
+            )
+        summary = summaries[0]
+        current = record.response_candidate
+        if current is None or len(current.claims) != len(artifacts):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "external evidence rewrite requires one receipt per durable response claim",
+            )
+        current_payload = self.turn_store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            current.response_ref,
+        )
+        if (
+            not self._valid_assistant_payload(current_payload)
+            or assistant_payload_hash(current_payload) != current.response_hash
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                "external evidence rewrite lost the durable assistant payload",
+            )
+        response_payload = {**current_payload, "content": summary}
+        response_ref = self.turn_store.save_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            kind="assistant_response",
+            payload=response_payload,
+        )
+        response_hash = assistant_payload_hash(response_payload)
+        segments = self._split_claim_text(summary, len(current.claims))
+        claims = tuple(
+            ResponseClaim(
+                claim_id=prior.claim_id,
+                claim_hash=self._hash({"claim": segment}),
+                source_class=ClaimSourceClass.CURRENT_EXTERNAL,
+            )
+            for prior, segment in zip(current.claims, segments, strict=True)
+        )
+        manifest_ref = self.turn_store.save_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            kind="response_claim_manifest",
+            payload={
+                "claims": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "claim_hash": claim.claim_hash,
+                        "source_class": claim.source_class,
+                        "text": segment,
+                    }
+                    for claim, segment in zip(claims, segments, strict=True)
+                ]
+            },
+        )
+        return ResponseCandidate(
+            candidate_id=f"{current.candidate_id}-evidence",
+            response_ref=response_ref,
+            response_hash=response_hash,
+            claims=claims,
+            claim_manifest_ref=manifest_ref,
+        )
+
+    @staticmethod
+    def _external_research_summary(artifact: EvidenceArtifactPayload) -> str:
+        output = artifact.evidence.get("output")
+        result = output.get("result") if isinstance(output, dict) else None
+        summary = result.get("research_summary") if isinstance(result, dict) else None
+        results = result.get("results") if isinstance(result, dict) else None
+        provider = result.get("provider") if isinstance(result, dict) else None
+        count = result.get("count") if isinstance(result, dict) else None
+        has_source = isinstance(results, list) and any(
+            isinstance(item, dict)
+            and isinstance(item.get("source_domain"), str)
+            and bool(item["source_domain"].strip())
+            and isinstance(item.get("url"), str)
+            and item["url"].startswith(("http://", "https://"))
+            for item in results
+        )
+        if (
+            not isinstance(output, dict)
+            or output.get("status") != "success"
+            or not isinstance(provider, str)
+            or not provider.strip()
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 1
+            or not has_source
+            or not isinstance(summary, str)
+            or not summary.strip()
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "current-external evidence requires a successful sourced research summary",
+            )
+        return summary.strip()
+
+    @staticmethod
+    def _split_claim_text(text: str, count: int) -> tuple[str, ...]:
+        if count < 1 or len(text) < count:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "external evidence summary cannot cover the durable claim count",
+            )
+        boundaries = [(len(text) * index) // count for index in range(count + 1)]
+        return tuple(text[boundaries[index]:boundaries[index + 1]] for index in range(count))
+
+    @staticmethod
+    def _external_subject_tokens(question: str) -> tuple[str, ...]:
+        normalized = question.casefold()
+        for marker in (
+            "怎么样", "如何", "请问", "告诉我", "一下", "今天", "今日", "明天",
+            "后天", "现在", "当前", "实时", "天气",
+        ):
+            normalized = normalized.replace(marker, " ")
+        normalized = normalized.replace("的", " ")
+        cjk_tokens = re.findall(r"[\u4e00-\u9fff]{2,}", normalized)
+        stop_words = {
+            "are", "at", "current", "for", "how", "in", "is", "latest", "the",
+            "today", "tomorrow", "weather", "what",
+        }
+        word_tokens = [
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9._-]{2,}", normalized)
+            if token not in stop_words
+        ]
+        tokens = [*cjk_tokens, *word_tokens]
+        return tuple(dict.fromkeys(tokens))
 
     @staticmethod
     def _valid_assistant_payload(payload: Any) -> bool:

@@ -5301,7 +5301,7 @@ class AgentRuntimeController:
             else None
         )
         action["observed_failure"] = failure
-        if mutation_class == "read_only":
+        if mutation_class == "read_only" and selection.tool_name in READ_TOOLS:
             if self.checkpoint_store is None or not self._checkpoint_run_id:
                 return False
             output = getattr(execution_result, "output_metadata", None)
