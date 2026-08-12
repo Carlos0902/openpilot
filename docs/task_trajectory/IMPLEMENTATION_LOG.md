@@ -1,5 +1,25 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Builder-sourced prompt-use simulation gate
+
+- Observed failure: the earlier prompt-use simulation used only synthetic
+  candidates and could not prove that source replacement matched the actual
+  `MemoryContextBuilder` projection.
+- Reproduction: build a real context from short memory, derive the selected
+  assistant sources, required instruction, and recent suffix, then run the
+  reusable preflight/simulation against those candidates. Assert prompt
+  reduction, exact source replacement, required/recent retention, unchanged
+  builder output shape, and dry-run-only behavior.
+- Implemented fix: add a self-contained builder-sourced simulation gate with
+  local canonical hashing, receipt writing, and zero-side-effect accounting.
+  It reuses the current builder output and never mutates its prompt or
+  context-compaction selection.
+- Validation evidence: builder-sourced simulation regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  489 experiment/test lines plus this log entry, below the 3,000-line threshold.
+- Remaining limitation: this remains a dry-run simulation; it does not enable
+  reusable-summary selection in production assembly.
+
 ## 2026-08-12 — Reusable compaction prompt-use simulation gate
 
 - Observed failure: raw-versus-reusable prompt simulation evidence depended on
