@@ -832,6 +832,13 @@ requested `pytest` check. Tasks that include `write_files`, omit the command, or
 use an unknown task kind remain on the ordinary contract-checked path and fail
 closed when required evidence is missing.
 
+Tool-planning prompts project the current typed `Task.write_files` list as the
+authoritative write scope. README generation is optional post-processing: an
+unscoped README need is dropped when the same plan still contains authorized
+core work, while the code task continues. An explicitly scoped README remains
+routable. Other unscoped mutations continue to fail closed at the write-scope
+boundary.
+
 The production ingress contract is separate from the runtime ledger:
 `ConversationIdentity` binds a stable conversation to a per-run checkpoint and
 project root; `SessionTurn` carries one source turn; and `SessionIngressState`

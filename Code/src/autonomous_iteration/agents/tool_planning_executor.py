@@ -190,6 +190,8 @@ INSPECTION_NEED_TYPES = {
     "web_search",
 }
 
+OPTIONAL_POST_PROCESSING_NEED_TYPES = frozenset({"readme", "readme_generation"})
+
 TYPED_VALIDATION_TASK_KINDS = frozenset(
     {
         "inspect",
@@ -565,6 +567,8 @@ class ToolPlanningTaskExecutor:
         constraint_section = f"{constraint_prompt}\n" if constraint_prompt else ""
         read_only_notice = self._read_only_notice(task_description, goal, context)
         read_only_section = f"{read_only_notice}\n" if read_only_notice else ""
+        write_scope = self._typed_write_scope_prompt()
+        write_scope_section = f"{write_scope}\n" if write_scope else ""
         return f"""You are an AI assistant that plans decision_needs for tasks.
 Do not choose tools. The runtime ToolRouter maps decision_needs to concrete tools under budget, path, risk, and permission checks.
 
@@ -572,7 +576,7 @@ Task: {task_description}
 Overall Goal: {goal}
 {constraint_section}{project_section}Previous Task Results:
 {history}
-{read_only_section}
+{read_only_section}{write_scope_section}
 
 Planning Surface:
 {planning_surface}
@@ -610,11 +614,30 @@ Important:
 - For deletion, gather evidence first, then use file_delete with operation_kind delete_file.
 - Code-generation needs only support executable code languages: python, shell, bash. Never plan language "text".
 - For docs-only delivery, use readme_generation or text/file writing needs instead of code generation.
-- After completed code/project delivery, emit readme_generation for run instructions when a README is still needed.
+- Emit readme_generation only when its exact target is in the typed write scope.
 - Provide values only. Do not emit null, placeholders, or tool_calls.
 - If a later need depends on generated content, assume the first need produces the content directly for routing.
 - For command-style validation, keep mode compatible with automatic/dry_run/interactive semantics and never plan source/activate/cd/export wrappers.
 """
+
+    def _typed_write_scope_prompt(self) -> str:
+        task = getattr(self, "_active_task", None)
+        if task is None:
+            return ""
+        write_files = [
+            str(path).strip()
+            for path in getattr(task, "write_files", []) or []
+            if str(path).strip()
+        ]
+        if not write_files:
+            return ""
+        encoded = json.dumps(write_files, ensure_ascii=False)
+        return (
+            "Typed Write Scope (authoritative):\n"
+            f"- Allowed write targets: {encoded}\n"
+            "- Do not plan mutations outside these targets. README or documentation "
+            "post-processing is allowed only when its exact target appears in this list."
+        )
 
     @staticmethod
     def _session_constraints_from_context(
@@ -1855,7 +1878,11 @@ Important:
             need_type = str(raw_need.get("need_type") or "").lower().replace("-", "_")
             command = str(raw_need.get("command") or "").strip()
             keep = True
-            if validation_task:
+            if need_type in OPTIONAL_POST_PROCESSING_NEED_TYPES:
+                attributes = raw_need.get("attributes") if isinstance(raw_need.get("attributes"), dict) else {}
+                target = str(raw_need.get("target_path") or attributes.get("file_path") or "").strip()
+                keep = self._task_write_target_is_authorized(task, target)
+            elif validation_task:
                 keep = (
                     need_type == "command_check"
                     and expected_argv is not None
@@ -1882,6 +1909,24 @@ Important:
                 level="WARNING",
             )
         return filtered
+
+    def _normalize_task_path(self, raw_path: str) -> str:
+        candidate = Path(raw_path).expanduser()
+        project_root = self._context_project_path()
+        if not candidate.is_absolute() and project_root is not None:
+            candidate = project_root / candidate
+        return str(candidate.resolve(strict=False))
+
+    def _task_write_target_is_authorized(self, task: Task, target: str) -> bool:
+        if not target:
+            return False
+        normalized_target = self._normalize_task_path(target)
+        normalized_allowed = {
+            self._normalize_task_path(str(path))
+            for path in task.write_files or []
+            if str(path).strip()
+        }
+        return normalized_target in normalized_allowed
 
     def _record_guard_decision_event(self, decision: Any) -> None:
         diagnostics = getattr(self.runtime, "runtime_diagnostics_hooks", None)
@@ -1932,17 +1977,7 @@ Important:
         elif task_kind in {"implement", "repair"} and not planned_writes:
             reason = f"Subtask write scope is required for mutation task kind '{task_kind}'."
         elif planned_writes and target:
-            project_root = self._context_project_path()
-
-            def normalize_scoped_path(raw_path: str) -> str:
-                candidate = Path(raw_path).expanduser()
-                if not candidate.is_absolute() and project_root is not None:
-                    candidate = project_root / candidate
-                return str(candidate.resolve(strict=False))
-
-            normalized_target = normalize_scoped_path(target)
-            normalized_allowed = {normalize_scoped_path(path) for path in planned_writes}
-            if normalized_target not in normalized_allowed:
+            if not self._task_write_target_is_authorized(task, target):
                 reason = f"Subtask write scope does not include target file: {target}"
         if not reason:
             return

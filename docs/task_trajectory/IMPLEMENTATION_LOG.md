@@ -4528,3 +4528,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: validation failure recovery, protocol repair,
   completion-budget recovery, autonomous task-entry integration, CLI delivery,
   and complete aggregate parity remain separate slices.
+
+### Scoped optional README post-processing
+
+- Observed failure: a code-generation plan appended an unscoped
+  `readme_generation` need, widening a task whose typed write scope contained
+  only the source file and causing failure after core code generation.
+- Validation evidence: focused tool-planning coverage now includes unscoped
+  README skipping, explicitly scoped README routing, and README-only fail-closed
+  behavior; the suite passes **99 tests**. Source compilation and
+  `git diff --check` pass.
+- Implemented fix: project `Task.write_files` into the planning prompt and treat
+  only README generation as optional post-processing. An unscoped README need is
+  dropped when authorized core needs remain; README-only plans still fail
+  closed, and all other unauthorized mutations retain the hard guard.
+- Metadata impact note: `Task.write_files` remains the sole write authority;
+  filtering changes no persistence schema and grants no new path, command,
+  network, mutation, or replay authority.
+- Remaining limitation: interactive validation normalization, CLI success
+  delivery, recovery, budget exhaustion, autonomous task-entry integration, and
+  complete aggregate parity remain separate slices.

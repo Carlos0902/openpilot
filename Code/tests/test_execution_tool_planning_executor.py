@@ -671,6 +671,54 @@ def test_code_symbol_modify_does_not_duplicate_explicit_patch_writer(tmp_path) -
     ]
 
 
+def test_code_file_create_skips_unscoped_readme_post_processing(tmp_path) -> None:
+    target = tmp_path / "snake_game.py"
+    readme = tmp_path / "README.md"
+    task = Task(id="implement", description="Implement Snake", kind="implement", write_files=[str(target)])
+    runtime = FakeRuntime(tmp_path, {"decision_needs": [
+        {"need_type": "code_generation", "question": "Create game", "target_path": str(target), "operation_kind": "create_file", "attributes": {"language": "python"}},
+        {"need_type": "file_write", "question": "Write game", "target_path": str(target), "operation_kind": "create_file"},
+        {"need_type": "readme_generation", "question": "Generate instructions", "target_path": str(readme)},
+    ]})
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
+
+    assert result.status == TaskStatus.COMPLETED
+    assert [selection.tool_name for selection in runtime.tool_executor.selections] == ["code_generator", "file_writer"]
+    assert result.attributes["observed_modified_files"] == [str(target)]
+    assert not readme.exists()
+
+
+def test_authorized_readme_generation_remains_routable(tmp_path) -> None:
+    readme = tmp_path / "README.md"
+    task = Task(id="document", description="Create README", kind="implement", write_files=[str(readme)])
+    runtime = FakeRuntime(tmp_path, {"decision_needs": []})
+    executor = ToolPlanningTaskExecutor(runtime)
+    executor._active_task = task
+    executor._active_task_id = task.id
+    executor._active_task_description = task.description
+    executor._active_goal = "Document project"
+    executor._active_context = _context(task)
+    payload = {"decision_needs": [{"need_type": "readme_generation", "question": "Generate instructions", "target_path": str(readme)}]}
+
+    requests = executor._parse_decision_needs(SimpleNamespace(parsed_json=payload, content=json.dumps(payload)))
+
+    assert [request["tool_name"] for request in requests] == ["readme_tool"]
+
+
+def test_plan_with_only_unscoped_readme_still_fails_closed(tmp_path) -> None:
+    target = tmp_path / "snake_game.py"
+    readme = tmp_path / "README.md"
+    task = Task(id="implement", description="Implement Snake", kind="implement", write_files=[str(target)])
+    runtime = FakeRuntime(tmp_path, {"decision_needs": [{"need_type": "readme_generation", "question": "Generate instructions", "target_path": str(readme)}]})
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
+
+    assert result.status == TaskStatus.FAILED
+    assert runtime.tool_executor.selections == []
+    assert not readme.exists()
+
+
 def test_completion_evidence_rejects_validate_task_without_command_evidence(tmp_path) -> None:
     target = tmp_path / "calculator.py"
     target.write_text("def divide(a, b):\n    return a / b\n", encoding="utf-8")
