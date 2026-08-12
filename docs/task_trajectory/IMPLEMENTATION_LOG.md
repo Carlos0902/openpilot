@@ -2477,6 +2477,31 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: prompt-use simulation and any actual reusable selection
   remain separate stacked changes; default runtime behavior is unchanged.
 
+### Reusable compaction prompt-use simulation
+
+- Observed failure: a passed dry-run preflight still lacked a bounded comparison
+  of raw context versus a hypothetical reusable-summary assembly, so there was
+  no evidence for prompt character/token reduction or exact source replacement
+  before any future selection work.
+- Reproduction: run simulation from the admitted, preflight-passed fixture and
+  compare raw and reusable assembly hashes, selected IDs, source replacements,
+  required candidates, recent suffix, and token/character deltas. A non-passed or
+  binding-mismatched preflight is rejected before assembly. The resulting
+  projection always carries `used_in_prompt=false`.
+- Implemented fix: add typed simulation status/rejection values and
+  `simulate_reusable_compaction_prompt_use`. It performs two in-memory assembly
+  passes, records only bounded hashes/IDs/status/sizes and optional token
+  accounting, and rejects missing reduction, unsafe replacement, or omitted
+  required/recent candidates. It never mutates production context or grants
+  prompt/tool/file/mutation authority.
+- Validation evidence: simulation, preflight, shadow admission, summary
+  contract, metadata, context assembly, memory, projection, and rolling
+  integration suite **179 passed**; `python -m compileall -q Code/src` and
+  `git diff --check` pass. The incremental slice is below the 3000-line
+  large-PR threshold.
+- Remaining limitation: this is still a dry-run comparison; actual reusable
+  candidate selection and builder wiring remain later stacked changes.
+
 ### Bounded provider completion outcome evidence
 
 - Observed failure: empty, truncated, and failed provider attempts could not be

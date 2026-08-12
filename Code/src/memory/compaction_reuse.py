@@ -219,6 +219,119 @@ class ReusableCompactionPromptUsePreflight(BaseModel):
         return self
 
 
+class ReusableCompactionPromptUseSimulationStatus(str, Enum):
+    PASSED = "passed"
+    REJECTED = "rejected"
+
+
+class ReusableCompactionPromptUseSimulationRejectionReason(str, Enum):
+    PREFLIGHT_NOT_PASSED = "preflight_not_passed"
+    PREFLIGHT_BINDING_MISMATCH = "preflight_binding_mismatch"
+    SOURCE_CANDIDATE_IDS_MISMATCH = "source_candidate_ids_mismatch"
+    SOURCE_BINDING_HASH_MISSING = "source_binding_hash_missing"
+    SOURCE_BINDING_HASH_MISMATCH = "source_binding_hash_mismatch"
+    RAW_ASSEMBLY_NOT_READY = "raw_assembly_not_ready"
+    RAW_SOURCE_NOT_SELECTED = "raw_source_not_selected"
+    REUSABLE_ASSEMBLY_NOT_READY = "reusable_assembly_not_ready"
+    SUMMARY_NOT_SELECTED = "summary_not_selected"
+    SOURCE_REPLACEMENT_MISMATCH = "source_replacement_mismatch"
+    REQUIRED_CANDIDATE_OMITTED = "required_candidate_omitted"
+    RECENT_SUFFIX_OMITTED = "recent_suffix_omitted"
+    NO_PROMPT_REDUCTION = "no_prompt_reduction"
+    TOKEN_ACCOUNTING_UNAVAILABLE = "token_accounting_unavailable"
+    NO_TOKEN_REDUCTION = "no_token_reduction"
+
+
+class ReusableCompactionPromptUseSimulation(BaseModel):
+    """Body-free comparison of raw and reusable prompt assemblies."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True, validate_assignment=True)
+
+    simulation_id: str = Field(min_length=1)
+    status: ReusableCompactionPromptUseSimulationStatus
+    rejection_reasons: list[ReusableCompactionPromptUseSimulationRejectionReason] = Field(
+        default_factory=list
+    )
+    preflight_id: str = Field(min_length=1)
+    source_candidate_ids: list[str] = Field(min_length=1)
+    source_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_binding_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    required_candidate_ids: list[str] = Field(default_factory=list)
+    recent_suffix_ids: list[str] = Field(default_factory=list)
+    semantic_fact_ids: list[str] = Field(default_factory=list)
+    artifact_id: str = Field(min_length=1)
+    artifact_kind: str = Field(min_length=1)
+    artifact_integrity_checksum: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    generated_summary_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    summary_candidate_id: str = Field(min_length=1)
+    raw_assembly_status: str | None = None
+    reusable_assembly_status: str | None = None
+    raw_prompt_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    reusable_prompt_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    raw_final_prompt_chars: int | None = Field(default=None, ge=0)
+    reusable_final_prompt_chars: int | None = Field(default=None, ge=0)
+    prompt_char_delta: int | None = None
+    raw_final_prompt_tokens: int | None = Field(default=None, ge=0)
+    reusable_final_prompt_tokens: int | None = Field(default=None, ge=0)
+    prompt_token_delta: int | None = None
+    token_count_method: str | None = None
+    tokenizer_id: str | None = None
+    token_model: str | None = None
+    raw_selected_candidate_ids: list[str] = Field(default_factory=list)
+    reusable_selected_candidate_ids: list[str] = Field(default_factory=list)
+    replaced_source_candidate_ids: list[str] = Field(default_factory=list)
+    retained_required_candidate_ids: list[str] = Field(default_factory=list)
+    retained_recent_suffix_ids: list[str] = Field(default_factory=list)
+    used_in_prompt: bool = False
+
+    @model_validator(mode="after")
+    def _simulation_is_consistent(self) -> "ReusableCompactionPromptUseSimulation":
+        for label, values in (
+            ("rejection reasons", self.rejection_reasons),
+            ("source candidate IDs", self.source_candidate_ids),
+            ("required candidate IDs", self.required_candidate_ids),
+            ("recent suffix IDs", self.recent_suffix_ids),
+            ("semantic fact IDs", self.semantic_fact_ids),
+            ("raw selected candidate IDs", self.raw_selected_candidate_ids),
+            ("reusable selected candidate IDs", self.reusable_selected_candidate_ids),
+            ("replaced source candidate IDs", self.replaced_source_candidate_ids),
+            ("retained required candidate IDs", self.retained_required_candidate_ids),
+            ("retained recent suffix IDs", self.retained_recent_suffix_ids),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"simulation {label} must be unique")
+        if self.status == ReusableCompactionPromptUseSimulationStatus.PASSED:
+            if self.rejection_reasons:
+                raise ValueError("passed simulation cannot carry rejection reasons")
+            if set(self.replaced_source_candidate_ids) != set(self.source_candidate_ids):
+                raise ValueError("passed simulation must replace every source candidate")
+            if set(self.retained_required_candidate_ids) != set(self.required_candidate_ids):
+                raise ValueError("passed simulation must retain every required candidate")
+            if set(self.retained_recent_suffix_ids) != set(self.recent_suffix_ids):
+                raise ValueError("passed simulation must retain every recent suffix candidate")
+            if self.prompt_char_delta is None or self.prompt_char_delta <= 0:
+                raise ValueError("passed simulation requires positive prompt char reduction")
+            token_fields = (
+                self.raw_final_prompt_tokens,
+                self.reusable_final_prompt_tokens,
+                self.prompt_token_delta,
+            )
+            if any(value is not None for value in token_fields):
+                if any(value is None for value in token_fields):
+                    raise ValueError("token-aware simulation evidence must be complete")
+                if self.prompt_token_delta <= 0:
+                    raise ValueError("passed token-aware simulation requires positive token reduction")
+                if not self.token_count_method or not self.tokenizer_id or not self.token_model:
+                    raise ValueError("token-aware simulation requires tokenizer metadata")
+            if not self.raw_prompt_hash or not self.reusable_prompt_hash:
+                raise ValueError("passed simulation requires prompt hashes")
+        elif not self.rejection_reasons:
+            raise ValueError("rejected simulation requires a rejection reason")
+        if self.used_in_prompt:
+            raise ValueError("simulation is dry-run only and cannot mark prompt use")
+        return self
+
+
 def source_binding_hash_from_shadow_payload(
     shadow_payload: Mapping[str, Any],
     source_candidate_ids: Sequence[str],
@@ -622,6 +735,235 @@ def preflight_reusable_compaction_prompt_use(
         trial_prompt_hash=trial_prompt_hash,
         trial_final_prompt_chars=trial_chars,
         used_in_prompt=False,
+    )
+
+
+def simulate_reusable_compaction_prompt_use(
+    *,
+    binding: ContextCompactionBinding | Mapping[str, Any],
+    candidates: Sequence[ContextCandidate | Mapping[str, Any]],
+    policy: ContextAssemblyPolicy | Mapping[str, Any],
+    renderer: Callable[[list[ContextCandidate]], str],
+    preflight: ReusableCompactionPromptUsePreflight | Mapping[str, Any],
+    simulation_id: str | None = None,
+    summary_candidate_id: str | None = None,
+    token_counter: Any | None = None,
+) -> ReusableCompactionPromptUseSimulation:
+    """Compare raw and reusable assemblies without changing production prompt use."""
+
+    validated_binding = (
+        binding
+        if isinstance(binding, ContextCompactionBinding)
+        else ContextCompactionBinding.model_validate(binding)
+    )
+    validated_candidates = [
+        item if isinstance(item, ContextCandidate) else ContextCandidate.model_validate(item)
+        for item in candidates
+    ]
+    validated_policy = (
+        policy
+        if isinstance(policy, ContextAssemblyPolicy)
+        else ContextAssemblyPolicy.model_validate(policy)
+    )
+    validated_preflight = (
+        preflight
+        if isinstance(preflight, ReusableCompactionPromptUsePreflight)
+        else ReusableCompactionPromptUsePreflight.model_validate(preflight)
+    )
+    source_ids = list(validated_binding.record.source_candidate_ids)
+    required_ids = list(validated_preflight.required_candidate_ids)
+    recent_ids = list(validated_preflight.recent_suffix_ids)
+    semantic_fact_ids = list(validated_preflight.semantic_fact_ids)
+    summary_id = summary_candidate_id or validated_preflight.trial_summary_candidate_id
+    reasons: list[ReusableCompactionPromptUseSimulationRejectionReason] = []
+
+    def add_reason(reason: ReusableCompactionPromptUseSimulationRejectionReason) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+
+    if validated_preflight.status != ReusableCompactionPromptUsePreflightStatus.PASSED:
+        add_reason(ReusableCompactionPromptUseSimulationRejectionReason.PREFLIGHT_NOT_PASSED)
+    if (
+        validated_preflight.artifact_id != validated_binding.artifact.artifact_id
+        or validated_preflight.artifact_kind != validated_binding.artifact.kind
+        or validated_preflight.source_candidate_ids != source_ids
+        or validated_preflight.source_binding_hash
+        != (validated_binding.source_binding_hash or _ZERO_HASH)
+        or validated_preflight.generated_summary_fingerprint
+        != _sha256_text(validated_binding.record.summary)
+    ):
+        add_reason(ReusableCompactionPromptUseSimulationRejectionReason.PREFLIGHT_BINDING_MISMATCH)
+    if not validated_binding.source_binding_hash:
+        add_reason(ReusableCompactionPromptUseSimulationRejectionReason.SOURCE_BINDING_HASH_MISSING)
+
+    by_id = {candidate.candidate_id: candidate for candidate in validated_candidates}
+    source_candidates = [by_id[source_id] for source_id in source_ids if source_id in by_id]
+    if len(source_candidates) != len(source_ids):
+        add_reason(ReusableCompactionPromptUseSimulationRejectionReason.SOURCE_CANDIDATE_IDS_MISMATCH)
+    elif validated_binding.source_binding_hash and (
+        source_candidate_binding_hash(source_candidates) != validated_binding.source_binding_hash
+    ):
+        add_reason(ReusableCompactionPromptUseSimulationRejectionReason.SOURCE_BINDING_HASH_MISMATCH)
+
+    empty_result = dict(
+        simulation_id=simulation_id or f"simulation:{validated_binding.record.compaction_id}",
+        preflight_id=validated_preflight.preflight_id,
+        source_candidate_ids=source_ids,
+        source_fingerprint=validated_binding.record.source_fingerprint,
+        source_binding_hash=validated_binding.source_binding_hash or _ZERO_HASH,
+        required_candidate_ids=required_ids,
+        recent_suffix_ids=recent_ids,
+        semantic_fact_ids=semantic_fact_ids,
+        artifact_id=validated_binding.artifact.artifact_id,
+        artifact_kind=validated_binding.artifact.kind,
+        artifact_integrity_checksum=validated_binding.artifact.integrity_checksum,
+        generated_summary_fingerprint=_sha256_text(validated_binding.record.summary),
+        summary_candidate_id=summary_id,
+        used_in_prompt=False,
+    )
+    if reasons:
+        return ReusableCompactionPromptUseSimulation(
+            status=ReusableCompactionPromptUseSimulationStatus.REJECTED,
+            rejection_reasons=reasons,
+            **empty_result,
+        )
+
+    from memory.context_assembly import ContextAssembler
+
+    assembler = ContextAssembler(renderer=lambda _payload: "", token_counter=token_counter)
+    raw_status = reusable_status = None
+    raw_hash = reusable_hash = None
+    raw_chars = reusable_chars = None
+    raw_tokens = reusable_tokens = None
+    raw_selected: list[str] = []
+    reusable_selected: list[str] = []
+    replaced: list[str] = []
+    retained_required: list[str] = []
+    retained_recent: list[str] = []
+    char_delta = token_delta = None
+    token_method = tokenizer_id = token_model = None
+
+    try:
+        raw = assembler.assemble_candidates(
+            list(validated_candidates), policy=validated_policy, renderer=renderer
+        )
+        raw_status = str(getattr(raw.selection.assembly_status, "value", raw.selection.assembly_status))
+        raw_hash = _sha256_text(raw.prompt_text)
+        raw_chars = len(raw.prompt_text)
+        raw_tokens = raw.selection.final_prompt_tokens
+        raw_selected = [candidate.candidate_id for candidate in raw.selected_candidates]
+        if raw.selection.budget_unit == "tokens":
+            token_method = raw.selection.token_count_method
+            tokenizer_id = raw.selection.tokenizer_id
+            token_model = raw.selection.model
+        if raw.selection.assembly_status != ContextAssemblyStatus.READY:
+            add_reason(ReusableCompactionPromptUseSimulationRejectionReason.RAW_ASSEMBLY_NOT_READY)
+        raw_decisions = {item.candidate_id: item for item in raw.selection.candidate_decisions}
+        for source_id in source_ids:
+            if raw_decisions.get(source_id) is None or raw_decisions[source_id].action != "kept":
+                add_reason(ReusableCompactionPromptUseSimulationRejectionReason.RAW_SOURCE_NOT_SELECTED)
+    except Exception:
+        add_reason(ReusableCompactionPromptUseSimulationRejectionReason.RAW_ASSEMBLY_NOT_READY)
+
+    if len(source_candidates) == len(source_ids):
+        summary_candidate = ContextCandidate(
+            candidate_id=summary_id,
+            kind=ContextCandidateKind.ARTIFACT,
+            source_id=validated_binding.record.source_fingerprint,
+            content=validated_binding.record.summary,
+            retention=ContextCandidateRetention.PREFERRED,
+            priority=99,
+            source_order=500,
+            truncation=ContextCandidateTruncation.FORBIDDEN,
+            trust=ContextCandidateTrust.DERIVED,
+            freshness=ContextCandidateFreshness.CURRENT,
+            compacted_candidate_ids=source_ids,
+        )
+        try:
+            reusable = assembler.assemble_candidates(
+                [*validated_candidates, summary_candidate],
+                policy=validated_policy,
+                renderer=renderer,
+            )
+            reusable_status = str(
+                getattr(reusable.selection.assembly_status, "value", reusable.selection.assembly_status)
+            )
+            reusable_hash = _sha256_text(reusable.prompt_text)
+            reusable_chars = len(reusable.prompt_text)
+            reusable_tokens = reusable.selection.final_prompt_tokens
+            reusable_selected = [candidate.candidate_id for candidate in reusable.selected_candidates]
+            if reusable.selection.budget_unit == "tokens":
+                token_method = reusable.selection.token_count_method
+                tokenizer_id = reusable.selection.tokenizer_id
+                token_model = reusable.selection.model
+            if raw_chars is not None:
+                char_delta = raw_chars - reusable_chars
+            if raw_tokens is not None and reusable_tokens is not None:
+                token_delta = raw_tokens - reusable_tokens
+            decisions = {item.candidate_id: item for item in reusable.selection.candidate_decisions}
+            summary_decision = decisions.get(summary_id)
+            if reusable.selection.assembly_status != ContextAssemblyStatus.READY:
+                add_reason(ReusableCompactionPromptUseSimulationRejectionReason.REUSABLE_ASSEMBLY_NOT_READY)
+            if summary_decision is None or summary_decision.action != "kept":
+                add_reason(ReusableCompactionPromptUseSimulationRejectionReason.SUMMARY_NOT_SELECTED)
+            for source_id in source_ids:
+                decision = decisions.get(source_id)
+                if (
+                    decision is not None
+                    and decision.action == "omitted"
+                    and decision.reason == "compacted"
+                    and decision.governed_by_candidate_id == summary_id
+                ):
+                    replaced.append(source_id)
+                else:
+                    add_reason(ReusableCompactionPromptUseSimulationRejectionReason.SOURCE_REPLACEMENT_MISMATCH)
+            for candidate_id in required_ids:
+                if decisions.get(candidate_id) is not None and decisions[candidate_id].action == "kept":
+                    retained_required.append(candidate_id)
+                else:
+                    add_reason(ReusableCompactionPromptUseSimulationRejectionReason.REQUIRED_CANDIDATE_OMITTED)
+            for candidate_id in recent_ids:
+                if decisions.get(candidate_id) is not None and decisions[candidate_id].action == "kept":
+                    retained_recent.append(candidate_id)
+                else:
+                    add_reason(ReusableCompactionPromptUseSimulationRejectionReason.RECENT_SUFFIX_OMITTED)
+            if char_delta is None or char_delta <= 0:
+                add_reason(ReusableCompactionPromptUseSimulationRejectionReason.NO_PROMPT_REDUCTION)
+            if token_counter is not None or validated_policy.max_prompt_tokens is not None:
+                if raw_tokens is None or reusable_tokens is None:
+                    add_reason(ReusableCompactionPromptUseSimulationRejectionReason.TOKEN_ACCOUNTING_UNAVAILABLE)
+                elif token_delta is None or token_delta <= 0:
+                    add_reason(ReusableCompactionPromptUseSimulationRejectionReason.NO_TOKEN_REDUCTION)
+        except Exception:
+            add_reason(ReusableCompactionPromptUseSimulationRejectionReason.REUSABLE_ASSEMBLY_NOT_READY)
+
+    status = (
+        ReusableCompactionPromptUseSimulationStatus.PASSED
+        if not reasons
+        else ReusableCompactionPromptUseSimulationStatus.REJECTED
+    )
+    return ReusableCompactionPromptUseSimulation(
+        status=status,
+        rejection_reasons=reasons,
+        raw_assembly_status=raw_status,
+        reusable_assembly_status=reusable_status,
+        raw_prompt_hash=raw_hash,
+        reusable_prompt_hash=reusable_hash,
+        raw_final_prompt_chars=raw_chars,
+        reusable_final_prompt_chars=reusable_chars,
+        prompt_char_delta=char_delta,
+        raw_final_prompt_tokens=raw_tokens,
+        reusable_final_prompt_tokens=reusable_tokens,
+        prompt_token_delta=token_delta,
+        token_count_method=token_method,
+        tokenizer_id=tokenizer_id,
+        token_model=token_model,
+        raw_selected_candidate_ids=raw_selected,
+        reusable_selected_candidate_ids=reusable_selected,
+        replaced_source_candidate_ids=replaced,
+        retained_required_candidate_ids=retained_required,
+        retained_recent_suffix_ids=retained_recent,
+        **empty_result,
     )
 
 
