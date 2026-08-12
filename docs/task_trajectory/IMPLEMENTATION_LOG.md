@@ -1,5 +1,28 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Compaction artifact source adapter shadow gate
+
+- Observed failure: the reusable-artifact source adapter evidence existed only
+  in an experiment script that imported unavailable historical stages. It could
+  not be replayed from the current stacked branch, and an ID-only source
+  fingerprint would incorrectly admit stale artifacts.
+- Reproduction: capture the current builder's body-free candidate payload,
+  derive the exact source binding/fingerprint, and compare one matching and one
+  checksum-drifted artifact candidate. Assert unchanged prompt/request hashes,
+  typed admitted/rejected shadow records, and a receipt with no prompt body,
+  summary body, source payload, or credential.
+- Implemented fix: make the BC artifact-source adapter gate self-contained by
+  defining its canonical hash, receipt writer, and zero-side-effect contract
+  locally. The gate now runs against the current `MemoryContextBuilder` and
+  existing compaction-reuse provider without importing missing experiment
+  modules.
+- Validation evidence: artifact-source adapter regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  361 experiment/test lines plus the implementation-log entry, below the
+  3,000-line threshold.
+- Remaining limitation: this gate does not discover checkpoint bindings or
+  persist source hashes; those are separate BD/BE boundaries.
+
 ## 2026-08-12 — OpenAI zero-transport readiness gate
 
 - Observed failure: cross-provider readiness could be inferred from the active
