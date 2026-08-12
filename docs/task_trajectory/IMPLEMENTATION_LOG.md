@@ -1,5 +1,25 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Reusable compaction prompt-use preflight gate
+
+- Observed failure: prompt-use preflight evidence depended on unavailable
+  historical experiment modules, so semantic-fact, source-binding, required
+  candidate, recent-suffix, and trial-selection guards were not replayable from
+  the current branch.
+- Reproduction: run one admitted binding through passing, rejected-admission,
+  source-drift, missing-semantic-fact, bad-evidence, recent-omission, and
+  trial-not-selected cases. Assert typed rejection reasons, complete source
+  replacement evidence on the pass case, and `used_in_prompt=False` for every
+  result.
+- Implemented fix: make the BF gate self-contained with local canonical hash,
+  receipt writer, and zero-side-effect contract while reusing the existing
+  `preflight_reusable_compaction_prompt_use` implementation.
+- Validation evidence: prompt-use preflight regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  367 experiment/test lines plus this log entry, below the 3,000-line threshold.
+- Remaining limitation: this gate does not compare raw and reusable prompt
+  assemblies or authorize prompt use; that is the separate simulation slice.
+
 ## 2026-08-12 — Persist compaction source-binding hashes
 
 - Observed failure: newly created `ContextCompactionBinding` values carried the
