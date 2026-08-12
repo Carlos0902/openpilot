@@ -1,5 +1,27 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — OpenAI zero-transport readiness gate
+
+- Observed failure: cross-provider readiness could be inferred from the active
+  DeepSeek environment or from a provider request, without a typed check that
+  the OpenAI lane, no-reasoning profile, tokenizer identity, and credential
+  state were all ready. That made a missing OpenAI credential look like a
+  transport problem and risked using the wrong provider key.
+- Reproduction: run the readiness gate with no OpenAI credential, with only a
+  DeepSeek-scoped credential, with a synthetic OpenAI credential, and with a
+  tampered receipt hash. Assert typed-blocked/passed outcomes, exact lane and
+  tokenizer identity, secret-free receipts, and zero provider/network effects.
+- Implemented fix: add a zero-transport OpenAI readiness gate that reads only
+  the OpenAI lane environment, resolves the explicit no-reasoning capability
+  profile, validates tokenizer identity, records typed blockers, and refuses
+  to claim paired-canary readiness when credentials are absent.
+- Validation evidence: readiness gate suite **5 passed**; the gate performs no
+  provider transport. The slice contains 282 additions across two forced-added
+  experiment files, two readiness documents, and this implementation-log entry,
+  below the 3,000-line threshold.
+- Remaining limitation: this gate does not call OpenAI or run a paired canary;
+  it only authorizes a later canary when the typed readiness result is passed.
+
 ## 2026-08-12 — Compaction reuse contract regression coverage
 
 - Observed failure: checkpoint-backed reusable compaction admission could detect
