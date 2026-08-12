@@ -288,6 +288,11 @@ only a completed mutation receipt, rebuilds the narrow post-mutation context,
 exposes `command_executor` alone, admits one exact task-owned validation command,
 and returns the existing validation observation plus mutation transition. A
 successful validation requests finalization; a failed exact command is terminal.
+The finalization runner is a separate no-tool handoff after that transition. It
+adds one typed finalization instruction, builds a request with an empty tool
+surface, and classifies the response through `ProviderFinalResponseTransition`.
+Tool calls, empty final responses, and reasoning-exhausted truncation remain
+stable terminal outcomes; only non-empty tool-free content completes.
 Final-response routing is another pure transition evaluated before execution.
 A response with tool calls executes tools only when finalization is not pending;
 otherwise it fails as `ProviderToolFinalizationToolCall`. A tool-free response

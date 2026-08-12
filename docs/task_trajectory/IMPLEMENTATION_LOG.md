@@ -4465,3 +4465,33 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: final response composition, protocol repair,
   validation recovery, completion-budget recovery, autonomous task-entry
   integration, and full aggregate parity remain separate slices.
+
+### Provider mutation finalization
+
+- Observed failure: exact validation could succeed and set a typed
+  `finalization_pending` transition, but no bounded runner issued the required
+  no-tool final response request. The mutation path therefore had no stable
+  core completion boundary and could expose another tool call or empty output.
+- Validation evidence: the new finalization suite plus mutation validation,
+  mutation execution, transition, validation observation, post-mutation
+  context, and request-plan suites pass **64 tests**. Source compilation and
+  `git diff --check` pass.
+- Implemented fix: add `ProviderMutationFinalizationRunner`. It accepts only a
+  pending validation transition, appends one typed finalization instruction,
+  builds a request with an empty tool surface, and classifies the response using
+  the existing `ProviderFinalResponseTransition`. Only non-empty tool-free
+  content is successful; tool calls, empty output, and reasoning-exhausted
+  truncation remain typed terminal outcomes.
+- Metadata impact note:
+  - Facts: pending validation transition, finalization request budget, provider
+    response, tool-surface emptiness, and final response classification.
+  - Authoritative producers: mutation transition owns eligibility; request plan
+    owns the empty surface and budget; final-response transition owns response
+    classification; runner owns sequencing only.
+  - Lifecycle and control impact: core mutation completion handoff only. No new
+    tool, mutation, path, persistence, replay, or post-core authority is added.
+  - Serialization and migration: runtime-only result projection; no persisted
+    schema or migration changes.
+- Remaining limitation: autonomous task-entry integration, protocol repair,
+  validation recovery, completion-budget recovery, CLI delivery, and complete
+  aggregate parity remain separate slices.
