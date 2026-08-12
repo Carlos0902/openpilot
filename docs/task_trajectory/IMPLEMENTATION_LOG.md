@@ -4201,3 +4201,29 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: the actual multi-round request builder and provider
   transport still need to consume this plan.
+
+### Typed provider round request builder
+
+- Observed failure: the immutable round plan was available, but no bounded
+  adapter converted it into the context-aware `LLMRequest`; a future runner
+  could therefore silently recompute messages, tools, or tool choice.
+- Validation evidence: three focused regression tests pass for normal tool
+  rounds, finalization with an empty tool surface, and mismatched definitions;
+  `git diff --check` passes.
+- Implemented fix: add a narrow request builder that requires a typed plan,
+  verifies tool-definition names exactly, delegates message assembly to the
+  existing context builder, attaches typed round limits to trace metadata, and
+  rejects any context mutation of the planned messages. It performs no
+  provider transport, tool admission, execution, or file I/O.
+- Metadata impact note:
+  - Facts: the existing immutable request plan, registered provider tool
+    definitions, request purpose, and provider request settings.
+  - Authoritative producers: the plan owns message/surface/budget values;
+    the registry owns tool definitions; the context builder owns request
+    assembly metadata.
+  - Lifecycle and control impact: pre-transport request construction only;
+    no new permission or persistence authority is introduced.
+  - Serialization and migration: runtime-only adapter; no persisted schema or
+    migration changes.
+- Remaining limitation: the multi-round controller and provider transport
+  still need to call this adapter in a subsequent integration slice.
