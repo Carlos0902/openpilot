@@ -197,6 +197,10 @@ empty surfaces never request a tool call.
 Mutation permission is derived independently: read-only surfaces do not require
 opt-in, while exposed mutation surfaces require both literal code-level opt-in
 and literal user confirmation before a request can proceed.
+The request planner composes the existing historical compaction, tool-surface,
+and round-budget policies into one frozen plan. It snapshots messages and
+derived limits for a later transport layer but does not create a provider
+request, perform admission, or execute tools.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

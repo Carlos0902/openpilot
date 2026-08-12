@@ -339,6 +339,11 @@ mutation is exposed, missing code-level opt-in returns
 `ProviderToolMutationOptInRequired`; missing user confirmation returns
 `ProviderToolMutationConfirmationRequired`. All three controls must be literal
 booleans.
+Round request planning is a separate pure composition boundary. It deep-copies
+the bounded historical message projection, phase-specific visible tool names,
+tool-choice mode, maximum call count, and result-character budget into one
+immutable plan. It does not construct or send `LLMRequest`, admit tools, execute
+anything, or own the underlying message/surface/budget facts.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

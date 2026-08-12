@@ -4165,3 +4165,39 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: the multi-round controller still needs to consume this
   permission decision before request construction.
+
+### Immutable provider round request plan
+
+- Observed failure: aggregate request construction recomputed historical message
+  compaction, phase-specific tool exposure, and per-round budgets inline. These
+  values could diverge between context assembly and transport, and mutable
+  caller messages could change after planning.
+- Validation evidence: the regression suite first fails because no standalone
+  request-plan module exists. Eight focused tests pass after implementation for
+  normal and finalization plans, phase-specific tool choice, policy composition,
+  message snapshot isolation, and invalid input rejection. The adjacent
+  request-plan/mutation-boundary set passes 27 and the complete provider-focused
+  set passes 668. The complete repository suite passes 1,764 in an isolated
+  detached worktree whose final directory was named `openpilot`, followed by
+  successful source compilation and diff validation.
+- Implemented fix: add a pure planner that consumes the existing bounded
+  historical compactor, tool-surface policy, and round-budget policy, then
+  returns one frozen plan with copied messages and derived limits. It performs no
+  provider request, admission, execution, state mutation, or I/O.
+- Metadata impact note:
+  - Facts: existing conversation messages, phase flags, declared tool names,
+    prompt capacity, and response call count.
+  - Authoritative producers: historical compaction owns message projection;
+    surface policy owns visible names; budget policy owns per-round limits; the
+    planner owns only their immutable composition.
+  - Lifecycle and control impact: pre-transport planning only. It grants no
+    permission and does not replace any underlying authority.
+  - Existing contracts reviewed: historical compaction, tool surface, round
+    budget, `LLMMessage`, public metadata inventory, and metadata development
+    conventions.
+  - Decision: compose derived views in one core plan rather than duplicate
+    arithmetic/branching in the future conversation runner.
+  - Serialization and migration: runtime-only value; no persisted schema or
+    migration changes.
+- Remaining limitation: the actual multi-round request builder and provider
+  transport still need to consume this plan.

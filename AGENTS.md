@@ -132,6 +132,10 @@ update this file together with `API.md`.
 - Mutation permission must be a separate pure boundary: no exposed mutation
   surface means no opt-in is required; an exposed surface requires literal
   code-level opt-in and literal user confirmation before any provider request.
+- Provider round request planning must compose the existing historical-message,
+  tool-surface, and budget policies into one immutable plan before transport.
+  The planner must not construct/send a provider request, perform admission, or
+  introduce a second source of truth for tools, messages, or budgets.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or
