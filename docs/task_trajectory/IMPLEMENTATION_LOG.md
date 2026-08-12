@@ -4495,3 +4495,36 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: autonomous task-entry integration, protocol repair,
   validation recovery, completion-budget recovery, CLI delivery, and complete
   aggregate parity remain separate slices.
+
+### Deterministic typed validation lane
+
+- Observed failure: a real generated-code task reached its validation subtask,
+  but the planning model replaced the typed validation command with a different
+  command. The executor then rejected the plan with `Model did not preserve the
+  required validation command`; a second path could also spend a planning round
+  before discovering that the task contract was already sufficient.
+- Validation evidence: the focused tool-planning suite passes **96 tests**;
+  source compilation and `git diff --check` pass. Regression coverage includes
+  exact Snake-style validation, inspection tasks with a typed existence check,
+  mutation-scoped validation rejection, and no-command fail-closed behavior.
+- Implemented fix: add an optional initial request lane to
+  `ToolEventLoopRunner` and deterministically route exactly one `command_check`
+  for non-mutating `inspect` / `validate` / `verify` / `test` tasks with a
+  non-empty `Task.validation_command`. The request still uses the normal router,
+  command admission, project environment binding, execution receipt, and exact
+  completion evidence. Mutation-scoped validation continues through ordinary
+  planning and cannot gain write authority.
+- Metadata impact note:
+  - Facts: task kind, task-owned validation command, routed command request,
+    effective environment command, and exact validation evidence.
+  - Authoritative producers: `Task.validation_command` owns command identity;
+    the router and command admission own execution permission; the event loop
+    owns sequencing only; completion evidence owns success classification.
+  - Lifecycle and control impact: removes unnecessary model replanning for one
+    bounded read-only command; it grants no mutation, path, network, or replay
+    authority.
+  - Serialization and migration: no persisted schema or migration changes;
+    the initial request is runtime-only.
+- Remaining limitation: validation failure recovery, protocol repair,
+  completion-budget recovery, autonomous task-entry integration, CLI delivery,
+  and complete aggregate parity remain separate slices.

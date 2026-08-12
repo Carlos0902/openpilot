@@ -190,6 +190,18 @@ INSPECTION_NEED_TYPES = {
     "web_search",
 }
 
+TYPED_VALIDATION_TASK_KINDS = frozenset(
+    {
+        "inspect",
+        "inspection",
+        "validate",
+        "validation",
+        "verify",
+        "verification",
+        "test",
+    }
+)
+
 _EXECUTION_HISTORY_PROMPT_MAX_CHARS = 900
 _EXECUTION_HISTORY_RECENT_STATUS_LIMIT = 5
 _EXECUTION_HISTORY_EVIDENCE_PATH_LIMIT = 8
@@ -303,20 +315,36 @@ class ToolPlanningTaskExecutor:
             planning_surface = self._planning_surface_for_prompt(task.description, goal, context=context)
             prompt = self._build_tool_plan_prompt(task.description, goal, planning_surface, context)
 
-            self.runtime.logger.log_event(
-                "llm_tool_planning",
-                {"task_id": task.id, "task_description": task.description},
-                session_id=self._session_id(),
-                turn_id=1,
-                level="INFO",
-            )
-            self._log(
-                "llm_tool_planning_started",
-                input_summary={"task_id": task.id, "goal": goal},
-                success=None,
-            )
+            initial_tool_requests = self._typed_validation_tool_requests(task)
+            if initial_tool_requests is None:
+                self.runtime.logger.log_event(
+                    "llm_tool_planning",
+                    {"task_id": task.id, "task_description": task.description},
+                    session_id=self._session_id(),
+                    turn_id=1,
+                    level="INFO",
+                )
+                self._log(
+                    "llm_tool_planning_started",
+                    input_summary={"task_id": task.id, "goal": goal},
+                    success=None,
+                )
+            else:
+                self._log(
+                    "typed_tool_planning_started",
+                    input_summary={
+                        "task_id": task.id,
+                        "goal": goal,
+                        "tool_count": len(initial_tool_requests),
+                    },
+                    success=None,
+                )
 
-            loop_result = ToolEventLoopRunner(self).run(task, prompt)
+            loop_result = ToolEventLoopRunner(self).run(
+                task,
+                prompt,
+                initial_tool_requests=initial_tool_requests,
+            )
             tool_results = loop_result.tool_results
             last_output = loop_result.last_output
             all_tools_succeeded = loop_result.success
@@ -465,6 +493,62 @@ class ToolPlanningTaskExecutor:
                 duration_ms=int(duration * 1000),
             )
             return result
+
+    def _typed_validation_tool_requests(
+        self,
+        task: Task,
+    ) -> list[dict[str, Any]] | None:
+        plan = self._typed_validation_decision_plan(task, goal=self._active_goal)
+        if plan is None:
+            return None
+        requests = self._route_decision_needs(plan)
+        if len(requests) != 1:
+            raise DecisionNeedResolutionError(
+                "Typed validation command did not route one-to-one.",
+                {
+                    "task_id": task.id,
+                    "failure_stage": "Typed Validation Routing",
+                    "selection_count": len(requests),
+                },
+            )
+        self._log(
+            "typed_validation_command_routed",
+            input_summary={
+                "task_id": task.id,
+                "validation_command": task.validation_command,
+            },
+            output_summary={"tool_count": 1},
+            success=True,
+        )
+        return requests
+
+    @staticmethod
+    def _typed_validation_decision_plan(
+        task: Task,
+        *,
+        goal: str = "",
+    ) -> dict[str, Any] | None:
+        task_kind = str(task.kind or "").strip().lower()
+        if task_kind not in TYPED_VALIDATION_TASK_KINDS or task.write_files:
+            return None
+        validation_command = str(task.validation_command or "").strip()
+        if not validation_command:
+            return None
+        return {
+            "decision_needs": [
+                {
+                    "need_type": "command_check",
+                    "question": f"Run the task's required validation: {validation_command}",
+                    "command": validation_command,
+                    "attributes": {
+                        "mode": "automatic",
+                        "test_command": validation_command,
+                        "timeout": 30,
+                    },
+                }
+            ],
+            "goal": goal,
+        }
 
     def _build_tool_plan_prompt(
         self,
@@ -1580,6 +1664,12 @@ Important:
         task = getattr(self, "_active_task", None)
         task_kind = str(getattr(task, "kind", "") or "").strip().lower()
         if task_kind in {"inspect", "inspection", "analysis", "investigate", "codebase_understanding"}:
+            inspect_validation_command = str(
+                getattr(task, "validation_command", "") or ""
+            ).strip()
+            inspect_has_typed_check = bool(inspect_validation_command) and not bool(
+                getattr(task, "write_files", []) or []
+            )
             allowed_needs: list[Any] = []
             dropped_need_types: list[str] = []
             for raw_need in raw_needs:
@@ -1588,7 +1678,9 @@ Important:
                     if isinstance(raw_need, dict)
                     else "invalid"
                 )
-                if need_type in INSPECTION_NEED_TYPES:
+                if need_type in INSPECTION_NEED_TYPES or (
+                    need_type == "command_check" and inspect_has_typed_check
+                ):
                     allowed_needs.append(raw_need)
                 else:
                     dropped_need_types.append(need_type)
@@ -1750,7 +1842,11 @@ Important:
         expected_argv = self._normalized_command_argv(expected_validation) if expected_validation else None
         filtered: list[Any] = []
         dropped: list[str] = []
-        validation_task = task_kind in {"validate", "validation", "verify", "verification"}
+        validation_task = (
+            task_kind in TYPED_VALIDATION_TASK_KINDS
+            and bool(expected_validation)
+            and not bool(task.write_files)
+        )
         implementation_task = task_kind in {"implement", "implementation", "modify", "edit", "write"}
         for raw_need in raw_needs:
             if not isinstance(raw_need, dict):
@@ -1831,7 +1927,7 @@ Important:
         planned_writes = [str(path) for path in getattr(task, "write_files", []) or [] if str(path).strip()]
         target = str(need.target_path or need.attributes.get("file_path") or "").strip()
         reason = ""
-        if task_kind in {"inspect", "inspection", "validate", "validation", "verify", "test"}:
+        if task_kind in TYPED_VALIDATION_TASK_KINDS:
             reason = f"Subtask write scope forbids mutation for task kind '{task_kind}'."
         elif task_kind in {"implement", "repair"} and not planned_writes:
             reason = f"Subtask write scope is required for mutation task kind '{task_kind}'."

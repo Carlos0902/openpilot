@@ -671,7 +671,7 @@ def test_code_symbol_modify_does_not_duplicate_explicit_patch_writer(tmp_path) -
     ]
 
 
-def test_validate_task_cannot_complete_without_command_evidence(tmp_path) -> None:
+def test_completion_evidence_rejects_validate_task_without_command_evidence(tmp_path) -> None:
     target = tmp_path / "calculator.py"
     target.write_text("def divide(a, b):\n    return a / b\n", encoding="utf-8")
     task = Task(
@@ -680,18 +680,22 @@ def test_validate_task_cannot_complete_without_command_evidence(tmp_path) -> Non
         kind="validate",
         validation_command="python -m pytest test_calculator.py",
     )
-    runtime = FakeRuntime(
-        tmp_path,
-        {"decision_needs": [{"need_type": "file_read", "question": "inspect target", "target_path": str(target)}]},
+    error = ToolPlanningTaskExecutor._completion_evidence_error(
+        task,
+        [
+            {
+                "success": True,
+                "tool": "file_reader",
+                "input_metadata": {"file_path": str(target)},
+            }
+        ],
+        observed_modified_files=[],
     )
 
-    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
-
-    assert result.status == TaskStatus.FAILED
-    assert "no observed validation command" in (result.error or "").lower()
+    assert "no observed validation command" in (error or "").lower()
 
 
-def test_validate_task_rejects_successful_substitute_command(tmp_path) -> None:
+def test_validate_task_runs_exact_typed_command_without_model_planning(tmp_path) -> None:
     task = Task(
         id="validate",
         description="Run calculator tests",
@@ -713,8 +717,11 @@ def test_validate_task_rejects_successful_substitute_command(tmp_path) -> None:
 
     result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
 
-    assert result.status == TaskStatus.FAILED
-    assert "required validation command" in (result.error or "").lower()
+    assert result.status == TaskStatus.COMPLETED
+    assert runtime.llm_client.requests == []
+    assert [selection.input_metadata.command for selection in runtime.tool_executor.selections] == [
+        "python -m pytest -q"
+    ]
 
 
 def test_validate_task_accepts_argument_equivalent_command_whitespace(tmp_path) -> None:
@@ -740,6 +747,10 @@ def test_validate_task_accepts_argument_equivalent_command_whitespace(tmp_path) 
     result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
 
     assert result.status == TaskStatus.COMPLETED
+    assert runtime.llm_client.requests == []
+    assert [selection.input_metadata.command for selection in runtime.tool_executor.selections] == [
+        "python -m pytest -q"
+    ]
 
 
 def test_validate_task_without_typed_command_cannot_complete_from_arbitrary_command(tmp_path) -> None:
@@ -922,7 +933,13 @@ def test_implement_subtask_without_planned_write_files_rejects_mutation(tmp_path
 def test_validate_subtask_rejects_model_proposed_file_write(tmp_path) -> None:
     target = tmp_path / "test_calculator.py"
     target.write_text("def test_one():\n    assert True\n", encoding="utf-8")
-    task = Task(id="validate", description="Run tests", kind="validate", validation_command="pytest")
+    task = Task(
+        id="validate",
+        description="Rewrite and run tests",
+        kind="validate",
+        write_files=[str(target)],
+        validation_command="pytest",
+    )
     runtime = FakeRuntime(
         tmp_path,
         {
@@ -940,6 +957,7 @@ def test_validate_subtask_rejects_model_proposed_file_write(tmp_path) -> None:
     result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
 
     assert result.status == TaskStatus.FAILED
+    assert len(runtime.llm_client.requests) == 1
     assert "subtask write scope" in (result.error or "").lower()
     assert runtime.tool_executor.selections == []
     assert target.read_text(encoding="utf-8") == "def test_one():\n    assert True\n"
@@ -1574,7 +1592,7 @@ def test_validate_subtask_drops_commands_outside_exact_validation_contract(tmp_p
     assert [
         selection.input_metadata.command for selection in runtime.tool_executor.selections
     ] == ["python -m pytest -q"]
-    assert runtime.llm_client.requests[0].reasoning_policy.mode == ReasoningMode.DISABLED
+    assert runtime.llm_client.requests == []
 
 
 def test_general_task_keeps_provider_reasoning_default(tmp_path) -> None:

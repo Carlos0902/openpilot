@@ -822,6 +822,16 @@ the existing typed task/path/guard/verification contracts remain the only
 execution authorities. Free-form `statement` text and compact artifacts cannot
 grant or expand permissions.
 
+Non-mutating `inspect`, `validate`, `verify`, and `test` tasks with a non-empty
+typed `Task.validation_command` use a deterministic validation lane. The executor
+constructs one `command_check` from that contract and sends it through the same
+router, environment binding, command admission, execution receipt, and completion
+evidence checks used by planned commands. The planning model is not asked to
+restate the command, so a substitute such as `compileall` cannot replace a
+requested `pytest` check. Tasks that include `write_files`, omit the command, or
+use an unknown task kind remain on the ordinary contract-checked path and fail
+closed when required evidence is missing.
+
 The production ingress contract is separate from the runtime ledger:
 `ConversationIdentity` binds a stable conversation to a per-run checkpoint and
 project root; `SessionTurn` carries one source turn; and `SessionIngressState`
