@@ -295,7 +295,14 @@ class IterationTaskMaterializer:
                 "canonical initial-task snapshot differs from pre-task authority or identity",
             )
         if (
-            snapshot.authority_state.ceiling != IterationAuthorityCeiling.MUTATION_ELIGIBLE
+            snapshot.authority_state.ceiling == IterationAuthorityCeiling.RESPONSE_ONLY
+        ):
+            raise TaskMaterializationError(
+                TaskMaterializationFailureCode.SNAPSHOT_MISMATCH,
+                "response-only authority cannot materialize a task",
+            )
+        if (
+            snapshot.authority_state.ceiling == IterationAuthorityCeiling.READ_ONLY_ELIGIBLE
             and checkpoint.runtime_state.execution_mode != RuntimeExecutionMode.READ_ONLY
         ):
             raise TaskMaterializationError(

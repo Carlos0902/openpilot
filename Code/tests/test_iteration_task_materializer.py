@@ -47,6 +47,8 @@ def _fixture(turn_store: IterationTurnStore):
         "conversation-1", "run-1", kind="user_input", payload={"content": "Inspect project"}
     )
     authority = IterationAuthorityState(
+        ceiling="read_only_eligible",
+        source="user_intent",
         reason="Read-only task may be materialized.",
         authority_hash="sha256:" + "a" * 64,
     )

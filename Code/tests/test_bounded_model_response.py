@@ -165,6 +165,30 @@ def test_project_claim_becomes_typed_evidence_need_without_display(tmp_path) -> 
     assert len(result.ingress.turns) == 1
 
 
+def test_general_project_advice_does_not_grant_read_authority(tmp_path) -> None:
+    client = _FakeClient(
+        [
+            _response(
+                {
+                    "response": "Break work into small milestones.",
+                    "claims": [{"text": "Break work into small milestones."}],
+                }
+            )
+        ]
+    )
+    controller = BoundedModelResponseController(IterationTurnStore(tmp_path), client)
+    goal = "How should I manage a software project?"
+
+    result = controller.complete(
+        goal,
+        ingress=_ingress(content=goal),
+        facts=_facts(),
+    )
+
+    assert result.record.cursor.authority_state.ceiling == "response_only"
+    assert result.record.cursor.authority_state.source == "runtime_default"
+
+
 def test_current_turn_that_exceeds_context_budget_fails_before_provider(tmp_path) -> None:
     client = _FakeClient([])
     controller = BoundedModelResponseController(

@@ -31,6 +31,8 @@ from metadata import (
     GroundingDecision,
     GroundingStatus,
     IterationAuthorityState,
+    IterationAuthorityCeiling,
+    IterationAuthoritySource,
     IterationControlCursor,
     IterationDisposition,
     IterationPendingProviderRequest,
@@ -148,6 +150,7 @@ class BoundedModelResponseController:
                 "content": user_turn.content,
             },
         )
+        authority = self._initial_authority(goal, ingress)
         initial = IterationTurnRecordMetadata(
             record_id=self._stable_id("turn", ingress, user_turn.message_id),
             identity=ingress.identity,
@@ -159,15 +162,7 @@ class BoundedModelResponseController:
                 runtime_fact_hash=self._hash(facts.model_dump(mode="json")),
             ),
             cursor=IterationControlCursor(
-                authority_state=IterationAuthorityState(
-                    reason="The bounded response step has response-only authority.",
-                    authority_hash=self._hash(
-                        {
-                            "ceiling": "response_only",
-                            "session_authority_hash": ingress.session_constraints.authority_hash,
-                        }
-                    ),
-                )
+                authority_state=authority
             ),
             root_budget=RootDecisionBudget(max_root_provider_calls=2),
         )
@@ -384,11 +379,28 @@ class BoundedModelResponseController:
                         evidence_refs=(evidence_ref,),
                     )
                 )
+        claim_manifest_ref = self.store.save_artifact(
+            ingress.identity.conversation_id,
+            ingress.identity.run_id,
+            kind="response_claim_manifest",
+            payload={
+                "claims": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "claim_hash": claim.claim_hash,
+                        "source_class": claim.source_class,
+                        "text": model_claim.text,
+                    }
+                    for claim, model_claim in zip(claims, parsed.claims, strict=True)
+                ]
+            },
+        )
         candidate = ResponseCandidate(
             candidate_id=self._stable_id("candidate", ingress, user_message_id),
             response_ref=response_ref,
             response_hash=response_hash,
             claims=tuple(claims),
+            claim_manifest_ref=claim_manifest_ref,
         )
         obligation_ids = tuple(item.obligation_id for item in obligations)
         satisfied_ids = tuple(item.obligation_id for item in obligations if item.is_closed)
@@ -495,6 +507,98 @@ class BoundedModelResponseController:
             turns=tuple(selected),
             required_constraints=required_constraints,
             omitted_turns=len(ingress.turns) - len(selected),
+        )
+
+    @classmethod
+    def _initial_authority(
+        cls,
+        goal: str,
+        ingress: SessionIngressState,
+    ) -> IterationAuthorityState:
+        text = " ".join(goal.casefold().split())
+        project_markers = (
+            "repository",
+            "repo",
+            "codebase",
+            "project",
+            "项目",
+            "仓库",
+            "代码库",
+        )
+        project_read_markers = (
+            "what is in",
+            "what's in",
+            "show",
+            "list",
+            "which file",
+            "inspect",
+            "read",
+            "check",
+            "search",
+            "find",
+            "contain",
+            "structure",
+            "architecture",
+            "本项目",
+            "这个项目",
+            "当前项目",
+            "仓库里",
+            "项目里",
+            "有什么",
+            "有哪些",
+            "查看",
+            "检查",
+            "读取",
+            "列出",
+            "搜索",
+            "查找",
+            "结构",
+            "架构",
+        )
+        current_markers = (
+            "latest",
+            "current",
+            "today",
+            "right now",
+            "最新",
+            "当前",
+            "今天",
+            "现在",
+        )
+        current_subjects = ("weather", "price", "news", "status", "天气", "价格", "新闻", "状态")
+        direct_question = re.match(r"^(?:what|which|who|where|when|how much|多少|什么|哪个|谁|哪里)", text)
+        project_read = any(marker in text for marker in project_markers) and any(
+            marker in text for marker in project_read_markers
+        )
+        current_read = any(marker in text for marker in current_markers) or (
+            bool(direct_question) and any(marker in text for marker in current_subjects)
+        )
+        read_eligible = project_read or current_read
+        ceiling = (
+            IterationAuthorityCeiling.READ_ONLY_ELIGIBLE
+            if read_eligible
+            else IterationAuthorityCeiling.RESPONSE_ONLY
+        )
+        source = (
+            IterationAuthoritySource.USER_INTENT
+            if read_eligible
+            else IterationAuthoritySource.RUNTIME_DEFAULT
+        )
+        return IterationAuthorityState(
+            ceiling=ceiling,
+            source=source,
+            reason=(
+                "The user explicitly requested read-only project or current-fact evidence."
+                if read_eligible
+                else "The bounded response step has response-only authority."
+            ),
+            authority_hash=cls._hash(
+                {
+                    "ceiling": ceiling.value,
+                    "source": source.value,
+                    "session_authority_hash": ingress.session_constraints.authority_hash,
+                }
+            ),
         )
 
     def _request(

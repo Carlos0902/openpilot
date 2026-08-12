@@ -4727,6 +4727,30 @@ PYTHONPATH=Code/src pytest -q Code/tests
   evidence escalation, provider tools, and full crash replay remain separate
   follow-up slices.
 
+### Response evidence contract and read-only admission
+
+- Observed failure: a bounded model response could identify a project or current
+  fact as needing evidence, but the later evidence route had no durable,
+  integrity-bound copy of the model claim text and no typed distinction between
+  ordinary advice and an explicit read-only request. A later route could
+  otherwise use stale or relabeled claim metadata to select a task.
+- Reproduction: submit project/current-fact questions and general project advice;
+  assert the former receives `read_only_eligible` authority with a persisted
+  claim manifest, while the latter remains `response_only`. Tamper with the
+  manifest order, IDs, or source metadata and assert the evidence route refuses
+  admission. Try to materialize a response-only snapshot and assert it fails
+  closed.
+- Implemented fix: persist a content-addressed `response_claim_manifest`, bind
+  it to `ResponseCandidate`, classify explicit read-only intent into the typed
+  authority ceiling, and reject response-only task snapshots while preserving
+  the read-only runtime-mode check.
+- Validation evidence: focused bounded-response, materializer, and metadata
+  suite **36 passed**; staged diff check passed. The full evidence-escalation
+  implementation is intentionally excluded from this slice.
+- Remaining limitation: this PR does not create or execute evidence tasks,
+  validate receipts/checkpoints, call external tools, or commit an assistant
+  response after evidence is collected; those belong to the dependent slice.
+
 ### Canonical task materialization and active-checkpoint recovery
 
 - Observed failure: an evidence/task re-entry path could not prove that the

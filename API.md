@@ -872,6 +872,18 @@ project contents or current/external facts produce an evidence-required result
 instead of an assistant ledger commit; evidence escalation and external tools
 remain separate routes.
 
+The bounded response boundary also records the model's claims in a separate,
+content-addressed `response_claim_manifest` artifact. `ResponseCandidate` keeps
+only a reference to that manifest; evidence routing must verify the manifest's
+claim order, IDs, hashes, source classes, and text against the candidate before
+it can create a read-only evidence task. User intent may raise the initial
+authority ceiling from `response_only` to `read_only_eligible` only for an
+explicit project-inspection or current-fact request. General advice that merely
+mentions a project remains response-only. The materializer rejects
+`response_only` snapshots and continues to require a read-only runtime mode for
+`read_only_eligible` snapshots. This slice records the contract and admission
+boundary only; it does not execute evidence tools or close an obligation.
+
 When a response candidate requires a read-only project task, task materialization
 is a separate durable boundary. `CanonicalInitialTaskSnapshot` is the complete
 typed input: task graph/order, response authority, root budget, session

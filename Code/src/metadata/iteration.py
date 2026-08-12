@@ -202,6 +202,7 @@ class ResponseCandidate(_StrictValue):
     response_ref: DurableArtifactReference
     response_hash: str = Field(pattern=_SHA256_PATTERN)
     claims: tuple[ResponseClaim, ...] = Field(default=(), max_length=128)
+    claim_manifest_ref: DurableArtifactReference | None = None
 
     @model_validator(mode="after")
     def _claim_ids_are_unique(self) -> "ResponseCandidate":
