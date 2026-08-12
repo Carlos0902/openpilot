@@ -874,6 +874,17 @@ core work, while the code task continues. An explicitly scoped README remains
 routable. Other unscoped mutations continue to fail closed at the write-scope
 boundary.
 
+When a routed `code_generator` need has one explicit target—or the active task
+declares exactly one `Task.write_files` target—and the plan omits a matching
+`file_write`, the executor synthesizes that writer need and routes it through
+the existing write-scope, Guard, writer, mutation-receipt, and completion
+evidence contracts. Generated artifact content is resolved from the successful
+`code_generator` result; planner-provided `content`, `code`, or artifact
+references cannot override it. A plan with multiple possible write targets and
+no explicit target remains fail-closed, and an explicit writer is not
+duplicated. This handoff is orchestration repair only and does not add any
+path or mutation authority.
+
 The production ingress contract is separate from the runtime ledger:
 `ConversationIdentity` binds a stable conversation to a per-run checkpoint and
 project root; `SessionTurn` carries one source turn; and `SessionIngressState`

@@ -671,6 +671,111 @@ def test_code_symbol_modify_does_not_duplicate_explicit_patch_writer(tmp_path) -
     ]
 
 
+def test_code_file_create_synthesizes_writer_from_typed_write_scope(tmp_path) -> None:
+    target = tmp_path / "snake_game.py"
+    task = Task(
+        id="implement",
+        description="Implement a Snake game in snake_game.py",
+        kind="implement",
+        write_files=[str(target)],
+    )
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "decision_needs": [
+                {
+                    "need_type": "code_file_create",
+                    "question": "Create the Snake game Python script using curses",
+                    "operation_kind": "create_file",
+                    "attributes": {
+                        "task_description": "Implement a Snake game using curses",
+                        "language": "python",
+                        "content": "stale planner content",
+                    },
+                }
+            ]
+        },
+    )
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
+
+    assert result.status == TaskStatus.COMPLETED
+    assert [selection.tool_name for selection in runtime.tool_executor.selections] == [
+        "code_generator",
+        "file_writer",
+    ]
+    writer_input = runtime.tool_executor.selections[1].input_metadata.to_params()
+    assert writer_input["file_path"] == str(target)
+    assert writer_input["content"] == "print('ok')"
+    assert result.attributes["observed_modified_files"] == [str(target)]
+
+
+def test_code_file_create_does_not_duplicate_explicit_writer(tmp_path) -> None:
+    target = tmp_path / "snake_game.py"
+    task = Task(
+        id="implement",
+        description="Implement a Snake game in snake_game.py",
+        kind="implement",
+        write_files=[str(target)],
+    )
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "decision_needs": [
+                {
+                    "need_type": "code_file_create",
+                    "question": "Generate the Snake game",
+                    "target_path": str(target),
+                    "operation_kind": "create_file",
+                },
+                {
+                    "need_type": "file_write",
+                    "question": "Write the generated Snake game",
+                    "target_path": str(target),
+                    "operation_kind": "create_file",
+                },
+            ]
+        },
+    )
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
+
+    assert result.status == TaskStatus.COMPLETED
+    assert [selection.tool_name for selection in runtime.tool_executor.selections] == [
+        "code_generator",
+        "file_writer",
+    ]
+
+
+def test_code_file_create_does_not_guess_between_multiple_write_targets(tmp_path) -> None:
+    task = Task(
+        id="implement",
+        description="Implement a game with source and configuration files",
+        kind="implement",
+        write_files=[str(tmp_path / "snake_game.py"), str(tmp_path / "config.json")],
+    )
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "decision_needs": [
+                {
+                    "need_type": "code_file_create",
+                    "question": "Generate the game source",
+                    "operation_kind": "create_file",
+                }
+            ]
+        },
+    )
+
+    result = ToolPlanningTaskExecutor(runtime).execute_task(task, _context(task))
+
+    assert result.status == TaskStatus.FAILED
+    assert "no observed file mutation" in (result.error or "").lower()
+    assert [selection.tool_name for selection in runtime.tool_executor.selections] == [
+        "code_generator",
+    ]
+
+
 def test_code_file_create_skips_unscoped_readme_post_processing(tmp_path) -> None:
     target = tmp_path / "snake_game.py"
     readme = tmp_path / "README.md"

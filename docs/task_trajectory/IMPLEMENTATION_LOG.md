@@ -4633,3 +4633,24 @@ PYTHONPATH=Code/src pytest -q Code/tests
   they do not grant read/write/command authority or alter project identity.
 - Remaining limitation: inventory defaults are conservative and may require a
   separately scoped increase for unusually large projects.
+
+### Authorized generated-writer handoff
+
+- Observed failure: a real generated-file task could report a successful
+  `code_generator` call while the model omitted `file_writer`; completion then
+  failed with `Task planned file writes but has no observed file mutation
+  evidence`, leaving no durable file.
+- Validation evidence: the focused tool-planning suite passes **102 tests**;
+  source compilation and `git diff --check` pass.
+- Implemented fix: when generated code has one explicit target or exactly one
+  typed `Task.write_files` target, synthesize only the missing `file_write` need
+  and route it through the existing scope, Guard, writer, mutation receipt, and
+  completion evidence gates. The successful generated artifact supplies writer
+  content, so stale planner content is ignored. Multiple unqualified targets
+  remain fail-closed and explicit writers are not duplicated.
+- Metadata impact note: `Task.write_files` remains the sole mutation authority;
+  the synthesized need is a derived orchestration decision and adds no path,
+  command, network, persistence, or replay authority.
+- Remaining limitation: bounded recovery for code-generator completion limits,
+  including retry/compaction and complete-artifact admission, remains a
+  separate slice.

@@ -1789,6 +1789,75 @@ Important:
                         "timeout_override": selection.timeout_override,
                     }
                 )
+            generated_writer_target = self._generated_file_writer_target(need, selections)
+            if generated_writer_target and self._should_synthesize_generated_file_writer(
+                raw_needs,
+                index,
+                generated_writer_target,
+            ):
+                writer_attributes = dict(need.attributes)
+                for generated_field in ("artifact_ref", "code", "content", "generated_unit"):
+                    writer_attributes.pop(generated_field, None)
+                writer_need = DecisionNeedMetadata(
+                    need_type="file_write",
+                    question=f"Write generated code to {generated_writer_target}",
+                    phase=need.phase,
+                    target_path=generated_writer_target,
+                    operation_kind=need.operation_kind or "create_file",
+                    decision_to_unlock=need.decision_to_unlock,
+                    expected_state_change=need.expected_state_change,
+                    cost_hint=need.cost_hint,
+                    risk_level=need.risk_level,
+                    attributes=writer_attributes,
+                )
+                self._enforce_subtask_write_scope(writer_need)
+                writer_selections = router.route(state, writer_need)
+                if state.guard_history and not state.guard_history[-1].approved:
+                    guard = state.guard_history[-1]
+                    if guard.attributes.get("question") == writer_need.question:
+                        self._record_guard_decision_event(guard)
+                        raise DecisionNeedResolutionError(
+                            f"Required synthesized file write was blocked: {guard.reason}",
+                            {
+                                "failed_tool": str(guard.attributes.get("tool_name") or "file_writer"),
+                                "failure_stage": "Tool Routing Guard",
+                                "need_type": writer_need.need_type,
+                                "guard_decision": guard.to_json_dict(),
+                                "required_need_blocked": True,
+                                "synthesized_from": need.need_type,
+                            },
+                        )
+                if not writer_selections:
+                    raise DecisionNeedResolutionError(
+                        "Generated code could not be paired with a durable file write.",
+                        {
+                            "failed_tool": "file_writer",
+                            "failure_stage": "Tool Routing",
+                            "need_type": writer_need.need_type,
+                            "synthesized_from": need.need_type,
+                            "target_path": generated_writer_target,
+                        },
+                    )
+                self._log(
+                    "decision_need_write_synthesized",
+                    input_summary={
+                        "task_id": getattr(self, "_active_task_id", "unknown"),
+                        "source_need_type": need.need_type,
+                        "target_path": generated_writer_target,
+                    },
+                    output_summary={"tool_name": "file_writer"},
+                    success=True,
+                    level="INFO",
+                )
+                for selection in writer_selections:
+                    tool_requests.append(
+                        {
+                            "tool_name": selection.tool_name,
+                            "reason": writer_need.question,
+                            "input_metadata": selection.input_metadata.to_params(),
+                            "timeout_override": selection.timeout_override,
+                        }
+                    )
             if self._should_synthesize_patch_writer(raw_needs, index, need):
                 writer_need = DecisionNeedMetadata(
                     need_type="file_write",
@@ -1854,6 +1923,51 @@ Important:
                         }
                     )
         return tool_requests
+
+    def _generated_file_writer_target(
+        self,
+        need: DecisionNeedMetadata,
+        selections: list[ToolSelection],
+    ) -> str:
+        if not any(selection.tool_name == "code_generator" for selection in selections):
+            return ""
+        target = str(need.target_path or need.attributes.get("file_path") or "").strip()
+        if target:
+            return target
+        task = getattr(self, "_active_task", None)
+        planned_writes = [
+            str(path).strip()
+            for path in getattr(task, "write_files", []) or []
+            if str(path).strip()
+        ]
+        return planned_writes[0] if len(planned_writes) == 1 else ""
+
+    def _should_synthesize_generated_file_writer(
+        self,
+        raw_needs: list[Any],
+        current_index: int,
+        target_path: str,
+    ) -> bool:
+        project_root = self._context_project_path()
+
+        def normalize(raw_path: str) -> str:
+            candidate = Path(raw_path).expanduser()
+            if not candidate.is_absolute() and project_root is not None:
+                candidate = project_root / candidate
+            return str(candidate.resolve(strict=False))
+
+        normalized_target = normalize(target_path)
+        for index, raw in enumerate(raw_needs):
+            if index == current_index or not isinstance(raw, dict):
+                continue
+            need_type = str(raw.get("need_type") or "").lower().replace("-", "_")
+            if need_type not in {"file_write", "write_file"}:
+                continue
+            attrs = raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {}
+            candidate_target = str(raw.get("target_path") or attrs.get("file_path") or "").strip()
+            if candidate_target and normalize(candidate_target) == normalized_target:
+                return False
+        return True
 
     def _filter_needs_for_task_contract(
         self,
