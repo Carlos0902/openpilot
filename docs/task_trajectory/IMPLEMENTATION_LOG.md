@@ -1,5 +1,28 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Checkpoint compaction discovery shadow gate
+
+- Observed failure: checkpoint-owned compaction discovery evidence depended on
+  unavailable historical experiment modules and could not be replayed from the
+  current stacked branch. Missing source hashes, stale hashes, and artifact
+  checksum drift therefore lacked one current, typed admission matrix.
+- Reproduction: build a real `RuntimePromptContextSnapshot` from the current
+  builder, attach four body-free bindings, and run the checkpoint shadow
+  provider with one matching hash, one missing hash, one stale hash, and one
+  expected-checksum drift. Assert admitted/rejected outcomes, exact reasons,
+  unchanged prompt/request/candidate projections, and never-used-in-prompt
+  admissions.
+- Implemented fix: make the BD checkpoint-discovery gate self-contained by
+  defining its canonical hash, receipt writer, and zero-side-effect contract
+  locally. It now exercises the existing checkpoint provider directly without
+  importing missing experiment stages.
+- Validation evidence: checkpoint-discovery regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  363 experiment/test lines plus the implementation-log entry, below the
+  3,000-line threshold.
+- Remaining limitation: this gate does not persist a newly generated source
+  binding hash; that is the separate BE persistence boundary.
+
 ## 2026-08-12 — Compaction artifact source adapter shadow gate
 
 - Observed failure: the reusable-artifact source adapter evidence existed only
