@@ -4597,3 +4597,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
   filenames, and validation status from the typed result projection. The
   projection is display-only and cannot control routing or completion.
 - Remaining limitation: interactive launch confirmation remains a separate PR.
+
+### Bounded project-scope admission
+
+- Observed failure: when the CLI was opened from a large directory such as a
+  home or Developer folder without a project marker, new-artifact tasks could
+  treat that broad directory as the project root. This risked mixing generated
+  files with unrelated projects; existing-project requests were also ambiguous.
+- Validation evidence: the new scope-admission suite and CLI recovery checks pass
+  **8 tests**; source compilation and `git diff --check` pass.
+- Implemented fix: add a read-only resolver that recognizes project markers,
+  Home/filesystem roots, and shallow multi-project containers. Artifact creation
+  selects a deterministic unused child (`snake-game`, `dashboard`, etc.);
+  existing-project mutation from a broad root fails closed and asks for an
+  explicit path. The executor receives the selected path through the existing
+  context contract.
+- Metadata impact note: the decision is runtime-derived project identity only;
+  it creates no directory, changes no writer/path/command permission, and adds
+  no persistence or replay authority.
+- Remaining limitation: explicit user selection UX and deeper project inventory
+  bounds remain separate follow-up work.

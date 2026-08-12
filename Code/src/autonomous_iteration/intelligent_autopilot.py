@@ -85,6 +85,11 @@ from autonomous_iteration.skill_specs import (
 from ui.console_presenter import ConsolePresenter
 from ui.iteration_dashboard import IterationDashboardAdapter
 from autonomous_iteration.project_iteration import ProjectIterationHelper
+from autonomous_iteration.project_scope_admission import (
+    ProjectScopeAdmissionError,
+    ProjectScopeKind,
+    resolve_project_execution_scope,
+)
 from autonomous_iteration.tool_io import ExecutionToolIO
 from autonomous_iteration.runtime_controller import AgentRuntimeController
 from runtime_diagnostics.llm_proxy import TrajectoryLLMClientProxy
@@ -446,6 +451,17 @@ class IntelligentAutopilot:
         """
         self.stats["start_time"] = datetime.now()
         context = self._normalize_execution_context(context or {})
+        requested_root = str(context.get("project_path") or context.get("cwd") or "").strip()
+        if requested_root:
+            decision = resolve_project_execution_scope(goal, requested_root)
+            if decision.kind == ProjectScopeKind.REQUIRE_EXPLICIT_PROJECT:
+                raise ProjectScopeAdmissionError(
+                    f"Select a concrete project directory instead of {decision.source_root}."
+                )
+            context["project_path"] = str(decision.effective_root)
+            context["cwd"] = str(decision.effective_root)
+            if decision.kind == ProjectScopeKind.GENERATED_CHILD_PROJECT:
+                self.console.print(f"[cyan]Project scope:[/cyan] {decision.effective_root}")
         raw_ingress = context.get("session_ingress_state")
         if raw_ingress is not None and not isinstance(raw_ingress, SessionIngressState):
             raise TypeError("session_ingress_state must be a validated SessionIngressState")

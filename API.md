@@ -854,6 +854,14 @@ accepted iteration count, concrete actions, changed filenames, and validation
 status. This is presentation-only; it does not infer success or add execution
 authority.
 
+Before project execution, scope admission distinguishes an existing project
+root from a broad launch directory. Home, filesystem roots, and shallow
+containers with multiple project markers are broad roots: artifact-creation
+requests select a deterministic unused child name, while existing-project
+mutation requires an explicit project path. The decision is read-only and does
+not create the child directory or grant mutation authority; the existing writer,
+path scope, and Guard remain authoritative.
+
 Tool-planning prompts project the current typed `Task.write_files` list as the
 authoritative write scope. README generation is optional post-processing: an
 unscoped README need is dropped when the same plan still contains authorized
