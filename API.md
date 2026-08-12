@@ -860,6 +860,18 @@ crash at any ledger write boundary is recoverable without a second Provider
 request. This path is response-only and does not claim task or verification
 success.
 
+Other conversational goals may use the bounded model-response controller after
+the deterministic fact check. The controller projects only a capped session
+window, sends no tools, and allows at most one initial request plus one complete
+JSON-contract repair request. Each request and response is recorded before the
+next transition, completion-token usage is charged against the typed root
+budget, and provider exceptions are converted to a durable controlled stop.
+Invalid claim coverage, an unexpected tool call, an over-limit response, or a
+second invalid response never enters task materialization. Claims that assert
+project contents or current/external facts produce an evidence-required result
+instead of an assistant ledger commit; evidence escalation and external tools
+remain separate routes.
+
 Interactive application launch is a separate delivery operation. The command
 tool accepts `mode="interactive"` only when a runtime-only
 `ToolExecutionContext.user_confirmed is True` handle is attached. It starts the

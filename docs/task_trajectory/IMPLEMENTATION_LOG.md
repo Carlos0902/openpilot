@@ -4706,3 +4706,23 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitations: the current matcher intentionally covers only explicit
   runtime-fact patterns; general greetings and external/current-information
   questions remain separate routing slices.
+
+### Bounded zero-tool model responses
+
+- Observed failure: a non-mutating conversational request could fall through to
+  task decomposition/tool planning, while malformed or over-budget model output
+  had no durable bounded recovery boundary.
+- Reproduction: feed a fake client a valid response, an invalid claim-coverage
+  response followed by a valid repair, an unexpected tool call, an over-limit
+  completion, or a provider exception; assert the request count, tool list,
+  durable stop, and absence of task materialization.
+- Implemented fix: add a capped session projection and a zero-tool model-response
+  controller. It records each request/response, permits exactly one complete
+  JSON-contract repair, charges observed completion usage to the root budget,
+  and commits only fully grounded response payloads. Project/current-external
+  claims become typed evidence requirements instead of displayable answers.
+- Validation evidence: focused bounded-response, transition, and ledger suite
+  **37 passed**; `compileall` and `git diff --check` pass.
+- Remaining limitations: the controller is not yet the default CLI route;
+  evidence escalation, provider tools, and full crash replay remain separate
+  follow-up slices.
