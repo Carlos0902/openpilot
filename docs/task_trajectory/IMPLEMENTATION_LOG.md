@@ -5359,6 +5359,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: repair remains bounded to one additional attempt and
   does not introduce an unbounded planning loop.
 
+### Linked-worktree configuration discovery
+
+- Observed failure: a linked worktree could not reliably find the main
+  checkout's shared `.env`, so `openpilot-dev` health checks depended on the
+  launch directory or duplicated configuration into the worktree.
+- Reproduction: create a Git linked-worktree marker with a `commondir` file and
+  assert that settings include the main checkout `.env`, the worktree `.env`,
+  `Code/.env`, and the explicit cwd fallback without exposing values.
+- Implemented fix: resolve the Git common directory read-only, derive the
+  owning checkout, de-duplicate ordered env-file search paths, and add the
+  `.worktreeinclude` declaration for shared configuration names.
+- Validation evidence: focused model-health/config suite **9 passed**;
+  compileall and diff-check passed.
+- Remaining limitation: the discovery path reads configuration locations only;
+  it never copies, logs, or prints secret contents.
+
 ### Multilingual response-claim coverage
 
 - Observed failure: claim coverage joined adjacent claim text with an inserted

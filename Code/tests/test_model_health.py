@@ -5,7 +5,15 @@ from types import SimpleNamespace
 
 from rich.console import Console
 
-from core.config import EmbeddingSettings, LLMSettings, ModelHealthSettings
+from core.config import (
+    EmbeddingSettings,
+    LLMSettings,
+    ModelHealthSettings,
+    _CODE_ROOT,
+    _REPOSITORY_ROOT,
+    _SHARED_REPOSITORY_ROOT,
+    _discover_shared_repository_root,
+)
 from core.model_health import check_configured_models, run_startup_model_health_check
 from ui.enhanced_cli import run_enhanced_cli
 
@@ -172,6 +180,20 @@ def test_enhanced_cli_skips_configured_model_probe_for_injected_client(monkeypat
 def test_settings_search_repository_and_code_env_files() -> None:
     env_files = tuple(str(path) for path in LLMSettings.model_config["env_file"])
 
-    assert env_files[-3].endswith("/openpilot/.env")
-    assert env_files[-2].endswith("/openpilot/Code/.env")
+    assert str(_SHARED_REPOSITORY_ROOT / ".env") in env_files
+    assert str(_REPOSITORY_ROOT / ".env") in env_files
+    assert str(_CODE_ROOT / ".env") in env_files
     assert env_files[-1] == ".env"
+
+
+def test_settings_discovers_main_checkout_from_linked_worktree(tmp_path) -> None:
+    main_checkout = tmp_path / "main"
+    common_git_dir = main_checkout / ".git"
+    linked_checkout = tmp_path / "linked"
+    linked_git_dir = common_git_dir / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    linked_checkout.mkdir()
+    (linked_checkout / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+    assert _discover_shared_repository_root(linked_checkout) == main_checkout.resolve()

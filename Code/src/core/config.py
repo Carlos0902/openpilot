@@ -15,7 +15,54 @@ from metadata import ReasoningCapabilityProfileId, ReasoningMode
 
 _CODE_ROOT = Path(__file__).resolve().parents[2]
 _REPOSITORY_ROOT = _CODE_ROOT.parent
-_ENV_FILES = (str(_REPOSITORY_ROOT / ".env"), str(_CODE_ROOT / ".env"), ".env")
+
+
+def _discover_shared_repository_root(repository_root: Path) -> Path:
+    """Return the main checkout owning a linked Git worktree, if present."""
+
+    repository_root = repository_root.expanduser().resolve(strict=False)
+    git_marker = repository_root / ".git"
+    if git_marker.is_dir() or not git_marker.is_file():
+        return repository_root
+    try:
+        marker = git_marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return repository_root
+    prefix = "gitdir:"
+    if not marker.casefold().startswith(prefix):
+        return repository_root
+    raw_git_dir = marker[len(prefix):].strip()
+    if not raw_git_dir:
+        return repository_root
+    git_dir = Path(raw_git_dir).expanduser()
+    if not git_dir.is_absolute():
+        git_dir = git_marker.parent / git_dir
+    git_dir = git_dir.resolve(strict=False)
+    common_dir_file = git_dir / "commondir"
+    try:
+        raw_common_dir = common_dir_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return repository_root
+    if not raw_common_dir:
+        return repository_root
+    common_dir = Path(raw_common_dir).expanduser()
+    if not common_dir.is_absolute():
+        common_dir = git_dir / common_dir
+    common_dir = common_dir.resolve(strict=False)
+    return common_dir.parent if common_dir.name == ".git" else repository_root
+
+
+_SHARED_REPOSITORY_ROOT = _discover_shared_repository_root(_REPOSITORY_ROOT)
+_ENV_FILES = tuple(
+    dict.fromkeys(
+        (
+            str(_SHARED_REPOSITORY_ROOT / ".env"),
+            str(_REPOSITORY_ROOT / ".env"),
+            str(_CODE_ROOT / ".env"),
+            ".env",
+        )
+    )
+)
 
 
 class ProviderToolExecutionBudgetProfile(str, Enum):
