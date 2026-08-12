@@ -1,5 +1,23 @@
 # TASK_TRAJECTORY_IMPLEMENTATION_LOG.md
 
+## 2026-08-12 — Reusable compaction prompt-use simulation gate
+
+- Observed failure: raw-versus-reusable prompt simulation evidence depended on
+  unavailable historical experiment stages, so prompt reduction and source
+  replacement were not replayable from the current branch.
+- Reproduction: compare a passing reusable assembly with preflight rejection,
+  source drift, summary fallback, and non-beneficial-summary cases. Assert
+  positive prompt reduction, complete source replacement, required/recent
+  retention, typed rejection reasons, and `used_in_prompt=False` everywhere.
+- Implemented fix: make the BG simulation gate self-contained with local
+  canonical hash, receipt writer, and zero-side-effect contract while reusing
+  the existing `simulate_reusable_compaction_prompt_use` implementation.
+- Validation evidence: prompt-use simulation regression **1 passed**;
+  `python -m compileall -q Code/src` and `git diff --check` pass. The slice is
+  470 experiment/test lines plus this log entry, below the 3,000-line threshold.
+- Remaining limitation: this is a dry-run comparison only; it does not enable
+  reusable-summary selection in production prompts.
+
 ## 2026-08-12 — Reusable compaction prompt-use preflight gate
 
 - Observed failure: prompt-use preflight evidence depended on unavailable
