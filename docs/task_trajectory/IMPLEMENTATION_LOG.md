@@ -5230,6 +5230,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitation: runtime-only handles remain available to the live tool
   call; this change only prevents them from entering durable checkpoint state.
 
+### Project-improvement evidence preview bounds
+
+- Observed failure: one-sided previews of long generated files hid behavior at
+  the end of the file, so project-improvement analysis could propose behavior
+  that was already implemented.
+- Reproduction: provide a long source file with distinct head and tail
+  sentinels; assert that both are present in the bounded analysis request and
+  that the analyzer is instructed not to duplicate visible behavior.
+- Implemented fix: use a bounded head/tail preview with an explicit middle
+  omission marker and add a typed prompt constraint against duplicate proposals.
+- Validation evidence: focused project-improvement delta/context suite **35
+  passed**; diff-check passed.
+- Remaining limitation: previews remain bounded and intentionally omit the
+  middle of very large files; the analyzer must still use read tools for
+  authoritative full-file inspection when admitted.
+
 ### Interactive validation safety
 
 - Observed failure: GUI/game validation used import-only execution, which could
