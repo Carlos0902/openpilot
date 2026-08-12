@@ -847,6 +847,19 @@ typed `recoverable`/`recoverability` fields, and a retry recommendation. CLI
 failure formatting accepts only an already-redacted `response_preview`; raw
 provider `response_text` is never displayed.
 
+Recognized questions about authoritative runtime facts use a separate
+read-only completion path. `RuntimeFactResolver` projects provider, model,
+canonical project path, execution mode, checkpoint status, improvement policy,
+and configuration readiness without exposing secrets. When a goal matches an
+explicit runtime-fact pattern, `DeterministicRuntimeResponseController` creates
+one grounded response candidate and commits it through the durable turn ledger;
+it makes no model, tool, network, file, mutation, or project-improvement call.
+Unrecognized goals return `None` and remain on the ordinary routing path. A
+repeated recognized question replays the exact durable assistant payload, and a
+crash at any ledger write boundary is recoverable without a second Provider
+request. This path is response-only and does not claim task or verification
+success.
+
 Interactive application launch is a separate delivery operation. The command
 tool accepts `mode="interactive"` only when a runtime-only
 `ToolExecutionContext.user_confirmed is True` handle is attached. It starts the

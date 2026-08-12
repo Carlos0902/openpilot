@@ -4687,3 +4687,22 @@ PYTHONPATH=Code/src pytest -q Code/tests
   remains the only artifact mutation path.
 - Remaining limitation: provider-window-aware prompt headroom and configurable
   post-plan reasoning controls remain separate follow-up slices.
+
+### Deterministic runtime-fact responses
+
+- Observed failure: questions that could be answered from authoritative local
+  runtime facts were routed into the model/autonomous-iteration path, causing
+  unnecessary delay and making a lightweight conversation appear to be a task.
+- Reproduction: submit a recognized model/provider/project-path/configuration
+  question with a fake runtime-fact projection and assert that no Provider or
+  tool callback is invoked; repeat it after each durable write boundary.
+- Implemented fix: add a frozen, secret-free runtime-fact projection, a single
+  transition owner for durable turn records, and an idempotent deterministic
+  response controller. Recognized fact questions produce a grounded,
+  response-only ledger entry; unrecognized goals return `None` and preserve the
+  ordinary route.
+- Validation evidence: focused runtime-fact, turn-reducer, and deterministic
+  response tests **15 passed**; `compileall` and `git diff --check` pass.
+- Remaining limitations: the current matcher intentionally covers only explicit
+  runtime-fact patterns; general greetings and external/current-information
+  questions remain separate routing slices.
