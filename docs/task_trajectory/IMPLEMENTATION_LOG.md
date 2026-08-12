@@ -4617,3 +4617,19 @@ PYTHONPATH=Code/src pytest -q Code/tests
   no persistence or replay authority.
 - Remaining limitation: explicit user selection UX and deeper project inventory
   bounds remain separate follow-up work.
+
+### Bounded project file inventory
+
+- Observed failure: project/environment planning used unbounded recursive Python
+  globs from broad roots, allowing unrelated `.venv`, vendor, or deeply nested
+  trees to consume discovery time and context.
+- Validation evidence: inventory and environment focused tests cover ignored
+  directories, file/depth/entry ceilings, and invalid bounds; source
+  compilation and `git diff --check` pass.
+- Implemented fix: replace recursive globs with a deterministic breadth-first,
+  read-only inventory that enforces hard limits and reports truncation. Existing
+  explicit files remain first-class candidates.
+- Metadata impact note: inventory facts are advisory discovery evidence only;
+  they do not grant read/write/command authority or alter project identity.
+- Remaining limitation: inventory defaults are conservative and may require a
+  separately scoped increase for unusually large projects.

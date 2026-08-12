@@ -36,6 +36,7 @@ from memory.agents.virtual_environment_manager import (
     EnvType,
     EnvironmentManager,
 )
+from memory.project_inventory import collect_project_files
 from core.tool_contracts import (
     PermissionLevel,
     ToolCapability,
@@ -500,13 +501,17 @@ def _candidate_python_files(project_path: Path, files: list[str]) -> list[Path]:
             path = project_path / path
         if path.exists() and path.suffix == ".py" and path not in candidates:
             candidates.append(path)
-    for path in sorted(project_path.rglob("*.py")):
-        if len(candidates) >= MAX_DEPENDENCY_SCAN_FILES:
-            break
-        if not path.is_file() or any(part in DEPENDENCY_SCAN_IGNORED_PARTS for part in path.parts):
-            continue
+    inventory = collect_project_files(
+        project_path,
+        suffixes={".py"},
+        max_files=MAX_DEPENDENCY_SCAN_FILES,
+        ignored_directories=DEPENDENCY_SCAN_IGNORED_PARTS,
+    )
+    for path in inventory.files:
         if path not in candidates:
             candidates.append(path)
+        if len(candidates) >= MAX_DEPENDENCY_SCAN_FILES:
+            break
     return candidates
 
 

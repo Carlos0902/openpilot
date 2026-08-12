@@ -862,6 +862,11 @@ mutation requires an explicit project path. The decision is read-only and does
 not create the child directory or grant mutation authority; the existing writer,
 path scope, and Guard remain authoritative.
 
+Project file discovery is read-only and bounded. Python dependency and target
+selection use breadth-first traversal with explicit file, directory, entry, and
+depth ceilings, skip common generated/vendor directories, and report truncation
+instead of eagerly sorting an unbounded recursive glob.
+
 Tool-planning prompts project the current typed `Task.write_files` list as the
 authoritative write scope. README generation is optional post-processing: an
 unscoped README need is dropped when the same plan still contains authorized
