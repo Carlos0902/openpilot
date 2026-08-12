@@ -186,6 +186,10 @@ The per-round budget policy is isolated from request execution. It validates
 prompt and call counts, caps calls at four, reserves 512 tokens per result when
 possible, keeps the 640-character minimum result payload, and defaults to two
 calls without remaining-prompt evidence.
+Completion usage is observed separately from budget accounting. Only bounded
+nonnegative integer provider usage is trusted; coercible strings, booleans,
+floats, negatives, and over-cap values become unknown rather than controlling
+reconciliation.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

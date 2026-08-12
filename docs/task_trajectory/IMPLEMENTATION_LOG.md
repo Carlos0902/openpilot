@@ -4064,3 +4064,35 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: the multi-round controller still needs to consume this
   policy for request admission and result projection.
+
+### Strict provider completion-token usage observation
+
+- Observed failure: aggregate completion usage parsing used `int()` coercion and
+  `max(0, ...)`, allowing booleans, numeric strings, floats, negatives, and
+  oversized values to become budget facts.
+- Validation evidence: the regression suite first fails because no standalone
+  usage observer exists. Twelve focused tests pass after implementation for
+  `completion_tokens`/`output_tokens` precedence, zero and bounded values, and
+  missing, boolean, string, float, negative, over-cap, and invalid-response
+  cases. The adjacent usage/budget/historical set passes 29 and the complete
+  provider-focused set passes 641. The complete repository suite passes 1,737
+  in an isolated detached worktree whose final directory was named `openpilot`,
+  followed by successful source compilation and diff validation.
+- Implemented fix: add a pure observer returning a bounded integer or `None`.
+  It performs no budget mutation, reconciliation, request, tool execution, or
+  persistence.
+- Metadata impact note:
+  - Facts: provider response usage only.
+  - Authoritative producer: provider transport owns raw usage; the runtime
+    budget remains the accounting owner; this module derives trusted observation.
+  - Lifecycle and control impact: budget evidence projection only. Unknown usage
+    cannot control reconciliation as a guessed value.
+  - Existing contracts reviewed: `LLMResponse.usage`, runtime budget methods,
+    completion outcome/round budget policies, public metadata inventory, and
+    metadata development conventions.
+  - Decision: add a strict derived observation instead of widening provider
+    usage coercion or creating a second budget owner.
+  - Serialization and migration: runtime-only value; no persisted schema or
+    migration changes.
+- Remaining limitation: the multi-round runner still needs to call this observer
+  at its completion-budget reconciliation point.

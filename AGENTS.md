@@ -121,6 +121,10 @@ update this file together with `API.md`.
   validate positive prompt/call facts, preserve the 640-character result floor,
   cap calls at four, reserve 512 prompt tokens per tool result when remaining
   prompt capacity is known, and never infer a zero/negative call budget.
+- Provider completion-token usage is observation evidence, not a coercion target.
+  Accept only bounded nonnegative literal integers from `completion_tokens` or
+  `output_tokens` (with the former taking precedence); booleans, strings,
+  floats, negatives, and over-cap values remain unknown.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

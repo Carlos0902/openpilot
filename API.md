@@ -323,6 +323,11 @@ four provider calls, uses a 512-token reserve per result when remaining prompt
 capacity is known, applies the existing 640–1,600 result-character bounds, and
 defaults to at most two calls when remaining capacity is unavailable. Invalid
 or negative numeric facts fail closed.
+Completion-token usage observation is a separate pure boundary. It accepts only
+bounded nonnegative literal integers, prefers `completion_tokens` over
+`output_tokens`, and returns unknown for missing, boolean, string, float,
+negative, or over-cap provider values. It does not own or mutate the runtime
+completion budget.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only
