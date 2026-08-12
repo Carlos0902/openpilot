@@ -891,7 +891,15 @@ to a bounded `web_search` need, then materializes one `inspect` task with a
 generation-one read-only checkpoint through `IterationTaskMaterializer`. The
 result has no project-improvement attempts and no mutation authority. Receipt
 validation, external freshness, checkpoint-result binding, and assistant
-completion remain a dependent boundary.
+completion are handled by the same controller only after a governed reader or
+searcher produces an exact task-owned receipt. The controller validates the
+artifact hash, source-compatible tool, project fingerprint, current-session
+authority, checkpoint marker, and external freshness window before closing the
+obligation. It then passes through one typed completion transition and the
+existing assistant-ledger committer; a crash at any write boundary resumes the
+durable completion without a second Provider request. This remains an offline
+controller boundary: it does not select tools, perform network I/O, or wire the
+default CLI route.
 
 When a response candidate requires a read-only project task, task materialization
 is a separate durable boundary. `CanonicalInitialTaskSnapshot` is the complete

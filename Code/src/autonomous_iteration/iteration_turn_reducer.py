@@ -96,6 +96,33 @@ class IterationTurnReducer:
         )
 
     @classmethod
+    def complete_evidence(
+        cls,
+        record: IterationTurnRecordMetadata,
+        *,
+        cursor: IterationControlCursor,
+        obligations: tuple[CompletionObligation, ...],
+        grounding: GroundingDecision,
+    ) -> IterationTurnRecordMetadata:
+        if not isinstance(record.task_binding, ActiveTaskBinding):
+            raise IterationTurnTransitionError("evidence completion requires an active task binding")
+        if record.response_candidate is None or record.outcome is not None:
+            raise IterationTurnTransitionError("evidence completion requires an open response candidate")
+        if grounding.response_hash != record.response_candidate.response_hash:
+            raise IterationTurnTransitionError("evidence grounding differs from response candidate")
+        if grounding.status != "approved" or any(item.is_blocking for item in obligations):
+            raise IterationTurnTransitionError("evidence completion requires approved closed obligations")
+        return cls._validated_copy(
+            record,
+            record_id=f"{record.record_id}-evidence-complete",
+            boundary=IterationBoundary.COMPLETION_APPROVED,
+            cursor=cursor,
+            obligations=obligations,
+            grounding_decision=grounding,
+            task_binding=NoTaskBinding(),
+        )
+
+    @classmethod
     def request_provider(
         cls,
         record: IterationTurnRecordMetadata,

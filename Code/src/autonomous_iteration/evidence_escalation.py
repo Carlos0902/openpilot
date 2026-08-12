@@ -1,22 +1,43 @@
-"""Read-only evidence admission and task materialization."""
+"""Read-only evidence escalation and response completion re-entry."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from autonomous_iteration.checkpoint_store import RuntimeCheckpointStore
-from autonomous_iteration.iteration_task_materializer import IterationTaskMaterializer
+from autonomous_iteration.iteration_task_materializer import (
+    IterationTaskMaterializer,
+    TaskMaterializationError,
+    TaskMaterializationFailureCode,
+)
+from autonomous_iteration.iteration_turn_commit import IterationTurnCommitter, assistant_payload_hash
+from autonomous_iteration.iteration_turn_reducer import IterationTurnReducer
 from autonomous_iteration.iteration_turn_store import IterationTurnStore
+from autonomous_iteration.iteration_turn_store import IterationTurnConflictError
 from metadata import (
     AgentPhase,
+    AssistantLedgerCommitState,
+    AssistantTurnCommit,
     CanonicalInitialTaskSnapshot,
     ClaimSourceClass,
+    CompletedResponseOutcome,
+    CompletionObligation,
     CompletionObligationKind,
+    CompletionObligationStatus,
     DecisionNeedMetadata,
+    DurableArtifactReference,
+    GroundingDecision,
+    GroundingStatus,
+    IterationDisposition,
     IterationAuthorityCeiling,
+    IterationPhase,
     IterationTurnRecordMetadata,
     ProjectFingerprint,
     ProjectImprovementPolicy,
@@ -31,6 +52,10 @@ from metadata import (
 class EvidenceEscalationFailureCode(str, Enum):
     CANDIDATE_INVALID = "candidate_invalid"
     SOURCE_INCOMPATIBLE = "source_incompatible"
+    ARTIFACT_INVALID = "artifact_invalid"
+    CHECKPOINT_INVALID = "checkpoint_invalid"
+    PROJECT_STALE = "project_stale"
+    EXTERNAL_EVIDENCE_STALE = "external_evidence_stale"
     AUTHORITY_STALE = "authority_stale"
 
 
@@ -40,16 +65,52 @@ class EvidenceEscalationError(RuntimeError):
         self.code = code
 
 
+class EvidenceReceipt(BaseModel):
+    """Task-owned evidence receipt consumed by the pre-task completion gate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    obligation_id: str = Field(min_length=1)
+    source_class: ClaimSourceClass
+    artifact_ref: DurableArtifactReference
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    checkpoint_id: str = Field(min_length=1)
+    checkpoint_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    project_fingerprint_hash: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    observed_at: datetime
+
+
+class EvidenceArtifactPayload(BaseModel):
+    """Body-bearing observation whose provenance is bound by the receipt/checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    obligation_id: str = Field(min_length=1)
+    source_class: ClaimSourceClass
+    observed_at: datetime
+    evidence: dict[str, Any] = Field(min_length=1)
+
+
 class EvidenceEscalationController:
-    """Turn an evidence-required response into a bounded read-only task."""
+    """Materialize a read-only evidence task and re-enter the same response gate."""
 
     def __init__(
         self,
         turn_store: IterationTurnStore,
         checkpoint_store: RuntimeCheckpointStore,
+        *,
+        now: Callable[[], datetime] | None = None,
+        max_external_age: timedelta = timedelta(minutes=5),
+        after_write: Callable[[str], None] | None = None,
     ) -> None:
         self.turn_store = turn_store
         self.checkpoint_store = checkpoint_store
+        self.now = now or (lambda: datetime.now(UTC))
+        self.max_external_age = max_external_age
+        self.after_write = after_write
 
     def decision_needs(self, record: IterationTurnRecordMetadata) -> tuple[DecisionNeedMetadata, ...]:
         manifest = self._claim_manifest(record)
@@ -75,9 +136,10 @@ class EvidenceEscalationController:
                     EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
                     "open obligation is incompatible with its Runtime-owned claim source",
                 )
+            need_type = "project_structure" if source == ClaimSourceClass.PROJECT else "web_search"
             needs.append(
                 DecisionNeedMetadata(
-                    need_type=("project_structure" if source == ClaimSourceClass.PROJECT else "web_search"),
+                    need_type=need_type,
                     question=f"Collect evidence for claim: {claim['text']}",
                     phase=AgentPhase.UNDERSTAND_PROJECT,
                     query=claim["text"] if source == ClaimSourceClass.CURRENT_EXTERNAL else None,
@@ -166,6 +228,383 @@ class EvidenceEscalationController:
         ).materialize(record, snapshot=snapshot, current_ingress=current_ingress)
         return active, needs
 
+    def absorb_and_complete(
+        self,
+        record: IterationTurnRecordMetadata,
+        *,
+        current_ingress: SessionIngressState,
+        current_project_fingerprint: ProjectFingerprint,
+        receipts: tuple[EvidenceReceipt, ...],
+    ) -> IterationTurnRecordMetadata:
+        latest = self.turn_store.load_latest(
+            record.identity.conversation_id,
+            record.identity.run_id,
+        )
+        if latest is not None and latest.record_id != record.record_id:
+            resumed = self._resume_durable_completion(
+                record,
+                latest=latest,
+                current_ingress=current_ingress,
+                current_project_fingerprint=current_project_fingerprint,
+                receipts=receipts,
+            )
+            if resumed is not None:
+                return resumed
+        if record.task_binding.state != "active":
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "evidence absorption requires an active evidence task",
+            )
+        snapshot = self._snapshot(record)
+        try:
+            IterationTaskMaterializer(
+                self.turn_store,
+                self.checkpoint_store,
+            ).recover(record, current_ingress=current_ingress)
+        except TaskMaterializationError as exc:
+            failure_code = (
+                EvidenceEscalationFailureCode.AUTHORITY_STALE
+                if exc.code
+                in {
+                    TaskMaterializationFailureCode.AUTHORITY_STALE,
+                    TaskMaterializationFailureCode.CONFIRMATION_STALE,
+                }
+                else EvidenceEscalationFailureCode.CHECKPOINT_INVALID
+            )
+            raise EvidenceEscalationError(
+                failure_code,
+                "active evidence task no longer passes authority/checkpoint preflight",
+            ) from exc
+        receipt_by_obligation = {item.obligation_id: item for item in receipts}
+        open_ids = {item.obligation_id for item in record.obligations if item.is_blocking}
+        if (
+            len(receipt_by_obligation) != len(receipts)
+            or set(receipt_by_obligation) != open_ids
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "evidence receipts must uniquely and exactly cover open obligations",
+            )
+        closed: list[CompletionObligation] = []
+        evidence_refs: list[str] = []
+        evidence_checkpoint: RuntimeCheckpointMetadata | None = None
+        project_hash = self.project_fingerprint_hash(snapshot.initial_checkpoint.project_fingerprint)
+        if self.project_fingerprint_hash(current_project_fingerprint) != project_hash:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.PROJECT_STALE,
+                "current project fingerprint differs from the canonical evidence task",
+            )
+        for obligation in record.obligations:
+            if not obligation.is_blocking:
+                closed.append(obligation)
+                evidence_refs.extend(obligation.evidence_refs)
+                continue
+            receipt = receipt_by_obligation.get(obligation.obligation_id)
+            if receipt is None:
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                    "every open obligation requires one evidence receipt",
+                )
+            expected_source = (
+                ClaimSourceClass.PROJECT
+                if obligation.kind == CompletionObligationKind.PROJECT_FACT
+                else ClaimSourceClass.CURRENT_EXTERNAL
+            )
+            if receipt.source_class != expected_source:
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                    "evidence receipt source differs from obligation kind",
+                )
+            payload = self.turn_store.load_artifact(
+                record.identity.conversation_id,
+                record.identity.run_id,
+                receipt.artifact_ref,
+            )
+            if (
+                receipt.artifact_ref.kind != "observed_evidence"
+                or payload is None
+                or self.evidence_payload_hash(payload) != receipt.content_hash
+            ):
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                    "evidence artifact is unavailable or checksum-mismatched",
+                )
+            try:
+                artifact = EvidenceArtifactPayload.model_validate(payload)
+            except ValueError as exc:
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                    "evidence artifact payload is not a typed observation",
+                ) from exc
+            receipt_observed = self._utc(receipt.observed_at)
+            artifact_observed = self._utc(artifact.observed_at)
+            if (
+                artifact.obligation_id != receipt.obligation_id
+                or artifact.source_class != receipt.source_class
+                or artifact_observed != receipt_observed
+            ):
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                    "evidence receipt provenance differs from its artifact",
+                )
+            checkpoint = self.checkpoint_store.load(record.identity.run_id, receipt.checkpoint_id)
+            marker = f"evidence:{receipt.artifact_ref.artifact_id}:{receipt.content_hash}"
+            if (
+                checkpoint is None
+                or checkpoint.integrity_checksum != receipt.checkpoint_digest
+                or checkpoint.generation <= snapshot.initial_checkpoint.generation
+                or checkpoint.root_task_id != snapshot.initial_checkpoint.root_task_id
+                or checkpoint.runtime_state.execution_mode != "read_only"
+                or checkpoint.runtime_state.core_success is not None
+                or checkpoint.safe_boundary != "tool_result_applied"
+                or checkpoint.side_effect_state != "applied"
+                or marker not in checkpoint.runtime_state.known_facts
+            ):
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.CHECKPOINT_INVALID,
+                    "evidence receipt is not owned by a matching read-only task checkpoint",
+                )
+            checkpoint_ingress = checkpoint.session_ingress_state
+            if (
+                checkpoint_ingress is None
+                or checkpoint_ingress.identity != current_ingress.identity
+                or checkpoint_ingress.session_constraints
+                != current_ingress.session_constraints
+                or checkpoint.runtime_state.session_constraints
+                != current_ingress.session_constraints
+            ):
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.AUTHORITY_STALE,
+                    "evidence checkpoint does not bind current session authority",
+                )
+            if evidence_checkpoint is not None and evidence_checkpoint != checkpoint:
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.CHECKPOINT_INVALID,
+                    "all evidence receipts must bind one task checkpoint",
+                )
+            evidence_checkpoint = checkpoint
+            if self.project_fingerprint_hash(checkpoint.project_fingerprint) != project_hash:
+                raise EvidenceEscalationError(
+                    EvidenceEscalationFailureCode.PROJECT_STALE,
+                    "evidence checkpoint project fingerprint differs from canonical task snapshot",
+                )
+            if expected_source == ClaimSourceClass.PROJECT:
+                if checkpoint.tool_name not in {"file_reader", "multi_file_reader"}:
+                    raise EvidenceEscalationError(
+                        EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                        "project evidence must originate from a registered project reader",
+                    )
+                if (
+                    receipt.project_fingerprint_hash != project_hash
+                ):
+                    raise EvidenceEscalationError(
+                        EvidenceEscalationFailureCode.PROJECT_STALE,
+                        "project evidence fingerprint differs from canonical task snapshot",
+                    )
+            else:
+                if checkpoint.tool_name != "web_searcher":
+                    raise EvidenceEscalationError(
+                        EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                        "current-external evidence must originate from the web search tool",
+                    )
+                age = self.now() - artifact_observed
+                if age < timedelta(0) or age > self.max_external_age:
+                    raise EvidenceEscalationError(
+                        EvidenceEscalationFailureCode.EXTERNAL_EVIDENCE_STALE,
+                        "current-external evidence is outside the freshness window",
+                    )
+            evidence_ref = f"artifact:{receipt.artifact_ref.artifact_id}:{receipt.content_hash}"
+            evidence_refs.append(evidence_ref)
+            closed.append(
+                obligation.model_copy(
+                    update={
+                        "status": CompletionObligationStatus.SATISFIED,
+                        "evidence_refs": (evidence_ref,),
+                    }
+                )
+            )
+        required_ids = tuple(item.obligation_id for item in closed if item.required)
+        grounding = GroundingDecision(
+            response_hash=record.response_candidate.response_hash,
+            status=GroundingStatus.APPROVED,
+            obligation_ids=required_ids,
+            satisfied_obligation_ids=required_ids,
+            candidate_claim_coverage="complete",
+            evidence_refs=tuple(evidence_refs),
+        )
+        evidence_complete = IterationTurnReducer.complete_evidence(
+            record,
+            cursor=record.cursor.model_copy(
+                update={
+                    "phase": IterationPhase.COMPLETE,
+                    "current_disposition": IterationDisposition.COMPLETE_RESPONSE,
+                    "open_obligation_ids": (),
+                }
+            ),
+            obligations=tuple(closed),
+            grounding=grounding,
+        )
+        try:
+            evidence_complete = self.turn_store.save(
+                evidence_complete,
+                expected_generation=record.generation,
+            )
+        except IterationTurnConflictError:
+            winner = self.turn_store.load_latest(
+                record.identity.conversation_id,
+                record.identity.run_id,
+            )
+            resumed = self._resume_durable_completion(
+                record,
+                latest=winner,
+                current_ingress=current_ingress,
+                current_project_fingerprint=current_project_fingerprint,
+                receipts=receipts,
+            )
+            if resumed is None:
+                raise
+            return resumed
+        self._after_write("evidence_complete")
+        return self._prepare_and_commit(evidence_complete)
+
+    def _prepare_and_commit(
+        self,
+        evidence_complete: IterationTurnRecordMetadata,
+    ) -> IterationTurnRecordMetadata:
+        record = evidence_complete
+        grounding = record.grounding_decision
+        if record.response_candidate is None or grounding is None:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "durable evidence completion lost its response candidate",
+            )
+        payload = self.turn_store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            record.response_candidate.response_ref,
+        )
+        if (
+            not self._valid_assistant_payload(payload)
+            or assistant_payload_hash(payload) != record.response_candidate.response_hash
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.ARTIFACT_INVALID,
+                "response candidate payload is unavailable after evidence completion",
+            )
+        outcome = CompletedResponseOutcome(
+            response_ref=record.response_candidate.response_ref,
+            response_hash=record.response_candidate.response_hash,
+            grounding_decision_hash=grounding.canonical_hash,
+        )
+        pending = IterationTurnReducer.prepare_response(
+            record,
+            cursor=record.cursor,
+            candidate=record.response_candidate,
+            grounding=grounding,
+            outcome=outcome,
+            assistant_commit=AssistantTurnCommit(
+                state=AssistantLedgerCommitState.PENDING,
+                message_id=payload["message_id"],
+                turn_index=payload["turn_index"],
+                payload_ref=record.response_candidate.response_ref,
+                payload_hash=record.response_candidate.response_hash,
+            ),
+        )
+        return IterationTurnCommitter(
+            self.turn_store,
+            after_write=self.after_write,
+        ).commit(pending).record
+
+    def _resume_durable_completion(
+        self,
+        source: IterationTurnRecordMetadata,
+        *,
+        latest: IterationTurnRecordMetadata | None,
+        current_ingress: SessionIngressState,
+        current_project_fingerprint: ProjectFingerprint,
+        receipts: tuple[EvidenceReceipt, ...],
+    ) -> IterationTurnRecordMetadata | None:
+        if latest is None or latest.response_candidate != source.response_candidate:
+            return None
+        if latest.task_binding.state != "none" or latest.grounding_decision is None:
+            return None
+        if latest.grounding_decision.status != GroundingStatus.APPROVED:
+            return None
+        self._validate_retry_authority(
+            source,
+            current_ingress,
+            current_project_fingerprint=current_project_fingerprint,
+        )
+        expected_ids = {
+            item.obligation_id
+            for item in latest.obligations
+            if item.kind
+            in {
+                CompletionObligationKind.PROJECT_FACT,
+                CompletionObligationKind.CURRENT_EXTERNAL_FACT,
+            }
+            and item.required
+        }
+        receipt_ids = {item.obligation_id for item in receipts}
+        receipt_refs = {
+            f"artifact:{item.artifact_ref.artifact_id}:{item.content_hash}" for item in receipts
+        }
+        durable_refs = {
+            ref
+            for item in latest.obligations
+            if item.obligation_id in expected_ids
+            for ref in item.evidence_refs
+        }
+        if (
+            len(receipt_ids) != len(receipts)
+            or receipt_ids != expected_ids
+            or receipt_refs != durable_refs
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE,
+                "retry receipts differ from the durable evidence completion",
+            )
+        if latest.assistant_commit.state == AssistantLedgerCommitState.COMMITTED:
+            return latest
+        if latest.assistant_commit.state == AssistantLedgerCommitState.PENDING:
+            return IterationTurnCommitter(
+                self.turn_store,
+                after_write=self.after_write,
+            ).commit(latest).record
+        if latest.outcome is None:
+            return self._prepare_and_commit(latest)
+        return None
+
+    def _validate_retry_authority(
+        self,
+        source: IterationTurnRecordMetadata,
+        current_ingress: SessionIngressState,
+        *,
+        current_project_fingerprint: ProjectFingerprint,
+    ) -> None:
+        snapshot = self._snapshot(source)
+        constraints = current_ingress.session_constraints
+        if (
+            current_ingress.identity != source.identity
+            or constraints.revision != snapshot.session_authority_revision
+            or constraints.authority_hash != snapshot.session_authority_hash
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.AUTHORITY_STALE,
+                "completion retry no longer matches canonical session authority",
+            )
+        if self.project_fingerprint_hash(current_project_fingerprint) != self.project_fingerprint_hash(
+            snapshot.initial_checkpoint.project_fingerprint
+        ):
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.PROJECT_STALE,
+                "completion retry project fingerprint differs from the evidence task",
+            )
+
+    def _after_write(self, boundary: str) -> None:
+        if self.after_write is not None:
+            self.after_write(boundary)
+
     def _claim_manifest(self, record: IterationTurnRecordMetadata) -> list[dict[str, Any]]:
         candidate = record.response_candidate
         if candidate is None or candidate.claim_manifest_ref is None:
@@ -178,21 +617,33 @@ class EvidenceEscalationController:
             record.identity.run_id,
             candidate.claim_manifest_ref,
         )
-        claims = payload.get("claims") if isinstance(payload, dict) and set(payload) == {"claims"} else None
+        claims = (
+            payload.get("claims")
+            if isinstance(payload, dict) and set(payload) == {"claims"}
+            else None
+        )
         if not isinstance(claims, list) or len(claims) != len(candidate.claims):
             raise EvidenceEscalationError(
                 EvidenceEscalationFailureCode.CANDIDATE_INVALID,
                 "response claim manifest is unavailable or incomplete",
             )
         expected_ids = tuple(item.claim_id for item in candidate.claims)
-        observed_ids = tuple(str(item.get("claim_id") or "") if isinstance(item, dict) else "" for item in claims)
+        observed_ids = tuple(
+            str(item.get("claim_id") or "") if isinstance(item, dict) else ""
+            for item in claims
+        )
         if len(set(observed_ids)) != len(observed_ids) or observed_ids != expected_ids:
             raise EvidenceEscalationError(
                 EvidenceEscalationFailureCode.CANDIDATE_INVALID,
                 "response claim manifest order or identity differs from candidate",
             )
         for claim, item in zip(candidate.claims, claims, strict=True):
-            if not isinstance(item, dict) or set(item) != {"claim_id", "claim_hash", "source_class", "text"}:
+            if not isinstance(item, dict) or set(item) != {
+                "claim_id",
+                "claim_hash",
+                "source_class",
+                "text",
+            }:
                 raise EvidenceEscalationError(
                     EvidenceEscalationFailureCode.CANDIDATE_INVALID,
                     "response claim manifest contains an invalid entry",
@@ -209,6 +660,48 @@ class EvidenceEscalationController:
                     "response claim manifest differs from candidate hashes",
                 )
         return claims
+
+    @staticmethod
+    def _valid_assistant_payload(payload: Any) -> bool:
+        return (
+            isinstance(payload, dict)
+            and set(payload) == {"message_id", "turn_index", "content"}
+            and isinstance(payload["message_id"], str)
+            and bool(payload["message_id"])
+            and isinstance(payload["turn_index"], int)
+            and not isinstance(payload["turn_index"], bool)
+            and payload["turn_index"] >= 0
+            and isinstance(payload["content"], str)
+        )
+
+    def _snapshot(self, record: IterationTurnRecordMetadata) -> CanonicalInitialTaskSnapshot:
+        binding = record.task_binding
+        payload = self.turn_store.load_artifact(
+            record.identity.conversation_id,
+            record.identity.run_id,
+            binding.snapshot_ref,
+        )
+        try:
+            return CanonicalInitialTaskSnapshot.model_validate(payload)
+        except (TypeError, ValueError) as exc:
+            raise EvidenceEscalationError(
+                EvidenceEscalationFailureCode.CANDIDATE_INVALID,
+                "active evidence task snapshot is unavailable",
+            ) from exc
+
+    @staticmethod
+    def evidence_payload_hash(payload: dict[str, Any]) -> str:
+        return EvidenceEscalationController._hash(payload)
+
+    @staticmethod
+    def _utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    @staticmethod
+    def project_fingerprint_hash(fingerprint: ProjectFingerprint) -> str:
+        return EvidenceEscalationController._hash(fingerprint.model_dump(mode="json"))
 
     @classmethod
     def _stable_id(cls, prefix: str, record: IterationTurnRecordMetadata) -> str:
@@ -228,4 +721,10 @@ class EvidenceEscalationController:
         return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-__all__ = ["EvidenceEscalationController", "EvidenceEscalationError", "EvidenceEscalationFailureCode"]
+__all__ = [
+    "EvidenceEscalationController",
+    "EvidenceArtifactPayload",
+    "EvidenceEscalationError",
+    "EvidenceEscalationFailureCode",
+    "EvidenceReceipt",
+]

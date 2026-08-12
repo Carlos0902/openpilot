@@ -4772,6 +4772,29 @@ PYTHONPATH=Code/src pytest -q Code/tests
   evidence receipts or freshness, or commit the assistant response. Those
   behaviors are isolated in the next dependent slice.
 
+### Evidence receipt validation and response completion
+
+- Observed failure: after a read-only evidence task, there was no single
+  completion boundary proving that every receipt belonged to the exact task,
+  checkpoint, project fingerprint, authority revision, and source-compatible
+  reader/search result. A crash during completion could also repeat the
+  assistant response or leave a stale obligation open.
+- Reproduction: build project, current-external, and mixed-source receipts;
+  tamper with artifact hashes, source tools, observation timestamps,
+  checkpoints, project fingerprints, authority, receipt coverage, and each
+  durable write boundary. Assert fail-closed typed errors and exactly-once
+  assistant-ledger recovery.
+- Implemented fix: add typed evidence receipts and artifacts, validate exact
+  source/checkpoint/project/freshness lineage, add the evidence completion
+  reducer transition, and reuse the existing response preparation/ledger
+  committer for durable completion and crash recovery.
+- Validation evidence: focused evidence, bounded-response, materializer,
+  reducer, metadata, deterministic-response, commit, and store suite **81
+  passed**; `python -m compileall -q Code/src` and `git diff --check` pass.
+- Remaining limitation: this controller is not yet connected to the governed
+  tool-event loop or default CLI/provider route; it accepts already-produced
+  receipts and performs no tool or network I/O.
+
 ### Canonical task materialization and active-checkpoint recovery
 
 - Observed failure: an evidence/task re-entry path could not prove that the

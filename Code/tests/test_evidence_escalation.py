@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+import pytest
+
 from autonomous_iteration.bounded_model_response import BoundedModelResponseController
 from autonomous_iteration.checkpoint_store import RuntimeCheckpointStore
 from autonomous_iteration.evidence_escalation import (
     EvidenceEscalationController,
     EvidenceEscalationError,
     EvidenceEscalationFailureCode,
+    EvidenceReceipt,
 )
 from autonomous_iteration.iteration_turn_store import IterationTurnStore
 from autonomous_iteration.runtime_facts import RuntimeFactProjection
 from core.llm import LLMResponse
-from metadata import ConversationIdentity, ProjectFingerprint, SessionIngressState, SessionTurn
+from metadata import ConversationIdentity, ProjectFingerprint, RuntimeCheckpointMetadata, SessionIngressState, SessionTurn
 
 
 class _Client:
@@ -36,7 +41,14 @@ def _ingress(content: str) -> SessionIngressState:
     )
     return SessionIngressState(
         identity=identity,
-        turns=[SessionTurn(identity=identity, message_id="message-user-1", role="user", content=content)],
+        turns=[
+            SessionTurn(
+                identity=identity,
+                message_id="message-user-1",
+                role="user",
+                content=content,
+            )
+        ],
     )
 
 
@@ -49,94 +61,543 @@ def _facts() -> RuntimeFactProjection:
     )
 
 
-def _materialized(tmp_path):
-    turn_store = IterationTurnStore(tmp_path / "turns")
-    checkpoint_store = RuntimeCheckpointStore(tmp_path / "checkpoints")
-    question = "What is in this repository?"
+def _candidate(turn_store, *, external: bool = False):
+    question = "What is the latest weather?" if external else "What is in this repository?"
+    answer = "The latest weather is sunny." if external else "The repository contains app.py."
     result = BoundedModelResponseController(
         turn_store,
-        _Client({"response": "The repository contains app.py.", "claims": [{"text": "The repository contains app.py."}]}),
+        _Client({"response": answer, "claims": [{"text": answer}]}),
     ).complete(question, ingress=_ingress(question), facts=_facts())
-    controller = EvidenceEscalationController(turn_store, checkpoint_store)
-    fingerprint = ProjectFingerprint(project_root="/tmp/project", git_head="abc123", environment_id="env-1")
+    assert result.evidence_required is True
+    return result
+
+
+def _materialized(tmp_path, *, external: bool = False):
+    turn_store = IterationTurnStore(tmp_path / "turns")
+    checkpoint_store = RuntimeCheckpointStore(tmp_path / "checkpoints")
+    candidate = _candidate(turn_store, external=external)
+    controller = EvidenceEscalationController(
+        turn_store,
+        checkpoint_store,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    fingerprint = ProjectFingerprint(
+        project_root="/tmp/project",
+        git_head="abc123",
+        environment_id="env-1",
+    )
     active, needs = controller.materialize_read_only_task(
-        result.record,
-        current_ingress=result.ingress,
+        candidate.record,
+        current_ingress=candidate.ingress,
         project_fingerprint=fingerprint,
     )
-    return turn_store, checkpoint_store, controller, active, needs
+    return turn_store, checkpoint_store, controller, candidate.ingress, active, needs, fingerprint
 
 
-def test_open_obligation_becomes_read_only_need_and_task(tmp_path) -> None:
-    _turn_store, checkpoint_store, _controller, active, needs = _materialized(tmp_path)
+def _receipt_and_checkpoint(
+    turn_store,
+    checkpoint_store,
+    controller,
+    ingress,
+    active,
+    fingerprint,
+    *,
+    observed_at: datetime,
+):
+    obligation = next(item for item in active.obligations if item.is_blocking)
+    source_class = "current_external" if obligation.kind == "current_external_fact" else "project"
+    payload = {
+        "obligation_id": obligation.obligation_id,
+        "source_class": source_class,
+        "observed_at": observed_at.isoformat(),
+        "evidence": {"summary": "source-compatible observed evidence"},
+    }
+    reference = turn_store.save_artifact(
+        "conversation-1",
+        "run-1",
+        kind="observed_evidence",
+        payload=payload,
+    )
+    content_hash = controller.evidence_payload_hash(payload)
+    initial = checkpoint_store.load_latest("run-1")
+    state = initial.runtime_state.model_copy(deep=True)
+    state.known_facts.append(f"evidence:{reference.artifact_id}:{content_hash}")
+    checkpoint = RuntimeCheckpointMetadata(
+        checkpoint_id="evidence-checkpoint-2",
+        generation=2,
+        run_id="run-1",
+        root_task_id=initial.root_task_id,
+        session_id="run-1",
+        checkpoint_reason="read-only evidence observed",
+        safe_boundary="tool_result_applied",
+        runtime_state=state,
+        session_ingress_state=ingress,
+        side_effect_state="applied",
+        tool_name="web_searcher" if obligation.kind == "current_external_fact" else "file_reader",
+        mutation_class="read_only",
+        project_fingerprint=fingerprint,
+    )
+    checkpoint = checkpoint_store.save(checkpoint, expected_generation=1)
+    receipt = EvidenceReceipt(
+        obligation_id=obligation.obligation_id,
+        source_class=source_class,
+        artifact_ref=reference,
+        content_hash=content_hash,
+        checkpoint_id=checkpoint.checkpoint_id,
+        checkpoint_digest=checkpoint.integrity_checksum,
+        project_fingerprint_hash=(
+            controller.project_fingerprint_hash(fingerprint)
+            if source_class == "project"
+            else None
+        ),
+        observed_at=observed_at,
+    )
+    return receipt, checkpoint
+
+
+def test_open_obligation_becomes_read_only_decision_need_and_task(tmp_path) -> None:
+    (
+        _turn_store,
+        checkpoint_store,
+        _controller,
+        _ingress_state,
+        active,
+        needs,
+        _fingerprint,
+    ) = _materialized(tmp_path)
+
     assert len(needs) == 1
     assert needs[0].need_type == "project_structure"
     assert needs[0].attributes["read_only"] is True
     assert active.task_binding.state == "active"
     checkpoint = checkpoint_store.load_latest("run-1")
     assert checkpoint.runtime_state.execution_mode == "read_only"
+    assert checkpoint.runtime_state.core_success is None
     assert checkpoint.runtime_state.project_improvement_policy.requirement == "disabled"
     assert checkpoint.mutation_class == "read_only"
 
 
-def test_current_external_obligation_becomes_web_search_need(tmp_path) -> None:
+def test_source_compatible_evidence_reenters_same_completion_gate(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    completed = controller.absorb_and_complete(
+        active,
+        current_ingress=ingress,
+        current_project_fingerprint=fingerprint,
+        receipts=(receipt,),
+    )
+
+    assert completed.assistant_commit.state == "committed"
+    assert completed.task_binding.state == "none"
+    assert completed.core_success is None
+    assert completed.grounding_decision.status == "approved"
+    assert checkpoint.runtime_state.core_success is None
+    restored, _revision = turn_store.load_ingress("conversation-1")
+    assert restored.turns[-1].content == "The repository contains app.py."
+
+
+def test_stale_project_fingerprint_cannot_close_obligation(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    stale = receipt.model_copy(update={"project_fingerprint_hash": "sha256:" + "f" * 64})
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(stale,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.PROJECT_STALE
+
+
+def test_current_project_drift_cannot_close_prior_evidence(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    drifted = fingerprint.model_copy(update={"git_head": "def456"})
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=drifted,
+            receipts=(receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.PROJECT_STALE
+
+
+def test_project_evidence_cannot_use_external_search_checkpoint(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    mismatched = checkpoint.model_copy(
+        update={
+            "checkpoint_id": "evidence-checkpoint-wrong-source",
+            "generation": 3,
+            "tool_name": "web_searcher",
+            "integrity_checksum": None,
+        }
+    )
+    mismatched = checkpoint_store.save(mismatched, expected_generation=2)
+    mismatched_receipt = receipt.model_copy(
+        update={
+            "checkpoint_id": mismatched.checkpoint_id,
+            "checkpoint_digest": mismatched.integrity_checksum,
+        }
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(mismatched_receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE
+
+
+def test_stale_current_external_evidence_cannot_close_obligation(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path, external=True
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.EXTERNAL_EVIDENCE_STALE
+
+
+def test_future_current_external_evidence_cannot_close_obligation(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path, external=True
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, 0, 1, tzinfo=UTC),
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.EXTERNAL_EVIDENCE_STALE
+
+
+def test_receipt_cannot_relabel_artifact_observation_time(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path, external=True
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    relabeled = receipt.model_copy(
+        update={"observed_at": datetime(2026, 8, 10, tzinfo=UTC)}
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(relabeled,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.ARTIFACT_INVALID
+
+
+def test_extra_receipt_cannot_be_smuggled_past_open_obligations(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    extra = receipt.model_copy(update={"obligation_id": "ground:unowned"})
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt, extra),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE
+
+
+def test_evidence_checkpoint_must_bind_current_session_authority(tmp_path) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    stale_ingress = ingress.model_copy(deep=True)
+    stale_ingress.session_constraints.revision = ingress.session_constraints.revision + 1
+    stale_state = checkpoint.runtime_state.model_copy(
+        update={"session_constraints": stale_ingress.session_constraints}
+    )
+    stale_checkpoint = checkpoint.model_copy(
+        update={
+            "checkpoint_id": "evidence-checkpoint-stale-authority",
+            "generation": 3,
+            "session_ingress_state": stale_ingress,
+            "runtime_state": stale_state,
+            "integrity_checksum": None,
+        }
+    )
+    stale_checkpoint = checkpoint_store.save(stale_checkpoint, expected_generation=2)
+    stale_receipt = receipt.model_copy(
+        update={
+            "checkpoint_id": stale_checkpoint.checkpoint_id,
+            "checkpoint_digest": stale_checkpoint.integrity_checksum,
+        }
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        controller.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(stale_receipt,),
+        )
+
+    assert caught.value.code == EvidenceEscalationFailureCode.AUTHORITY_STALE
+
+
+def test_claim_manifest_order_and_identity_are_integrity_bound(tmp_path) -> None:
     turn_store = IterationTurnStore(tmp_path / "turns")
-    checkpoint_store = RuntimeCheckpointStore(tmp_path / "checkpoints")
-    question = "What is the latest weather?"
     result = BoundedModelResponseController(
         turn_store,
         _Client(
             {
-                "response": "The latest weather is sunny.",
-                "claims": [{"text": "The latest weather is sunny."}],
+                "response": "The repository contains app.py. The repository contains tests.",
+                "claims": [
+                    {"text": "The repository contains app.py."},
+                    {"text": "The repository contains tests."},
+                ],
             }
         ),
-    ).complete(question, ingress=_ingress(question), facts=_facts())
-    needs = EvidenceEscalationController(turn_store, checkpoint_store).decision_needs(result.record)
-
-    assert len(needs) == 1
-    assert needs[0].need_type == "web_search"
-    assert needs[0].query == "The latest weather is sunny."
-    assert needs[0].attributes["source_class"] == "current_external"
-
-
-def test_manifest_order_and_identity_are_integrity_bound(tmp_path) -> None:
-    turn_store = IterationTurnStore(tmp_path / "turns")
-    question = "What is in this repository?"
-    result = BoundedModelResponseController(
-        turn_store,
-        _Client({"response": "The repository contains app.py. The repository contains tests.", "claims": [{"text": "The repository contains app.py."}, {"text": "The repository contains tests."}]}),
-    ).complete(question, ingress=_ingress(question), facts=_facts())
+    ).complete(
+        "What is in this repository?",
+        ingress=_ingress("What is in this repository?"),
+        facts=_facts(),
+    )
     candidate = result.record.response_candidate
     manifest = turn_store.load_artifact("conversation-1", "run-1", candidate.claim_manifest_ref)
-    reordered = turn_store.save_artifact(
-        "conversation-1", "run-1", kind="response_claim_manifest", payload={"claims": list(reversed(manifest["claims"]))}
+    reordered_ref = turn_store.save_artifact(
+        "conversation-1",
+        "run-1",
+        kind="response_claim_manifest",
+        payload={"claims": list(reversed(manifest["claims"]))},
     )
-    tampered = result.record.model_copy(update={"response_candidate": candidate.model_copy(update={"claim_manifest_ref": reordered})})
-    controller = EvidenceEscalationController(turn_store, RuntimeCheckpointStore(tmp_path / "checkpoints"))
-    try:
-        controller.decision_needs(tampered)
-    except EvidenceEscalationError as exc:
-        assert exc.code == EvidenceEscalationFailureCode.CANDIDATE_INVALID
-    else:
-        raise AssertionError("tampered manifest was accepted")
+    tampered = result.record.model_copy(
+        update={
+            "response_candidate": candidate.model_copy(
+                update={"claim_manifest_ref": reordered_ref}
+            )
+        }
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        EvidenceEscalationController(
+            turn_store,
+            RuntimeCheckpointStore(tmp_path / "checkpoints"),
+        ).decision_needs(tampered)
+
+    assert caught.value.code == EvidenceEscalationFailureCode.CANDIDATE_INVALID
 
 
-def test_response_only_authority_cannot_materialize(tmp_path) -> None:
+def test_non_evidence_claim_source_cannot_be_routed_as_external_evidence(tmp_path) -> None:
     turn_store = IterationTurnStore(tmp_path / "turns")
+    result = _candidate(turn_store)
+    candidate = result.record.response_candidate
+    claim = candidate.claims[0].model_copy(update={"source_class": "stable_knowledge"})
+    manifest = turn_store.load_artifact(
+        "conversation-1",
+        "run-1",
+        candidate.claim_manifest_ref,
+    )
+    manifest["claims"][0]["source_class"] = "stable_knowledge"
+    manifest_ref = turn_store.save_artifact(
+        "conversation-1",
+        "run-1",
+        kind="response_claim_manifest",
+        payload=manifest,
+    )
+    tampered = result.record.model_copy(
+        update={
+            "response_candidate": candidate.model_copy(
+                update={"claims": (claim,), "claim_manifest_ref": manifest_ref}
+            )
+        }
+    )
+
+    with pytest.raises(EvidenceEscalationError) as caught:
+        EvidenceEscalationController(
+            turn_store,
+            RuntimeCheckpointStore(tmp_path / "checkpoints"),
+        ).decision_needs(tampered)
+
+    assert caught.value.code == EvidenceEscalationFailureCode.SOURCE_INCOMPATIBLE
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["evidence_complete", "pending_record", "assistant_ingress", "committed_record"],
+)
+def test_evidence_completion_recovers_each_durable_write_boundary(
+    tmp_path,
+    boundary: str,
+) -> None:
+    turn_store, checkpoint_store, controller, ingress, active, _needs, fingerprint = _materialized(
+        tmp_path
+    )
+    receipt, _checkpoint = _receipt_and_checkpoint(
+        turn_store,
+        checkpoint_store,
+        controller,
+        ingress,
+        active,
+        fingerprint,
+        observed_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    def crash_after_write(observed: str) -> None:
+        if observed == boundary:
+            raise RuntimeError(f"crash after {boundary}")
+
+    crashing = EvidenceEscalationController(
+        turn_store,
+        checkpoint_store,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+        after_write=crash_after_write,
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        crashing.absorb_and_complete(
+            active,
+            current_ingress=ingress,
+            current_project_fingerprint=fingerprint,
+            receipts=(receipt,),
+        )
+
+    completed = controller.absorb_and_complete(
+        active,
+        current_ingress=ingress,
+        current_project_fingerprint=fingerprint,
+        receipts=(receipt,),
+    )
+
+    assert completed.assistant_commit.state == "committed"
+    restored, _revision = turn_store.load_ingress("conversation-1")
+    assistant_turns = [turn for turn in restored.turns if turn.role == "assistant"]
+    assert [turn.content for turn in assistant_turns] == ["The repository contains app.py."]
+
+
+def test_model_project_claim_cannot_upgrade_response_only_user_authority(tmp_path) -> None:
+    turn_store = IterationTurnStore(tmp_path / "turns")
+    checkpoint_store = RuntimeCheckpointStore(tmp_path / "checkpoints")
     question = "Why is the sky blue?"
     result = BoundedModelResponseController(
         turn_store,
-        _Client({"response": "The repository contains app.py.", "claims": [{"text": "The repository contains app.py."}]}),
+        _Client(
+            {
+                "response": "The repository contains app.py.",
+                "claims": [{"text": "The repository contains app.py."}],
+            }
+        ),
     ).complete(question, ingress=_ingress(question), facts=_facts())
-    controller = EvidenceEscalationController(turn_store, RuntimeCheckpointStore(tmp_path / "checkpoints"))
-    try:
+    controller = EvidenceEscalationController(turn_store, checkpoint_store)
+
+    with pytest.raises(EvidenceEscalationError) as caught:
         controller.materialize_read_only_task(
             result.record,
             current_ingress=result.ingress,
             project_fingerprint=ProjectFingerprint(project_root="/tmp/project"),
         )
-    except EvidenceEscalationError as exc:
-        assert exc.code == EvidenceEscalationFailureCode.AUTHORITY_STALE
-    else:
-        raise AssertionError("response-only authority was upgraded")
+
+    assert caught.value.code == EvidenceEscalationFailureCode.AUTHORITY_STALE
