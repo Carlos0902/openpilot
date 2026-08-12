@@ -167,6 +167,11 @@ Duplicate/no-progress routing is a separate typed policy. It emits one mutation
 guidance request, converts covered read-only duplicates into finalization when
 budget remains, resets on real progress, and otherwise increments a bounded
 counter until stable `ProviderToolNoProgress` failure.
+Failure recovery is classified separately from retry control. Admission errors
+can continue, a bounded protocol-repair subset can request repair, and execution
+errors continue only with explicit file-read-only capabilities. Mutation, shell,
+checkpoint, indeterminate-side-effect, and non-recoverable failures are
+terminal; the policy performs no retry or execution.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.

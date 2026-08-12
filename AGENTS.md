@@ -103,6 +103,10 @@ update this file together with `API.md`.
   guidance is sent at most once, duplicate read-only evidence may request
   finalization only with remaining budget, and no-progress failure uses a stable
   code plus a separate bounded count.
+- Failure recovery classification must require typed recoverability and
+  capability evidence. Only recoverable admission failures or read-only tool
+  failures may continue; protocol repair is a separate action, while mutation,
+  shell, checkpoint, and indeterminate-side-effect failures remain terminal.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

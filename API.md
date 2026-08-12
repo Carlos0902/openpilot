@@ -296,6 +296,13 @@ finalization when no earlier request exists and another round remains. Ordinary
 progress resets the counter; other no-progress rounds increment it and fail with
 typed `ProviderToolNoProgress` at the configured bound. The dynamic count is
 kept separate from the stable error code.
+Failure recovery classification is a pure capability-aware policy. It returns
+none, continue, repair, or fail: admission failures may continue, a configured
+subset may request one model-visible protocol repair, and execution failures may
+continue only when every failed tool is explicitly file-read-only. Mutation,
+shell/code-execution, checkpoint, indeterminate-side-effect, and
+non-recoverable failures fail closed with stable codes; the policy never retries
+or executes a tool itself.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

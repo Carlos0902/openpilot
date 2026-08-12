@@ -3890,3 +3890,39 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: protocol/execution recovery policy and the bounded
   multi-round controller still need to compose all typed transitions.
+
+### Capability-aware provider failure recovery policy
+
+- Observed failure: aggregate recovery checks mixed admission error names,
+  model-repair flags, recoverability text, failed tool names, and registry
+  capabilities inline. A generic recoverable flag could therefore allow a
+  mutation, shell, checkpoint, or indeterminate-side-effect failure to continue.
+- Validation evidence: the regression suite first fails because no standalone
+  recovery policy exists. Twenty-three focused tests pass after implementation
+  for no failure, recoverable admission continuation, separate protocol repair,
+  non-recoverable admission failure, read-only execution continuation, unsafe
+  execution/checkpoint terminal outcomes, capability normalization, and invalid
+  failure facts. The adjacent recovery/no-progress transition set passes 59 and
+  the complete provider-focused set passes 590. The complete repository suite
+  passes 1,686 in an isolated detached worktree, followed by successful source
+  compilation and diff validation.
+- Implemented fix: add one pure capability-aware classifier with bounded tool
+  and capability collections. It returns none, continue, repair, or fail with a
+  stable terminal code; it never retries or executes a tool.
+- Metadata impact note:
+  - Facts: existing failure type/recoverability, model-repair policy, failed tool
+    IDs, and registered capability evidence.
+  - Authoritative producers: the tool loop owns failure metadata; registry owns
+    tool capabilities; configuration owns model-repair enablement; this policy
+    derives a recovery action.
+  - Lifecycle and control impact: runtime recovery routing only. It performs no
+    request, retry, execution, state mutation, file I/O, or persistence.
+  - Existing contracts reviewed: `ToolCapability`, provider admission errors,
+    tool-loop failure metadata, mutation/checkpoint boundaries, public metadata
+    inventory, and metadata development conventions.
+  - Decision: use one strict core classifier instead of duplicating free-form
+    error branching in the multi-round controller.
+  - Serialization and migration: runtime-only values; no persisted shape or
+    migration changes.
+- Remaining limitation: protocol-repair budget and the bounded multi-round
+  controller still need to consume this recovery action.
