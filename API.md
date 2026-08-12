@@ -333,6 +333,12 @@ no tools; active post-mutation exposes only `command_executor`; a mutation route
 with complete declared reads hides `file_reader` and `command_executor`; all
 other phases preserve the declared unique surface. Tool choice is `required`
 only when the resulting surface is non-empty.
+Mutation permission is a separate pure boundary. When no mutation tool is
+exposed, the route remains allowed regardless of opt-in/confirmation flags. Once
+mutation is exposed, missing code-level opt-in returns
+`ProviderToolMutationOptInRequired`; missing user confirmation returns
+`ProviderToolMutationConfirmationRequired`. All three controls must be literal
+booleans.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

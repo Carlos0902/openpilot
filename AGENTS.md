@@ -129,6 +129,9 @@ update this file together with `API.md`.
   finalization exposes none, post-mutation exposes only exact validation,
   completed declared reads hide reader/command exploration, and pre-mutation
   preserves the declared surface. Tool names are bounded and unique.
+- Mutation permission must be a separate pure boundary: no exposed mutation
+  surface means no opt-in is required; an exposed surface requires literal
+  code-level opt-in and literal user confirmation before any provider request.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

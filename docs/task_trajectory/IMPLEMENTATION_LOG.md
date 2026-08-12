@@ -4130,3 +4130,38 @@ PYTHONPATH=Code/src pytest -q Code/tests
     schema or migration changes.
 - Remaining limitation: the multi-round controller still needs to consume this
   surface policy when building each request.
+
+### Typed provider mutation permission boundary
+
+- Observed failure: aggregate mutation boundary checks were embedded in the
+  runner and could be duplicated or applied to read-only routes. The required
+  relationship between exposed mutation tools, code-level opt-in, and user
+  confirmation was not represented as one typed decision.
+- Validation evidence: the regression suite first fails because no standalone
+  mutation-boundary policy exists. Seven focused tests pass after implementation
+  for no-surface allowance, missing opt-in, missing confirmation, full allowance,
+  and non-literal permission facts. The adjacent mutation-boundary/surface/usage
+  set passes 31 and the complete provider-focused set passes 660. The complete
+  repository suite passes 1,756 in an isolated detached worktree whose final
+  directory was named `openpilot`, followed by successful source compilation
+  and diff validation.
+- Implemented fix: add one pure frozen decision. It bypasses opt-in checks only
+  when no mutation surface is exposed; otherwise it requires both literal
+  booleans and returns stable opt-in/confirmation error codes.
+- Metadata impact note:
+  - Facts: existing mutation-surface exposure, code-level mutation opt-in, and
+    user confirmation flags.
+  - Authoritative producers: tool-surface policy owns exposure; configuration
+    owns code opt-in; user ingress owns confirmation; this policy derives the
+    permission result.
+  - Lifecycle and control impact: permission admission only. It performs no
+    request, tool execution, state mutation, file I/O, or persistence.
+  - Existing contracts reviewed: tool surface policy, mutation admission,
+    configuration/user confirmation facts, public metadata inventory, and
+    metadata development conventions.
+  - Decision: use one strict core boundary rather than repeat permission checks
+    in the multi-round runner or create a second authority.
+  - Serialization and migration: runtime-only value; no persisted schema or
+    migration changes.
+- Remaining limitation: the multi-round controller still needs to consume this
+  permission decision before request construction.
