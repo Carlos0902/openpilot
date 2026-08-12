@@ -9,6 +9,7 @@ from metadata import (
     AssistantTurnCommit,
     CompletedProjectTaskOutcome,
     CompletedResponseOutcome,
+    CanonicalInitialTaskSnapshot,
     CompletionObligation,
     CompletionObligationKind,
     CompletionObligationStatus,
@@ -32,6 +33,10 @@ from metadata import (
     PreTaskState,
     ResponseCandidate,
     RootDecisionBudget,
+    RuntimeCheckpointMetadata,
+    RuntimeStateMetadata,
+    SessionIngressState,
+    TaskGraphNodeMetadata,
     WaiverAuthority,
 )
 
@@ -232,6 +237,48 @@ def test_task_bindings_require_content_addressed_snapshot_and_active_checkpoint(
 
     assert prepared.state == "prepared"
     assert active.state == "active"
+
+
+def test_canonical_initial_task_snapshot_binds_task_checkpoint_and_authority() -> None:
+    ingress = SessionIngressState(identity=_identity())
+    runtime_state = RuntimeStateMetadata(
+        goal="Inspect project",
+        session_constraints=ingress.session_constraints,
+    )
+    checkpoint = RuntimeCheckpointMetadata(
+        checkpoint_id="initial-task-1",
+        generation=1,
+        run_id="run-1",
+        root_task_id="task-1",
+        session_id="run-1",
+        checkpoint_reason="initial task materialized",
+        safe_boundary="decomposition_recorded",
+        runtime_state=runtime_state,
+        session_ingress_state=ingress,
+        project_fingerprint={"project_root": "/tmp/project"},
+    )
+    snapshot = CanonicalInitialTaskSnapshot(
+        task_graph=(TaskGraphNodeMetadata(task_id="task-1", description="Inspect project"),),
+        execution_order=("task-1",),
+        initial_checkpoint=checkpoint,
+        authority_state=_authority(),
+        root_budget=RootDecisionBudget(),
+        session_authority_revision=ingress.session_constraints.revision,
+        session_authority_hash=ingress.session_constraints.authority_hash,
+    )
+
+    assert snapshot.canonical_hash.startswith("sha256:")
+
+    with pytest.raises(ValidationError, match="execution order"):
+        CanonicalInitialTaskSnapshot(
+            task_graph=snapshot.task_graph,
+            execution_order=("other-task",),
+            initial_checkpoint=checkpoint,
+            authority_state=_authority(),
+            root_budget=RootDecisionBudget(),
+            session_authority_revision=0,
+            session_authority_hash=ingress.session_constraints.authority_hash,
+        )
 
 
 def test_record_rejects_cursor_obligation_drift() -> None:

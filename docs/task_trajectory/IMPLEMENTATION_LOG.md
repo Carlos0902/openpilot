@@ -4726,3 +4726,25 @@ PYTHONPATH=Code/src pytest -q Code/tests
 - Remaining limitations: the controller is not yet the default CLI route;
   evidence escalation, provider tools, and full crash replay remain separate
   follow-up slices.
+
+### Canonical task materialization and active-checkpoint recovery
+
+- Observed failure: an evidence/task re-entry path could not prove that the
+  prepared task, initial checkpoint, current session authority, and active task
+  binding referred to one identical run and project. A crash between checkpoint
+  creation and active binding could otherwise invite task regeneration or stale
+  authority reuse.
+- Reproduction: build a canonical snapshot, inject failures after the prepared
+  binding or initial checkpoint, then retry with missing/corrupt snapshots,
+  changed authority revision/hash, changed rejected/revoked lineage, mutation
+  confirmation drift, project fingerprint drift, or mismatched checkpoint
+  digest; assert that no Provider call occurs and each case fails closed.
+- Implemented fix: add strict `CanonicalInitialTaskSnapshot` validation and an
+  atomic materializer that advances snapshot → prepared binding → exact initial
+  checkpoint → active reference-only binding. Recovery reuses only matching
+  durable state and validates all identity, authority, digest, and fingerprint
+  boundaries before returning the active record.
+- Validation evidence: focused materialization, metadata, response-transition,
+  and ledger suite **63 passed**; `compileall` and `git diff --check` pass.
+- Remaining limitations: this slice does not collect evidence, execute tools,
+  or wire the controller into the default CLI route.

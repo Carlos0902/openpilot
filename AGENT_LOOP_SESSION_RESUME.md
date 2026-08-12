@@ -26,10 +26,21 @@ content fails closed. A crash after the ingress write must not append another
 turn, and recovery after the terminal record write may replay only the exact
 durable display payload. This replay never invokes or authorizes a Provider.
 
-This response recovery is not task-resume authorization. Prepared-task
-materialization, current session-authority freshness/revocation checks, and the
-transition to an active `RuntimeCheckpointMetadata` remain mandatory gates
-before the unified entry can be enabled.
+Task materialization uses a `CanonicalInitialTaskSnapshot` and fixed boundaries:
+content-addressed snapshot → prepared turn binding → exact initial checkpoint →
+active reference-only binding. A prepared recovery never calls a Provider or
+regenerates a task. Before writing or accepting the checkpoint it must match the
+current session authority revision/hash, rejected/revoked lineage, mutation
+confirmation message/turn, conversation/run/project identity, task/state digest,
+and project/environment fingerprint. Missing/corrupt snapshots, stale authority,
+or mismatched checkpoints fail closed with a typed materialization failure. A
+checkpoint written before an active-binding crash is reused only when its exact
+checksum and payload match. Active recovery revalidates the checkpoint rather
+than treating its reference as proof.
+
+These offline recovery primitives are not yet the unified entry. Controller
+writer migration and feature-flagged integration remain mandatory before it can
+be enabled.
 
 The deterministic response subset uses these primitives behind the default-off
 unified-entry flag. General model responses and evidence/task materialization

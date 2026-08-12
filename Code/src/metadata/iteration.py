@@ -9,8 +9,14 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from metadata.agent_runtime import ConversationIdentity, DurableArtifactReference
+from metadata.agent_runtime import (
+    CheckpointBoundary,
+    ConversationIdentity,
+    DurableArtifactReference,
+    RuntimeCheckpointMetadata,
+)
 from metadata.base import MetadataBase, MetadataKind
+from metadata.project import TaskGraphNodeMetadata
 
 
 _SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
@@ -311,6 +317,56 @@ class RootDecisionBudget(_StrictValue):
         return self
 
 
+class CanonicalInitialTaskSnapshot(_StrictValue):
+    """Complete typed input for deterministic initial-checkpoint materialization."""
+
+    protocol_version: Literal["cru-2a-v1"] = "cru-2a-v1"
+    canonical_serialization_version: Literal["initial-task-v1"] = "initial-task-v1"
+    task_graph: tuple[TaskGraphNodeMetadata, ...] = Field(min_length=1, max_length=7)
+    execution_order: tuple[str, ...] = Field(min_length=1, max_length=7)
+    initial_checkpoint: RuntimeCheckpointMetadata
+    authority_state: IterationAuthorityState
+    root_budget: RootDecisionBudget
+    session_authority_revision: int = Field(ge=0)
+    session_authority_hash: str = Field(pattern=_SHA256_PATTERN)
+
+    @property
+    def canonical_hash(self) -> str:
+        payload = self.model_dump(mode="json")
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @model_validator(mode="after")
+    def _snapshot_is_deterministically_materializable(self) -> "CanonicalInitialTaskSnapshot":
+        task_ids = [task.task_id for task in self.task_graph]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("canonical task graph IDs must be unique")
+        if len(self.execution_order) != len(task_ids) or set(self.execution_order) != set(task_ids):
+            raise ValueError("canonical task execution order must contain every task exactly once")
+        checkpoint = self.initial_checkpoint
+        if checkpoint.root_task_id not in task_ids:
+            raise ValueError("initial checkpoint root task is absent from canonical task graph")
+        if (
+            checkpoint.generation != 1
+            or checkpoint.integrity_checksum
+            or checkpoint.safe_boundary != CheckpointBoundary.DECOMPOSITION_RECORDED
+            or checkpoint.side_effect_state != "none"
+        ):
+            raise ValueError("canonical initial checkpoint must be an unsigned side-effect-free generation one")
+        ingress = checkpoint.session_ingress_state
+        if ingress is None:
+            raise ValueError("canonical initial checkpoint requires session ingress")
+        constraints = ingress.session_constraints
+        if (
+            constraints.revision != self.session_authority_revision
+            or constraints.authority_hash != self.session_authority_hash
+        ):
+            raise ValueError("canonical snapshot session authority differs from checkpoint ingress")
+        if checkpoint.project_fingerprint.project_root != ingress.identity.project_root:
+            raise ValueError("canonical snapshot project identity differs")
+        return self
+
+
 class IterationControlCursor(_StrictValue):
     protocol_version: Literal["cru-2a-v1"] = "cru-2a-v1"
     decision_ordinal: int = Field(default=0, ge=0)
@@ -560,6 +616,7 @@ __all__ = [
     "AssistantLedgerCommitState",
     "AssistantTurnCommit",
     "AwaitingUserOutcome",
+    "CanonicalInitialTaskSnapshot",
     "ClaimSourceClass",
     "CompletedProjectTaskOutcome",
     "CompletedResponseOutcome",

@@ -164,6 +164,13 @@ Tests: prepared crash recovery, missing/corrupt snapshot, checkpoint-before-acti
 Documentation updates: API, AGENT_LOOP_SESSION_RESUME, CONTRACT_CATALOG nested-value note, trajectory alignment/log
 ```
 
+实施结果：复用 `TaskGraphNodeMetadata`、`RuntimeCheckpointMetadata`、
+`IterationAuthorityState` 与 `RootDecisionBudget` 组成 strict owned
+`CanonicalInitialTaskSnapshot`，不新增 `MetadataKind`。`IterationTaskMaterializer`
+只按 snapshot → prepared binding → exact initial checkpoint → active binding 推进；
+prepared/active 恢复重新校验 authority revision/hash、reject/revoke lineage、mutation
+confirmation、project/run identity 与 checkpoint digest，且不调用 Provider。
+
 ## 4. 当前控制写入者 inventory
 
 ### 4.1 Conversation/session owner

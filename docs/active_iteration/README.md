@@ -21,9 +21,9 @@
 是历史决策账本，并被已冻结实验 artifact 按原路径引用。它必须保留，但不是当前汇报或架构入口。
 新结论不再同时写入该文件和实验日志。
 
-当前实施状态：持久化对话轮次元数据、durable store 与 assistant ledger 幂等提交/崩溃恢复已完成；
-下一切片是 canonical prepared/active task binding 及 session authority freshness/revocation
-resume gate。统一 CLI 入口尚未启用。
+当前实施状态：持久化对话轮次元数据、durable store、assistant ledger 幂等提交/崩溃恢复，
+以及 canonical prepared/active task binding 与 session authority freshness/revocation
+recovery gate 已完成。下一切片是 evidence escalation 与统一入口接线；统一 CLI 入口尚未启用。
 
 ## 归档
 

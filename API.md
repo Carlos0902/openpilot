@@ -872,6 +872,19 @@ project contents or current/external facts produce an evidence-required result
 instead of an assistant ledger commit; evidence escalation and external tools
 remain separate routes.
 
+When a response candidate requires a read-only project task, task materialization
+is a separate durable boundary. `CanonicalInitialTaskSnapshot` is the complete
+typed input: task graph/order, response authority, root budget, session
+authority revision/hash, project identity, and an unsigned generation-one
+checkpoint. `IterationTaskMaterializer` persists the content-addressed snapshot,
+then advances the turn through `prepared` binding, exact initial checkpoint, and
+reference-only `active` binding. Recovery never regenerates a task or calls a
+Provider. It revalidates conversation/run/project identity, authority
+revision/hash and rejected/revoked lineage, mutation confirmation when relevant,
+task/state digests, and checkpoint payload/checksum. Missing or corrupt
+snapshots, stale authority, project/environment drift, and checkpoint mismatches
+fail closed with a typed materialization error.
+
 Interactive application launch is a separate delivery operation. The command
 tool accepts `mode="interactive"` only when a runtime-only
 `ToolExecutionContext.user_confirmed is True` handle is attached. It starts the
