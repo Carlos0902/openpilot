@@ -4096,3 +4096,37 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: the multi-round runner still needs to call this observer
   at its completion-budget reconciliation point.
+
+### Typed provider tool-surface policy
+
+- Observed failure: aggregate tool exposure was decided inline across
+  finalization, post-mutation, completed-read, and pre-mutation branches. A
+  future change could accidentally expose exploratory reads or command execution
+  after a mutation, or require a tool call when the surface was empty.
+- Validation evidence: the regression suite first fails because no standalone
+  surface policy exists. Twelve focused tests pass after implementation for
+  finalization, post-mutation validation-only, completed-read filtering,
+  pre-mutation preservation, empty surfaces, unique/bounded names, and invalid
+  phase facts. The adjacent surface/usage/budget set passes 35 and the complete
+  provider-focused set passes 653. The complete repository suite passes 1,749
+  in an isolated detached worktree whose final directory was named `openpilot`,
+  followed by successful source compilation and diff validation.
+- Implemented fix: add one pure policy returning an immutable visible-name tuple
+  and nullable tool-choice mode. It performs no registry lookup, capability
+  inference, request construction, admission, execution, state mutation, or I/O.
+- Metadata impact note:
+  - Facts: existing phase flags, mutation/read completion facts, and declared
+    provider tool names.
+  - Authoritative producers: conversation state owns phase facts; admission and
+    registry own tool authority; this policy derives only the visible view.
+  - Lifecycle and control impact: model-facing routing only. It cannot grant
+    permission or execute a tool.
+  - Existing contracts reviewed: mutation/read phase transitions, tool
+    definitions, admission boundaries, public metadata inventory, and metadata
+    development conventions.
+  - Decision: use a derived core value rather than repeat branch logic or add a
+    second tool registry.
+  - Serialization and migration: ephemeral provider request view; no persisted
+    schema or migration changes.
+- Remaining limitation: the multi-round controller still needs to consume this
+  surface policy when building each request.

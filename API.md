@@ -328,6 +328,11 @@ bounded nonnegative literal integers, prefers `completion_tokens` over
 `output_tokens`, and returns unknown for missing, boolean, string, float,
 negative, or over-cap provider values. It does not own or mutate the runtime
 completion budget.
+Provider tool-surface derivation is a separate pure value. Finalization exposes
+no tools; active post-mutation exposes only `command_executor`; a mutation route
+with complete declared reads hides `file_reader` and `command_executor`; all
+other phases preserve the declared unique surface. Tool choice is `required`
+only when the resulting surface is non-empty.
 Provider round-trip attempt and evidence observations use frozen runtime
 contracts. Attempt success/error facts must be consistent; normalized
 signatures, paths, declared windows, page counts, evidence keys, duplicate-only

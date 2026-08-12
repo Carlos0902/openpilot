@@ -125,6 +125,10 @@ update this file together with `API.md`.
   Accept only bounded nonnegative literal integers from `completion_tokens` or
   `output_tokens` (with the former taking precedence); booleans, strings,
   floats, negatives, and over-cap values remain unknown.
+- Provider-visible tool surface must be derived by one pure phase policy:
+  finalization exposes none, post-mutation exposes only exact validation,
+  completed declared reads hide reader/command exploration, and pre-mutation
+  preserves the declared surface. Tool names are bounded and unique.
 - Reasoning intent is a typed request policy resolved by `core/reasoning.py`
   against a versioned provider capability profile. Business modules may select
   intent from typed task facts, but must not emit provider-specific payloads or

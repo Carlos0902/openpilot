@@ -190,6 +190,10 @@ Completion usage is observed separately from budget accounting. Only bounded
 nonnegative integer provider usage is trusted; coercible strings, booleans,
 floats, negatives, and over-cap values become unknown rather than controlling
 reconciliation.
+Tool exposure is derived separately from phase facts. Finalization exposes no
+tools, post-mutation exposes only exact validation, completed mutation reads
+hide reader/command exploration, and pre-mutation retains the declared surface;
+empty surfaces never request a tool call.
 Round-trip attempt and evidence-coverage values are strict frozen core
 contracts. They preserve provider correlation and bounded read/page evidence
 without creating a new persisted metadata owner.
