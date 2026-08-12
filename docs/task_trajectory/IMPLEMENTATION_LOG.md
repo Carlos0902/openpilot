@@ -4227,3 +4227,29 @@ PYTHONPATH=Code/src pytest -q Code/tests
     migration changes.
 - Remaining limitation: the multi-round controller and provider transport
   still need to call this adapter in a subsequent integration slice.
+
+### Provider continuation context assembly compatibility
+
+- Observed failure: provider round plans may contain empty assistant tool-call
+  messages and `role=tool` results, while the existing context assembler only
+  accepts non-empty system/user/assistant candidates. A real second request
+  therefore failed before transport with a `ContextCandidate` validation
+  error.
+- Validation evidence: focused builder and read-only round tests pass (6
+  tests), including a continuation containing an assistant tool call plus a
+  tool result; `git diff --check` passes.
+- Implemented fix: project wire-only continuation roles into bounded,
+  non-empty assembly candidates, then restore the exact immutable wire message
+  snapshot on the resulting `LLMRequest`. No provider transport, tool
+  admission, execution, or mutation behavior changes.
+- Metadata impact note:
+  - Facts: existing `LLMMessage` roles/content and the immutable round plan.
+  - Authoritative producers: the plan owns wire messages; the adapter owns
+    only the transient assembly projection; the context builder owns assembly
+    evidence.
+  - Lifecycle and control impact: pre-transport context compatibility only;
+    the projection grants no read/write authority.
+  - Serialization and migration: runtime-only projection; no persisted schema
+    or migration changes.
+- Remaining limitation: the read-only runner still needs explicit
+  finalization, duplicate/recovery, and task-entry integration slices.

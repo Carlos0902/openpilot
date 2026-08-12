@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.llm import LLMMessage, LLMToolDefinition, LLMToolFunction
+from core.llm import LLMMessage, LLMToolCall, LLMToolDefinition, LLMToolFunction, LLMToolFunctionCall
 from core.provider_round_request_builder import (
     ProviderRoundRequestBuilderError,
     build_provider_round_llm_request,
@@ -72,3 +72,55 @@ def test_builder_rejects_mismatched_tool_definitions() -> None:
             tool_definitions=[],
             purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
         )
+
+
+def test_builder_assembles_tool_continuation_and_restores_wire_snapshot() -> None:
+    messages = [
+        LLMMessage(role="user", content="Read README"),
+        LLMMessage(
+            role="assistant",
+            content="",
+            tool_calls=[],
+        ),
+    ]
+    messages[1] = messages[1].model_copy(
+        update={
+            "tool_calls": [
+                LLMToolCall(
+                    id="call-1",
+                    function=LLMToolFunctionCall(
+                        name="file_reader",
+                        arguments='{"file_path":"README.md"}',
+                    ),
+                )
+            ]
+        }
+    )
+    messages.append(
+        LLMMessage(
+            role="tool",
+            content='{"success":true}',
+            tool_call_id="call-1",
+        )
+    )
+    plan = build_provider_round_request_plan(
+        messages=messages,
+        tool_names=["file_reader"],
+        finalization_pending=False,
+        post_mutation_active=False,
+        mutation_tools_exposed=False,
+        all_scoped_reads_complete=False,
+        prompt_budget_tokens=4096,
+        response_call_count=1,
+    )
+    tool = LLMToolDefinition(function=LLMToolFunction(name="file_reader"))
+    request = build_provider_round_llm_request(
+        _Client(),
+        plan=plan,
+        tool_definitions=[tool],
+        purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
+    )
+    assert [message.model_dump(mode="json") for message in request.messages] == [
+        message.model_dump(mode="json") for message in plan.messages
+    ]
+    assert request.messages[-1].role == "tool"

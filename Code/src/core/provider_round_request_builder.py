@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from core.llm import LLMRequest, LLMToolDefinition
+from core.llm import LLMMessage
 from core.provider_round_request_plan import ProviderRoundRequestPlan
 from memory.context_assembly import build_context_llm_request
 from metadata import ContextRequestPurpose, ReasoningPolicy
@@ -40,7 +41,7 @@ def build_provider_round_llm_request(
 
     request = build_context_llm_request(
         llm_client,
-        messages=list(plan.messages),
+        messages=_assembly_messages(plan.messages),
         purpose=purpose,
         max_tokens=max_tokens,
         timeout_seconds=timeout_seconds,
@@ -64,6 +65,47 @@ def build_provider_round_llm_request(
     ):
         raise ProviderRoundRequestBuilderError("context assembly changed planned messages")
     return request
+
+
+def _assembly_messages(messages: tuple[LLMMessage, ...]) -> list[LLMMessage]:
+    """Project wire-only roles into non-empty assembly candidates.
+
+    The existing context assembler predates provider tool continuations: it
+    accepts only system/user/assistant candidates and rejects empty content.
+    Assembly therefore receives a bounded diagnostic projection, while the
+    returned request is restored to the immutable wire snapshot from ``plan``.
+    """
+
+    projected: list[LLMMessage] = []
+    for message in messages:
+        if message.role == "tool":
+            projected.append(
+                LLMMessage(
+                    role="user",
+                    content=(
+                        f"[tool_result:{message.tool_call_id}] "
+                        f"{message.content or '[empty tool result]'}"
+                    ),
+                )
+            )
+            continue
+        if message.role == "assistant" and not message.content.strip():
+            call_names = ", ".join(
+                call.function.name for call in message.tool_calls
+            )
+            message = message.model_copy(
+                update={
+                    "content": (
+                        f"[assistant tool calls: {call_names}]"
+                        if call_names
+                        else "[empty assistant response]"
+                    )
+                }
+            )
+        elif message.role in {"system", "user"} and not message.content.strip():
+            message = message.model_copy(update={"content": "[empty message]"})
+        projected.append(message)
+    return projected
 
 
 __all__ = ["ProviderRoundRequestBuilderError", "build_provider_round_llm_request"]
