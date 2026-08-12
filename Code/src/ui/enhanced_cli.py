@@ -322,6 +322,78 @@ def _format_failure_details(result: dict) -> str:
     return str(details)
 
 
+def _session_result_payload(result: dict) -> dict:
+    """Use the durable session result when the runtime wraps it."""
+    if not isinstance(result, dict):
+        return {}
+    session_result = result.get("session_result")
+    return session_result if isinstance(session_result, dict) else result
+
+
+def _format_success_details(result: dict, *, delivery_environment=None) -> str:
+    """Render concrete actions, changed files, validation, and run command."""
+    result = _session_result_payload(result)
+    lines: list[str] = []
+    completed = int(result.get("completed_improvements") or 0)
+    required = int(result.get("required_improvements") or 0)
+    if completed or required:
+        lines.append(f"代码优化: {completed}/{required}")
+    for item in list(result.get("iterations") or []):
+        iteration = _result_value(item, "iteration") or "?"
+        actions = list(_result_value(item, "applied_actions") or [])
+        changed_files = list(_result_value(item, "changed_files") or [])
+        validation_passed = bool(_result_value(item, "validation_passed"))
+        if actions:
+            lines.append(f"第 {iteration} 轮: {'; '.join(str(action) for action in actions[:3])}")
+        if changed_files:
+            lines.append(
+                "修改文件: "
+                + ", ".join(Path(str(path)).name for path in changed_files[:5])
+            )
+        lines.append(f"验证: {'通过' if validation_passed else '未通过'}")
+    if delivery_environment is not None:
+        project_path = str(getattr(delivery_environment, "project_path", "") or "").strip()
+        run_command = str(getattr(delivery_environment, "run_command", "") or "").strip()
+        if project_path and run_command:
+            lines.append(f"运行: cd {project_path} && {run_command}")
+    return "\n".join(lines) or "任务已完成并通过验证。"
+
+
+def _offer_interactive_application_launch(autopilot, result: dict, ui: EnhancedUI):
+    """Offer a separately confirmed persistent launch for an interactive result."""
+    environment = autopilot.project_delivery_environment(result)
+    if environment is None:
+        return None
+    from ui.question_ui import QuestionUI
+
+    confirmed = QuestionUI(ui.console).ask_confirm(
+        "launch_completed_application",
+        "是否现在启动优化后的应用？",
+        title="Launch Completed Application",
+        description=(
+            f"项目路径: {environment.project_path}\n"
+            f"启动命令: {environment.run_command}\n"
+            "应用将作为独立进程运行，不属于验证步骤；关闭应用窗口即可结束。"
+        ),
+        default=True,
+    )
+    if not confirmed:
+        ui.console.print(
+            f"[dim]未启动应用。稍后可运行: cd {environment.project_path} && {environment.run_command}[/dim]"
+        )
+        return None
+    launch = autopilot.launch_interactive_application(environment, user_confirmed=True)
+    if launch.success:
+        process_id = launch.output.get("process_id") if launch.output is not None else None
+        ui.show_success(
+            "应用已启动",
+            f"PID: {process_id or 'unknown'}\n关闭应用窗口即可结束进程。",
+        )
+    else:
+        ui.show_error("应用启动失败", launch.error_message or "交互应用进程未能启动。")
+    return launch
+
+
 def _cli_exception_failure(
     exc: Exception,
     *,
@@ -719,7 +791,11 @@ def _run_once_mode(
         ui.show_full_task_graph_timeline()
 
         if result.get("success"):
-            ui.show_success("Goal completed successfully!")
+            delivery_environment = autopilot.project_delivery_environment(result)
+            ui.show_success(
+                "Goal completed successfully!",
+                _format_success_details(result, delivery_environment=delivery_environment),
+            )
             return 0
 
         ui.show_error("Execution failed", _format_failure_details(result))
@@ -1224,14 +1300,18 @@ def _execute_autopilot(
         ui.show_full_task_graph_timeline()
 
         if result.get("success"):
+            delivery_environment = autopilot.project_delivery_environment(result)
+            success_details = _format_success_details(result, delivery_environment=delivery_environment)
             warning = result.get("iteration_error")
             if warning:
                 ui.show_success(
                     "Goal completed with iteration warning",
-                    warning,
+                    f"{success_details}\n迭代警告: {warning}",
                 )
             else:
-                ui.show_success("Goal completed!")
+                ui.show_success("Goal completed!", success_details)
+            if str((context or {}).get("source") or "") == "interactive":
+                _offer_interactive_application_launch(autopilot, result, ui)
         else:
             ui.show_error("Autopilot execution failed", _format_failure_details(result))
         return result
