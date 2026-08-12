@@ -13,6 +13,19 @@
 - Remaining limitation: current/external evidence still depends on its separate
   network tool and is not part of this routing PR.
 
+## 2026-08-12 — Structured weather evidence provider
+
+- Observed failure: current-weather questions entered the generic web search
+  path, causing unnecessary model cleanup and making transient network failure
+  appear as an unstructured answer stage.
+- Implemented fix: add a bounded `wttr.in` provider branch to `web_searcher`
+  with explicit location extraction, numeric/response limits, source metadata,
+  and fail-closed validation.
+- Validation evidence: weather and existing web-search contract tests **112
+  passed**; compileall and diff checks pass.
+- Remaining limitation: availability still depends on the external `wttr.in`
+  service and network connectivity; failures remain visible evidence failures.
+
 ## 2026-08-12 — Discovered persisted-binding opt-in canary
 
 - Observed failure: the token-aware simulation used builder-selected sources

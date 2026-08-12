@@ -25,13 +25,17 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urldefrag, ur
 
 import httpx
 
-from core.llm import LLMClient, LLMMessage, LLMRequest
+from core.llm import LLMClient, LLMMessage
 from memory.context_assembly import build_context_llm_request
 from core.tool_contracts import (
     PermissionLevel,
     ToolCapability,
     ToolDefinition,
     ToolFailureMode,
+)
+from tools.weather_provider import (
+    structured_weather_result as _structured_weather_result,
+    weather_location as _weather_location,
 )
 
 
@@ -402,6 +406,16 @@ def web_searcher_executor(input_metadata: ToolInputMetadata) -> ToolResultMetada
         raise ValueError(f"Unsupported time_range: {time_range}")
     if safe_search not in SAFE_SEARCH_PARAMS:
         raise ValueError(f"Unsupported safe_search: {safe_search}")
+
+    weather_location = _weather_location(query)
+    if weather_location:
+        _load_dotenv_for_proxy()
+        return _structured_weather_result(
+            query=query,
+            location=weather_location,
+            timeout=timeout,
+            json_get=params.get("_weather_json_get"),
+        )
 
     http_get = params.get("_http_get") or _default_http_get
     network_diagnostics = _network_diagnostics()

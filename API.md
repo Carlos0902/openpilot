@@ -902,6 +902,13 @@ The admission decision selects a route but grants no tool, file, network, or
 mutation authority; those remain owned by the existing evidence, task, Router,
 Guard, and environment contracts.
 
+Current weather evidence uses a bounded structured `wttr.in` request through
+the existing `web_searcher` contract. Location extraction, response size,
+numeric ranges, summary length, and hourly sampling are capped; malformed or
+failed network responses stop the evidence path rather than producing a
+weather claim. The structured result retains the source URL and provider name
+for the existing freshness/evidence checks.
+
 The bounded response boundary also records the model's claims in a separate,
 content-addressed `response_claim_manifest` artifact. `ResponseCandidate` keeps
 only a reference to that manifest; evidence routing must verify the manifest's
