@@ -12,7 +12,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from statistics import median
+from statistics import NormalDist, median
 from typing import Any
 
 
@@ -22,7 +22,6 @@ from typing import Any
 # interval spuriously narrow.
 FORMAL_NI_MARGIN: float = -0.02
 FORMAL_ALPHA: float = 0.05
-_ONE_SIDED_Z_95 = 1.6448536269514722
 
 # A provider replay may add any of these typed safety flags.  Truthy values
 # are hard failures; absent values are unknown and never silently counted as
@@ -224,7 +223,11 @@ def analyze_formal_holdout(
     if n >= 2:
         variance = sum((value - estimate) ** 2 for value in differences) / (n - 1)
         standard_error = math.sqrt(variance / n)
-        lower = estimate - _ONE_SIDED_Z_95 * standard_error
+        # ``NormalDist`` is in the Python standard library, keeping this
+        # experiment-only analyzer dependency-free while honoring a caller's
+        # preregistered alpha (the default is one-sided 95%).
+        z_value = NormalDist().inv_cdf(1 - alpha)
+        lower = estimate - z_value * standard_error
     else:
         variance = standard_error = lower = None
     if safety_events:
