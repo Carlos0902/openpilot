@@ -3,6 +3,7 @@ from pathlib import Path
 from .evaluator import evaluate
 from .runner import run
 from .prompts import render_arm_prompt
+from .analysis import analyze_rows, analyze_formal_holdout
 
 ROOT = Path(__file__).parent
 
@@ -108,3 +109,86 @@ def test_evaluator_preserves_typed_execution_and_usage_metrics():
     assert row["total_tokens"] == 30
     assert row["latency_ms"] == 44
     assert row["retry_count"] == 1
+
+def test_analysis_is_inconclusive_when_provider_recordings_are_missing():
+    rows = run(ROOT / "corpus.json")
+    report = analyze_rows(rows)
+    assert report["decision"] == "inconclusive_no_provider_pairs"
+    assert report["pair_count"] == 0
+    assert report["unknown_pair_count"] == 90
+    assert report["noninferiority_status"] == "not_estimated"
+
+def test_analysis_clusters_pairs_and_rejects_zero_tolerance_events():
+    base = {
+        "task_id": "t01", "repeat": 1, "prompt_chars": 100,
+        "response_error": None, "false_success": False, "fabricated_path": False,
+    }
+    rows = [
+        {**base, "arm": "control", "acceptance_passed": True},
+        {**base, "arm": "treatment", "acceptance_passed": True, "prompt_chars": 50},
+        {**base, "arm": "control", "repeat": 2, "acceptance_passed": True},
+        {**base, "arm": "treatment", "repeat": 2, "acceptance_passed": False, "prompt_chars": 50},
+    ]
+    rows.append({**base, "task_id": "t02", "arm": "treatment", "repeat": 1,
+                 "acceptance_passed": True, "false_success": True, "prompt_chars": 50})
+    report = analyze_rows(rows)
+    assert report["pair_count"] == 2
+    assert report["improvement_count"] == 0
+    assert report["regression_count"] == 1
+    assert report["zero_tolerance_event_count"] == 1
+    assert report["decision"] == "rejected_safety"
+
+def test_analysis_does_not_promote_all_failure_pairs_to_a_quality_result():
+    base = {
+        "task_id": "t01", "repeat": 1, "prompt_chars": 100,
+        "response_error": "malformed_recording:JSONDecodeError",
+        "malformed": True, "provider_failure": False,
+        "false_success": False, "fabricated_path": None,
+        "acceptance_passed": False,
+    }
+    rows = [{**base, "arm": "control"}, {**base, "arm": "treatment", "prompt_chars": 50}]
+    report = analyze_rows(rows)
+    assert report["decision"] == "inconclusive_no_success_evidence"
+    assert report["malformed_row_count"] == 2
+
+
+def test_formal_holdout_clusters_repeats_and_reports_one_sided_lower_bound():
+    rows = []
+    for task_id, control, treatment in (("a", (True, True), (True, True)),
+                                         ("b", (False, False), (False, False)),
+                                         ("c", (True, False), (True, False))):
+        for repeat in (1, 2):
+            rows.extend([
+                {"task_id": task_id, "arm": "control", "repeat": repeat,
+                 "acceptance_passed": control[repeat - 1]},
+                {"task_id": task_id, "arm": "treatment", "repeat": repeat,
+                 "acceptance_passed": treatment[repeat - 1]},
+            ])
+    report = analyze_formal_holdout(rows, expected_repeats=2)
+    assert report["task_cluster_count"] == 3
+    assert report["unknown_task_cluster_count"] == 0
+    assert report["status"] == "noninferior"
+    assert report["confidence_method"].startswith("paired_task_cluster")
+    assert report["clusters"][0]["repeat_count"] == 2
+
+
+def test_formal_holdout_is_inconclusive_for_missing_cluster_and_rejects_safety():
+    rows = [
+        {"task_id": "a", "arm": "control", "repeat": 1, "acceptance_passed": True},
+        {"task_id": "a", "arm": "treatment", "repeat": 1, "acceptance_passed": True,
+         "false_success": True},
+        {"task_id": "b", "arm": "control", "repeat": 1, "acceptance_passed": True},
+    ]
+    report = analyze_formal_holdout(rows, expected_repeats=1)
+    assert report["status"] == "rejected_safety"
+    assert report["zero_tolerance_event_count"] == 1
+    assert report["unknown_task_cluster_count"] == 1
+
+
+def test_formal_holdout_rejects_nonnegative_margin():
+    try:
+        analyze_formal_holdout([], margin=0)
+    except ValueError as exc:
+        assert "negative" in str(exc)
+    else:
+        raise AssertionError("non-negative margin must fail closed")
