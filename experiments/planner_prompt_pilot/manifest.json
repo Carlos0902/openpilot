@@ -1,0 +1,21 @@
+{
+  "manifest": "harness-slimming-planner-prompt-pilot-v1",
+  "corpus": "corpus.json",
+  "corpus_version": "pilot-v1-acceptance-v2",
+  "evaluator": "evaluator.py",
+  "acceptance_registry": "acceptance.py",
+  "acceptance_schema_version": "acceptance-v2",
+  "prompt_renderer": "prompts.py",
+  "runner": "runner.py",
+  "repeats_per_task_arm": 3,
+  "arms": ["control", "treatment"],
+  "response_file_pattern": "<task-id>.<arm>.<repeat>.json",
+  "production_default": false,
+  "production_runtime_changed": false,
+  "metadata_changed": false,
+  "permissions_changed": false,
+  "tool_execution_changed": false,
+  "decision": "mechanism_canary_passed",
+  "provider_quality_status": "not_run",
+  "noninferiority_status": "not_estimated"
+}
