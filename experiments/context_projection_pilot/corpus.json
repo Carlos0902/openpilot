@@ -1,0 +1,20 @@
+{
+  "version": "context-projection-pilot-v1",
+  "repeats_per_arm": 3,
+  "claim_boundary": "mechanism_canary_only",
+  "required_fact_ids": ["safety", "permissions", "task_goal", "acceptance", "write_scope", "validation", "schema"],
+  "tasks": [
+    {"id":"c01","stratum":"diagnosis_relevant","task":"Fix the parser regression","relevant_evidence":["diagnosis","history"],"artifact_status":"valid"},
+    {"id":"c02","stratum":"diagnosis_irrelevant","task":"Add a timeout constant","relevant_evidence":[],"artifact_status":"valid"},
+    {"id":"c03","stratum":"diagnosis_partial","task":"Repair the API response","relevant_evidence":["diagnosis"],"artifact_status":"valid"},
+    {"id":"c04","stratum":"short_dialog","task":"Inspect the public functions","relevant_evidence":[],"artifact_status":"valid"},
+    {"id":"c05","stratum":"long_dialog","task":"Update the client contract","relevant_evidence":["history"],"artifact_status":"valid"},
+    {"id":"c06","stratum":"multi_file_manifest","task":"Rename the status field","relevant_evidence":["manifest"],"artifact_status":"valid"},
+    {"id":"c07","stratum":"required_near_budget","task":"Apply the scoped patch","relevant_evidence":[],"artifact_status":"valid"},
+    {"id":"c08","stratum":"wrong_project_memory","task":"Fix cache invalidation","relevant_evidence":[],"artifact_status":"valid"},
+    {"id":"c09","stratum":"compact_corrupt","task":"Resume the interrupted update","relevant_evidence":["history"],"artifact_status":"corrupt"},
+    {"id":"c10","stratum":"compact_missing_required","task":"Run the exact validation","relevant_evidence":["validation_detail"],"artifact_status":"missing_required"},
+    {"id":"c11","stratum":"on_demand_body","task":"Implement the support schema","relevant_evidence":["support_body"],"artifact_status":"valid"},
+    {"id":"c12","stratum":"prompt_injection_memory","task":"Review auth safely","relevant_evidence":[],"artifact_status":"valid"}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "manifest": "harness-slimming-context-projection-pilot-v1",
+  "corpus": "corpus.json",
+  "renderer": "renderer.py",
+  "evaluator": "evaluator.py",
+  "runner": "runner.py",
+  "repeats_per_task_arm": 3,
+  "arms": ["control", "treatment"],
+  "treatment_variable": "drop_unrelated_preferred_context_and_duplicate_aggregate_projection",
+  "required_facts": ["safety", "permissions", "task_goal", "acceptance", "write_scope", "validation", "schema"],
+  "degradable_facts": ["diagnosis", "history", "memory", "manifest", "validation_detail", "support_body"],
+  "fallback": "invalid_or_incomplete_treatment_projection_returns_current_source_view_and_is_not_ready",
+  "production_default": false,
+  "production_runtime_changed": false,
+  "metadata_changed": false,
+  "permissions_changed": false,
+  "provider_calls": false,
+  "decision": "mechanism_canary_only",
+  "provider_quality_status": "not_run",
+  "noninferiority_status": "not_estimated"
+}
