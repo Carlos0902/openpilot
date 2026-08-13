@@ -2436,6 +2436,14 @@ PYTHONPATH=Code/src pytest -q Code/tests
 
 ### Context Phase 13：mainstream reasoning adapter contract
 
+> Consolidation provenance boundary (2026-08-10): path-like references from
+> Context Phase 13 onward under `docs/context_management/`, `experiments/`,
+> experiment `runs/`, or the `openpilot-air` host are historical external or
+> explicitly excluded provenance identifiers. Those artifacts are not part of
+> the consolidation candidate and must not be treated as repository links or
+> acceptance evidence. Candidate acceptance is based only on its tracked
+> production sources, tests, contract docs, this bounded log, and fresh gates.
+
 - 阶段计划：先写 `docs/context_management/PHASE_13_REASONING_ADAPTERS_PLAN.md`，将
   provider-neutral intent、显式 profile、provider payload、usage observation 与
   native transport 接入边界分开；不通过 model/endpoint 字符串推断能力。
@@ -8004,3 +8012,211 @@ provider suite passed **86 tests**; the latest provider/mutation/reasoning/readi
   invariants and malformed-artifact zero-hash rejection. Independent focused was **122 passed**;
   full-excluded was **1330 passed** with one pre-existing warning. No files, provider, runs/data,
   staging, commit, or push actions occurred.
+
+### Frozen review repair: provider completion, admission, context reuse, and compaction trials
+
+- Observed failures: mutation-authorized provider rounds could complete on a no-tool response;
+  typed provider input validation could abort a sibling call; validation duplicate routing used
+  diagnostic text; setup and runtime failures shared an unbounded setup wrapper; in-run provider
+  exceptions leaked raw key-shaped values; mutation routes could skip declared reads, expose no
+  mutation-capable tool, or lose a same-round mutation receipt; per-tool wire schemas did not reject
+  undeclared `env`; exact validation ignored verification budget; and `safe_search` had a boolean
+  schema despite a string runtime contract. Reusable compaction also failed to bind checksum/source/
+  summary identity across admission, preflight, and simulation, while synthetic source-fingerprint
+  windows had no call-level cardinality bound.
+- Implemented fix: mutation completion now requires complete declared reads, a mutation receipt,
+  and exact validation; mutation-authorized entries require a mutation-capable allowlist, and a
+  same-round receipt is retained. Registry identity now precedes per-call typed parsing; exact
+  tool-contract wire fields are enforced before project-owned path/grounding/runtime binding; typed
+  validation consumes verification budget. All provider exception paths use one bounded,
+  credential-redacted message boundary and retain exception type separately. Provider schemas now
+  cover typed bounds/defaults and the string `safe_search` enum. Shadow fingerprinting is incremental
+  and synthesizes at most 2,016 recent windows; model-facing constraint projections use the
+  cursor-independent `authority_hash`; both compaction paths consume one typed reusable trial helper;
+  and admission/preflight/simulation compare artifact checksum, source fingerprint/binding, and
+  generated-summary fingerprint.
+- Metadata impact note: authoritative owners remain `ProviderToolRoundTripResult`, admission
+  error facts, `SessionConstraintState.authority_hash`, and derived compaction trial evidence;
+  no second persisted source of truth or new public `MetadataKind` was introduced. The trial
+  evidence model is runtime-internal and the authority hash is an existing derived view; canonical
+  hashes remain checkpoint/replay identity.
+- Validation evidence: provider admission/round-trip **153 passed**; execution planning **101
+  passed**; compaction reuse **43 passed**; context projection/session/memory/rolling **101 passed**;
+  all Git-tracked `Code/tests` **1358 passed**. The raw dirty-worktree directory collector remains
+  blocked only by excluded untracked `test_phase28_quality.py`, which imports a migrated experiment
+  harness; the clean consolidation candidate must rerun the unfiltered directory gate. A coherent
+  self-contained SHA and fresh independent re-review remain required before acceptance.
+- Remaining limitations: checkpoint/runtime guard evidence intentionally retains the complete
+  canonical hash; older source windows require persisted compaction-attempt evidence after the
+  64-candidate synthetic horizon; no real-provider benefit or new experiment result is claimed.
+
+### Frozen review repair 6E: compaction reuse identity and bounded fingerprint indexing
+
+- Observed failures: an admitted reuse decision could reach preflight with different
+  required/recent candidate sets or a different session-constraint authority hash; simulation
+  accepted a summary candidate ID different from the preflight; passed preflight/simulation values
+  allowed empty semantic fact/evidence IDs; and persisted compaction attempts had no explicit
+  fingerprint-index work envelope.
+- Implemented fix: preflight now binds the admission-owned required/recent sets and constraint hash;
+  preflight and simulation carry a body-free canonical semantic-fact-set hash and passed-state
+  validators require non-empty fact/source-evidence IDs; simulation rejects summary candidate ID
+  drift. Fingerprint indexing retains every attempt at any age within explicit limits of 256
+  attempts, 4,096 source IDs per attempt, and 65,536 total source-ID references. Overflow does not
+  truncate authority: non-strict shadow reuse records typed `source_index_limit_exceeded` while
+  preserving the real prompt, and strict-source mode raises the existing source error.
+- Metadata impact note: the authoritative producer of attempt evidence remains
+  `MemoryContextBuilder`; admission is authoritative for the reuse retention/constraint scope, and
+  preflight is authoritative for its derived semantic fact hash. Consumers are preflight,
+  simulation, and the body-free fingerprint index. Lifecycle is event evidence; control impact is
+  reuse evidence selection only, with no production prompt-use transition. Existing
+  `ContextCompactionAttempt`, `ContextCompactionReuseAdmission`,
+  `ContextCompactionReuseShadowFailure`, and runtime-only preflight/simulation models were reviewed.
+  Decision: extend the existing shadow failure enum and runtime-owned derived values; no new
+  `MetadataKind`, generalized layer, or second compact authority. Serialization is backward
+  compatible for historical failure values; the new enum value has JSON round-trip coverage, and
+  runtime-only preflight/simulation values have no durable migration.
+- Validation evidence: failing-before gates reported **5 failed, 1 passed** for attempt/governance
+  bounds and **2 failed** for summary/semantic identity. Passing-after gates: compaction reuse **56
+  passed**; context/metadata/memory/rolling/projection **161 passed**; adjacent
+  assembly/summary/checkpoint/controller **170 passed**. The broader Git-tracked test gate reached
+  **1063 passed** before an unrelated provider schema-enum assertion failed in
+  `test_provider_tool_roundtrip.py`; this compact slice does not modify provider files.
+- Remaining limitations: source fingerprint synthesis intentionally scans the input candidate list
+  once before applying the 64-assistant horizon; older unpersisted windows remain ineligible, and
+  exceeding the persisted-attempt envelope disables only shadow reuse rather than deleting or
+  rewriting the authoritative attempt evidence. No real-provider or prompt-use benefit is claimed.
+
+### Frozen review repair 6E: provider mutation lifecycle and error facts
+
+- Observed failures: provider exception `finish_reason` could persist raw credentials and unbounded
+  text; capability-only writers could satisfy mutation entry without the checkpoint/receipt
+  lifecycle; mutation routes could start without an exact validation binding, executable validation
+  tool, or executable read tool; the read-to-write handoff exposed unrelated tools; read-only command
+  schemas omitted valid runtime modes; invalid command/safe-search enums escaped per-call admission;
+  and malformed JSON was parsed before an unknown tool's registry identity was rejected. Patch
+  post-processing also treated authorization of either derived index/sketch target as authority to
+  refresh both.
+- Implemented fix: provider finish reasons are credential-redacted, canonicalized, and bounded to
+  64 characters before result/diagnostic projection. Provider-native mutation is currently restricted
+  to `file_patch_writer`; entry and direct runner require the supported mutator, an executable
+  read-only file tool, executable `command_executor`, and a non-empty exact validation command before
+  transport. The write handoff exposes only the patch writer; same-round mutation receipts remain
+  retained for exact-validation completion. Command schemas expose `dry_run`, `interactive`, and
+  `automatic`, while mutation validation requires `automatic`; invalid command/safe-search values are
+  blocked per call. Patch index/sketch refresh now requires every derived target to be authorized.
+- Validation evidence: failing-before provider boundary gate reported **8 failed, 1 passed**; the
+  partial-derived-write regression and unknown-tool/malformed-JSON precedence regression each
+  separately failed **1 test** before their fixes. Passing-after provider/admission/patch gate
+  reported **184 passed**; admission/round-trip/execution planning reported **269 passed** after the
+  final identity-order fix; the expanded provider/execution/controller gate reported **365 passed**.
+  The combined local checkout passed **1,386 Git-tracked Code tests** before the final precedence
+  regression was added; the clean consolidation candidate then passed all **1,387 Code tests**.
+  Ten critical-module imports, `compileall Code/src`, and scoped `git diff --check` also passed.
+- Remaining limitations: `file_writer`, `file_delete_tool`, compound mutators, and capability-only
+  plugin writers retain their ordinary non-provider tool abilities but are not provider-native
+  mutation tools. No real-provider experiment, staging, commit, or acceptance claim is part of this
+  repair.
+
+### Harness slimming phase 0/1 mechanism canary: planner prompt pilot
+
+- Observed failure/risk: the current planner prompt combines the JSON decision-needs contract,
+  typed evidence and Router/Guard boundaries with a fixed create/add/modify/delete tutorial and
+  other model-facing process instructions. The repository is not a clean baseline (large existing
+  source/test changes and historical experiment deletions), and the historical Phase 0 inventory
+  count (22 request purposes/18 locations) does not match a fresh AST count (one direct
+  `LLMRequest` construction and 26 `.complete` call sites under `Code/src`) until the counting
+  convention is reconciled.
+- Implemented fix: added the experiment-only `experiments/planner_prompt_pilot` harness with a
+  frozen 30-case corpus covering the plan's task shapes, separate control/treatment prompt
+  renderers using the same projected facts, three repeats per arm, deterministic malformed/unknown
+  need evaluation, and body-free records for Router/Guard acceptance, fabricated paths, final
+  validation, retry count, token usage, latency, provider failure and false success. Missing,
+  malformed, stopped, and provider-failure recordings stay failures. No production planner,
+  metadata contract, permission boundary, tool execution, budget, or default path was changed.
+- Metadata impact note: no metadata producer/consumer, durable state, checkpoint, event, or public
+  contract changed. The harness records optional typed evidence supplied by a future provider replay;
+  it does not infer authority from prompt text or response claims.
+- Validation evidence: `PYTHONPATH=.:Code/src pytest -q
+  experiments/planner_prompt_pilot/test_pilot_harness.py` passed **15 tests**; the offline runner
+  generated **180 rows** (30 cases × 2 arms × 3 repeats) and measured control/treatment rendered
+  prompt totals of **223,827 / 103,947 characters**. This is only a mechanism canary and prompt
+  size observation, not a non-inferiority, provider-quality, or production-default result.
+- Remaining limitations: the pilot has no provider responses by default, so quality, security,
+  validation, retry, Token and latency metrics remain unpopulated (`null`) until a separately frozen
+  replay supplies them. The treatment is not wired into production and cannot authorize a default
+  switch; a clean baseline, evaluator calibration, paired provider runs, holdout, and proof packet
+  are still required by `HARNESS_SLIMMING_PLAN.md`. The experiment-only manifest and proof packet
+  are frozen in `experiments/planner_prompt_pilot/manifest.json` and `PROOF_PACKET.md`; the decision
+  is `mechanism_canary_passed`, not `eligible_for_production_canary`.
+
+### Harness slimming phase 0 clean baseline and phase 3 context projection mechanism canary
+
+- Observed baseline/gap: the historical phase 0 note named 22 request purposes and 18 owner
+  locations, but did not show how wrappers, transport, compatibility paths, and the single request
+  constructor reconciled with that count. The context-slimming candidate also lacked a conservative
+  result analyzer that separated deterministic projection gates from provider quality evidence.
+- Implemented fix: added `HARNESS_SLIMMING_PHASE0_BASELINE.md`, which reproduces a clean-worktree
+  AST inventory (`26` direct `.complete` calls, `1` explicit `LLMRequest` constructor) and accounts
+  for wrappers/transport/compatibility paths without treating them as new prompt owners. Added the
+  experiment-only `experiments/context_projection_pilot` with a 12-stratum corpus, control versus
+  minimal-required-plus-relevant treatment, fail-closed current-source fallback, typed evidence-ID
+  checks, 3 repeats per arm, and `analysis.py` for deterministic gate and input-size reporting.
+- Metadata impact note: these are documentation and experiment-only changes. No production
+  metadata producer/consumer, context assembler, permission boundary, provider tool, checkpoint,
+  durable state, or default route changed. Optional context remains model-facing and never grants
+  read, write, validation, or completion authority.
+- Validation evidence: phase 0 `git diff --check` passed. Context pilot passed **7 tests**; its
+  runner produced **72 rows**, zero deterministic gate failures, control/treatment input medians
+  of **226 / 134.5 characters**, and a **40.49%** deterministic input reduction. The analysis
+  explicitly reports `mechanism_canary_passed`, `provider_quality_status=not_run`, and
+  `noninferiority_status=not_estimated`.
+- Remaining limitations: the phase 0 inventory is static and does not establish runtime call
+  frequency. The context pilot has no provider responses, independent workspaces, holdout,
+  confidence intervals, or production canary; it is not evidence for a default context change.
+
+### Harness slimming phase 1 pilot acceptance and conservative paired analysis
+
+- Observed gap: an offline pilot that only counted prompt characters could not prove that a
+  recorded plan preserved required acceptance facts, exact validation, Router/Guard evidence,
+  malformed/provider failure handling, or false-success boundaries. It also had no task-clustered
+  report that distinguished missing provider pairs from actual tied failures or regressions.
+- Implemented fix: added a typed acceptance registry and corpus validator to
+  `experiments/planner_prompt_pilot`, frozen exact validation commands for validation strata, and
+  `analysis.py` that pairs control/treatment by task and repeat. Missing recordings remain unknown;
+  malformed/provider failures remain observed failures; zero-tolerance events reject safety; all-
+  failure usable pairs remain inconclusive rather than being promoted as quality evidence.
+- Metadata impact note: experiment-only evaluator and analysis code; no runtime metadata, provider
+  transport, permission, scope, budget, validation, checkpoint, or persistence contract changed.
+- Validation evidence: planner pilot focused suite **15 tests** (acceptance, conservative paired
+  analysis, and formal-holdout fixtures) and context projection suite **7
+  tests**; combined with planner runtime/session regression suite the scoped gate passed **131
+  tests**. Default planner analysis reports **180 rows, 0 usable provider pairs, 90 unknown pairs,
+  `inconclusive_no_provider_pairs`, `noninferiority_status=not_estimated`**. Default context analysis
+  reports **72 rows, 0 deterministic gate failures, `mechanism_canary_passed`**, and a **40.49%**
+  deterministic input reduction while keeping provider quality and non-inferiority unestimated.
+- Remaining limitations: no provider recordings, independent workspaces, formal holdout, paired
+  confidence intervals, blind quality review, or production canary has run. These artifacts only
+  prepare the next experiment and cannot authorize a production default or legacy-path deletion.
+
+### Harness slimming provider paired pilot readiness (experiment-only)
+
+- Observed gap: the planner pilot had a frozen corpus, evaluator, and formal-holdout analyzer, but
+  no fail-closed preflight contract for the provider/profile, reasoning and budget policy,
+  arm-symmetric retry, environment snapshot, isolated workspaces, or complete response inventory.
+- Implemented fix: added a symbolic-only provider manifest template and readiness validator under
+  `experiments/planner_prompt_pilot`. It rejects credential-bearing fields, requires the frozen
+  provider/capability/endpoint, reasoning/budget/retry/environment/workspace/pairing contract,
+  keeps `production_default=false`, and reports missing response files without synthesizing rows;
+  unexpected response names fail closed. The protocol explicitly retains empty, malformed,
+  length, timeout, provider, admission, validation, recovery, stopped, user-input, and unknown
+  usage/finish outcomes.
+- Metadata impact note: readiness assets are experiment-only and do not add metadata producers,
+  consumers, permissions, tool capabilities, provider calls, workspace mutation, or production
+  routing. Credentials remain external and are forbidden from the manifest.
+- Validation evidence: readiness validator tests **3 passed**, planner pilot **15 passed**, context
+  projection **7 passed**, and planner runtime/session regression **109 passed**; the combined
+  focused gate is **134 passed**, with `git diff --check` and Python compilation passing.
+- Remaining limitations: no provider request or real paired response has run; quality,
+  non-inferiority, efficiency, holdout, and production-canary status remain unestimated. The
+  readiness template is a preflight contract, not authorization to switch defaults or delete the
+  legacy control path.

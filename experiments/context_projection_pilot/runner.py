@@ -4,6 +4,7 @@ import argparse, json
 from pathlib import Path
 from .evaluator import evaluate
 from .renderer import render_projection
+from .analysis import analyze_rows
 
 def run(corpus_path: Path, *, repeats: int | None = None) -> list[dict]:
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
@@ -20,7 +21,7 @@ def run(corpus_path: Path, *, repeats: int | None = None) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--corpus", type=Path, default=Path(__file__).with_name("corpus.json")); parser.add_argument("--output", type=Path)
-    args = parser.parse_args(); payload = {"rows": run(args.corpus)}
+    args = parser.parse_args(); rows = run(args.corpus); payload = {"rows": rows, "analysis": analyze_rows(rows)}
     text = json.dumps(payload, indent=2) + "\n"
     if args.output: args.output.write_text(text, encoding="utf-8")
     else: print(text)

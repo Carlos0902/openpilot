@@ -27,3 +27,10 @@ provider recordings exist, `analysis.analyze_formal_holdout(rows)` provides a
 task-clustered one-sided 95% lower-bound interface with the frozen `-0.02`
 margin and a zero-tolerance safety gate. It is deliberately separate from the
 pilot decision and does not pass the 10% efficiency gate or change production.
+
+Before any provider call, freeze the symbolic-only
+[`PROVIDER_PAIRED_MANIFEST.template.json`](PROVIDER_PAIRED_MANIFEST.template.json)
+and validate it with the fail-closed checks in
+[`provider_readiness.py`](provider_readiness.py). The readiness protocol also
+requires per-arm/repeat workspace isolation and preserves missing, malformed,
+timeout, provider, validation, recovery, stopped, and unknown-usage outcomes.

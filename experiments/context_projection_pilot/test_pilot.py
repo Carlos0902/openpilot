@@ -3,6 +3,7 @@ from pathlib import Path
 from .evaluator import evaluate
 from .renderer import REQUIRED, render_projection
 from .runner import run
+from .analysis import analyze_rows
 
 ROOT = Path(__file__).parent
 
@@ -50,3 +51,11 @@ def test_full_pilot_has_no_deterministic_gate_failures_and_saves_tokens():
     control = sum(row["input_chars"] for row in rows if row["arm"] == "control")
     treatment = sum(row["input_chars"] for row in rows if row["arm"] == "treatment")
     assert treatment < control
+
+def test_analysis_reports_mechanism_only_result_and_no_noninferiority_claim():
+    report = analyze_rows(run(ROOT / "corpus.json"))
+    assert report["decision"] == "mechanism_canary_passed"
+    assert report["rows"] == 72
+    assert report["deterministic_failure_count"] == 0
+    assert report["input_reduction_fraction"] >= 0.20
+    assert report["noninferiority_status"] == "not_estimated"

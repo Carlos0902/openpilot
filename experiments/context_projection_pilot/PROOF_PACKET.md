@@ -30,3 +30,8 @@ the accompanying tests before any provider run. This is a mechanism canary
 only: no provider quality, non-inferiority, holdout, or production-default
 claim is made. The next step is to freeze provider/evaluator settings and run a
 paired pilot with independent workspaces.
+
+The current offline analysis is 72 rows with zero deterministic gate failures;
+control/treatment input medians are **226 / 134.5 characters** (40.49%
+reduction). It records `decision=mechanism_canary_passed` while keeping
+`provider_quality_status=not_run` and `noninferiority_status=not_estimated`.

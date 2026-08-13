@@ -24,3 +24,6 @@ PYTHONPATH=. pytest -q experiments/context_projection_pilot/test_pilot.py
 
 The frozen corpus has 12 strata and three repeated rows per arm. No provider
 response is consumed, and no production default or runtime behavior changes.
+The runner also emits a conservative analysis: it requires all deterministic
+gates and a 20% input reduction for `mechanism_canary_passed`, while provider
+quality and non-inferiority remain unestimated.

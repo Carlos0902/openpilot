@@ -4,6 +4,7 @@
   "renderer": "renderer.py",
   "evaluator": "evaluator.py",
   "runner": "runner.py",
+  "analysis": "analysis.py",
   "repeats_per_task_arm": 3,
   "arms": ["control", "treatment"],
   "treatment_variable": "drop_unrelated_preferred_context_and_duplicate_aggregate_projection",
@@ -15,7 +16,7 @@
   "metadata_changed": false,
   "permissions_changed": false,
   "provider_calls": false,
-  "decision": "mechanism_canary_only",
+  "decision": "mechanism_canary_passed",
   "provider_quality_status": "not_run",
   "noninferiority_status": "not_estimated"
 }

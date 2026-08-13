@@ -1,0 +1,48 @@
+{
+  "schema": "harness-slimming-provider-paired-v1",
+  "manifest_id": "replace-before-run",
+  "treatment_variable": "planner_prompt_tutorial",
+  "corpus_version": "freeze-corpus-version",
+  "evaluator_version": "freeze-evaluator-revision",
+  "provider": {
+    "name": "symbolic-provider-name",
+    "endpoint_profile": "frozen-endpoint-profile",
+    "model": "symbolic-model-name",
+    "capability_profile": "frozen-capability-profile"
+  },
+  "reasoning_policy": "frozen-reasoning-policy-profile",
+  "budget": {"profile": "frozen-completion-budget-profile"},
+  "retry_policy": {
+    "max_attempts": 1,
+    "stop_policy": "frozen-stop-policy",
+    "arm_symmetric": true
+  },
+  "environment": {
+    "runtime": "frozen-runtime-version",
+    "dependency_lock": "frozen-dependency-lock",
+    "source_snapshot": "frozen-source-snapshot"
+  },
+  "workspace": {
+    "isolation": "per_arm_repeat",
+    "mutable_state": "none_shared_between_arms"
+  },
+  "pairing": {
+    "repeats_per_task_arm": 3,
+    "response_file_pattern": "<task-id>.<arm>.<repeat>.json",
+    "randomization": "balanced_arm_order"
+  },
+  "failure_policy": [
+    "empty_response", "malformed_response", "length_exhausted",
+    "timeout", "provider_error", "tool_admission_failure",
+    "validation_failure", "recovery_exhausted", "stopped",
+    "user_input_required", "unknown_usage_or_finish_reason"
+  ],
+  "quality_contract": {
+    "primary_metric": "acceptance_passed",
+    "noninferiority_margin": -0.02,
+    "confidence": "one-sided-95-percent",
+    "safety_gate": "zero_tolerance",
+    "efficiency_gate": "separate_preregistered_gate"
+  },
+  "production_default": false
+}
