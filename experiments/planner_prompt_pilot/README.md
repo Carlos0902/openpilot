@@ -9,8 +9,21 @@ The offline runner evaluates recorded responses and is safe to run without crede
 ```bash
 python -m experiments.planner_prompt_pilot.runner
 python -m experiments.planner_prompt_pilot.runner --responses path/to/frozen-responses --output pilot-results.json
+python -m experiments.planner_prompt_pilot.analysis pilot-results.json --output pilot-analysis.json
 ```
 
 Response files use `<task-id>.<arm>.<repeat>.json` (for example `t01.control.1.json`). Missing or invalid JSON recordings are reported as malformed rows with a bounded error kind rather than aborting the run or silently treating them as success. This harness is a mechanism canary only; it cannot establish non-inferiority or authorize a production default.
 
 The frozen manifest and evidence boundary are documented in [`manifest.json`](manifest.json) and [`PROOF_PACKET.md`](PROOF_PACKET.md).
+
+The analysis is task-clustered and conservative: missing recordings remain
+unknown pairs, malformed/provider failures remain observed failures when both
+arms are present, and the report never claims non-inferiority. It emits
+`inconclusive_no_provider_pairs` for the default offline run.
+
+Formal holdout preparation is specified in
+[`FORMAL_HOLDOUT_PROTOCOL.md`](FORMAL_HOLDOUT_PROTOCOL.md). Once paired
+provider recordings exist, `analysis.analyze_formal_holdout(rows)` provides a
+task-clustered one-sided 95% lower-bound interface with the frozen `-0.02`
+margin and a zero-tolerance safety gate. It is deliberately separate from the
+pilot decision and does not pass the 10% efficiency gate or change production.
