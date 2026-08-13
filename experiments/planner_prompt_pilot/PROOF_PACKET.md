@@ -37,7 +37,7 @@ characters for control and 103,947 for treatment. Focused validation passed:
 
 ```text
 PYTHONPATH=.:Code/src pytest -q experiments/planner_prompt_pilot/test_pilot_harness.py
-7 passed
+15 passed
 PYTHONPATH=.:Code/src pytest -q Code/tests/test_session_constraint_prompt_projection.py Code/tests/test_execution_tool_planning_executor.py
 109 passed
 ```
@@ -45,6 +45,11 @@ PYTHONPATH=.:Code/src pytest -q Code/tests/test_session_constraint_prompt_projec
 The size reduction is an offline mechanism signal only. No provider responses
 were supplied, so task success, independent validation, security, retry,
 latency, and token-usage quality metrics are not estimated.
+
+`analysis.py` performs the required task-clustered paired accounting. On the
+default no-response run it reports `inconclusive_no_provider_pairs` with 90
+unknown pairs and explicitly keeps non-inferiority unestimated. It also avoids
+promoting an all-failure recording set to a quality result.
 
 The no-response run intentionally yields 180 malformed failures. It is a
 runner-integrity check, not a quality estimate: missing recordings cannot pass

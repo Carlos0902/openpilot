@@ -33,7 +33,7 @@ gain can compensate for such an event.
 
 The preregistered default margin is `-0.02` (treatment minus control), with a
 one-sided 95% lower bound. The offline preparation reports a paired task-cluster
-normal approximation (`estimate - 1.64485362695 * standard_error`) and marks a
+normal approximation (`estimate - NormalDist().inv_cdf(1 - alpha) * standard_error`) and marks a
 complete holdout `noninferior` only when that bound is strictly greater than
 `-0.02`. Fewer than two complete task clusters is `inconclusive`; a bound at or
 below the margin is `rejected_quality`. This approximation is a preparation
