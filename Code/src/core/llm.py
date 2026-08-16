@@ -12,10 +12,16 @@ from urllib.parse import urlsplit
 
 import httpx
 from openai import APITimeoutError, OpenAI, OpenAIError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config import LLMSettings
-from core.reasoning import render_reasoning_transport, resolve_reasoning_policy
+from core.native_llm_transport import get_native_transport
+from core.reasoning import (
+    UnsupportedReasoningPolicyError,
+    observe_reasoning_response,
+    render_reasoning_transport,
+    resolve_reasoning_policy,
+)
 from core.exceptions import (
     ContextAssemblyBudgetError,
     ContextAssemblyGovernanceError,
@@ -25,7 +31,13 @@ from core.exceptions import (
     LLMTimeoutError,
     classify_error,
 )
-from metadata import ContextAssemblyStatus, ContextSelectionMetadata, ReasoningPolicy
+from metadata import (
+    ContextAssemblyStatus,
+    ContextSelectionMetadata,
+    ReasoningCapabilityProfileId,
+    ReasoningPolicy,
+    ReasoningTransportFamily,
+)
 from utils.json_utils import safe_parse_json
 
 
@@ -45,16 +57,124 @@ def normalized_provider_endpoint(base_url: str) -> str:
 
 
 class LLMMessage(BaseModel):
-    """A single chat message."""
+    """A chat message, including provider tool round-trip fields."""
 
-    role: Literal["system", "user", "assistant"]
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str = ""
+    reasoning_content: str | None = None
+    tool_calls: list["LLMToolCall"] = Field(default_factory=list)
+    tool_call_id: str | None = None
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Keep the legacy compact projection for ordinary messages.
+
+        Round-trip fields are rendered explicitly by :func:`render_llm_message`.
+        Omitting absent optional fields here prevents existing context and
+        legacy chat adapters that call ``model_dump()`` from paying for absent
+        tool state or changing their wire shape, while retaining an explicit
+        empty assistant ``content`` required by tool-call wire protocols.
+        Callers can still override serialization options explicitly when they
+        need a full diagnostic projection.
+        """
+
+        compact_defaults = "exclude_defaults" not in kwargs
+        kwargs.setdefault("exclude_none", True)
+        dumped = super().model_dump(*args, **kwargs)
+        if compact_defaults and not dumped.get("tool_calls"):
+            dumped.pop("tool_calls", None)
+        return dumped
+
+    @model_validator(mode="after")
+    def _role_fields_are_valid(self) -> "LLMMessage":
+        if self.role in {"system", "user"} and (
+            self.reasoning_content is not None or self.tool_calls or self.tool_call_id
+        ):
+            raise ValueError(f"{self.role} messages cannot carry tool/reasoning fields")
+        if self.role == "assistant" and self.tool_call_id is not None:
+            raise ValueError("assistant messages cannot carry tool_call_id")
+        if self.role == "tool":
+            if not self.tool_call_id:
+                raise ValueError("tool messages require tool_call_id")
+            if self.reasoning_content is not None or self.tool_calls:
+                raise ValueError("tool messages cannot carry assistant reasoning/tool fields")
+        return self
+
+
+class LLMToolFunction(BaseModel):
+    """Provider-neutral function definition sent in a tools request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class LLMToolDefinition(BaseModel):
+    """One OpenAI-compatible function tool definition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["function"] = "function"
+    function: LLMToolFunction
+
+
+class LLMToolFunctionCall(BaseModel):
+    """Function name and JSON argument string returned by a provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    arguments: str = ""
+
+
+class LLMToolCall(BaseModel):
+    """One assistant-side provider tool call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    type: Literal["function"] = "function"
+    function: LLMToolFunctionCall
+    index: int | None = Field(default=None, ge=0)
+
+
+class LLMToolResult(BaseModel):
+    """One tool result that must match an assistant call ID."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(min_length=1)
     content: str
+
+
+def render_llm_message(message: LLMMessage) -> dict[str, Any]:
+    """Render a message without leaking internal null/default fields."""
+
+    rendered: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.reasoning_content is not None:
+        rendered["reasoning_content"] = message.reasoning_content
+    if message.tool_calls:
+        rendered["tool_calls"] = [call.model_dump(mode="json", exclude_none=True) for call in message.tool_calls]
+    if message.tool_call_id is not None:
+        rendered["tool_call_id"] = message.tool_call_id
+    return rendered
+
+
+def render_llm_tools(tools: list[LLMToolDefinition]) -> list[dict[str, Any]]:
+    """Render a strict tool definition list for OpenAI-compatible providers."""
+
+    return [tool.model_dump(mode="json") for tool in tools]
 
 
 class LLMRequest(BaseModel):
     """Provider-neutral chat completion request."""
 
     messages: list[LLMMessage]
+    tools: list[LLMToolDefinition] = Field(default_factory=list)
+    tool_choice: Literal["auto", "none", "required"] | None = None
     response_format: Literal["text", "json_object"] = "text"
     temperature: float | None = None
     max_tokens: int | None = None
@@ -64,6 +184,17 @@ class LLMRequest(BaseModel):
     context_selection: ContextSelectionMetadata | None = None
     reasoning_policy: ReasoningPolicy = Field(default_factory=ReasoningPolicy)
 
+    @model_validator(mode="after")
+    def _tool_names_are_unique(self) -> "LLMRequest":
+        names = [tool.function.name for tool in self.tools]
+        if len(names) != len(set(names)):
+            raise ValueError("LLMRequest tools must have unique function names")
+        if self.tool_choice in {"auto", "required"} and not self.tools:
+            raise ValueError("LLMRequest tool_choice requires tools")
+        if self.tool_choice == "none" and not self.tools:
+            raise ValueError("LLMRequest tool_choice=none requires tools")
+        return self
+
 
 class LLMResponse(BaseModel):
     """Provider-neutral chat completion response."""
@@ -71,6 +202,8 @@ class LLMResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     content: str
+    reasoning_content: str | None = None
+    tool_calls: list[LLMToolCall] = Field(default_factory=list)
     parsed_json: dict[str, Any] | list[Any] | None = None
     model: str
     provider: str
@@ -104,7 +237,11 @@ class LLMClient:
     def _make_cache_key(self, request: LLMRequest) -> str:
         """Generate a cache key from the request."""
         temp = request.temperature if request.temperature is not None else self.settings.temperature
-        resolved = resolve_reasoning_policy(request.reasoning_policy, self.settings)
+        resolved = resolve_reasoning_policy(
+            request.reasoning_policy,
+            self.settings,
+            structured_output=request.response_format == "json_object",
+        )
         provider_endpoint = normalized_provider_endpoint(
             str(getattr(self.settings, "base_url", "") or "")
         )
@@ -119,7 +256,9 @@ class LLMClient:
             "response_format": request.response_format,
             "temperature": temp,
             "max_tokens": request.max_tokens,
-            "messages": [message.model_dump(mode="json") for message in request.messages],
+            "messages": [render_llm_message(message) for message in request.messages],
+            "tools": render_llm_tools(request.tools),
+            "tool_choice": request.tool_choice,
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return f"v2:sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
@@ -177,9 +316,20 @@ class LLMClient:
                 )
                 return cached
 
+        resolved_reasoning = resolve_reasoning_policy(
+            request.reasoning_policy,
+            self.settings,
+            structured_output=request.response_format == "json_object",
+        )
+        native_transport = None
+        if resolved_reasoning.transport_family != ReasoningTransportFamily.OPENAI_CHAT_COMPLETIONS:
+            native_transport = get_native_transport(resolved_reasoning.transport_family)
+            if stream_callback is not None:
+                raise UnsupportedReasoningPolicyError(
+                    "native reasoning transports currently support non-streaming calls only"
+                )
         self.settings.require_ready()
-        client = self._make_openai_client()
-        resolved_reasoning = resolve_reasoning_policy(request.reasoning_policy, self.settings)
+        client = self._make_openai_client() if native_transport is None else None
 
         last_error = None
         repair_messages = list(request.messages)
@@ -187,7 +337,7 @@ class LLMClient:
             effective_timeout = request.timeout_seconds or self.settings.timeout_seconds
             payload: dict[str, Any] = {
                 "model": self.settings.model,
-                "messages": [message.model_dump() for message in repair_messages],
+                "messages": [render_llm_message(message) for message in repair_messages],
                 "temperature": request.temperature
                 if request.temperature is not None
                 else self.settings.temperature,
@@ -197,6 +347,10 @@ class LLMClient:
                 payload["max_tokens"] = request.max_tokens
             if request.response_format == "json_object":
                 payload["response_format"] = {"type": "json_object"}
+            if request.tools:
+                payload["tools"] = render_llm_tools(request.tools)
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
             payload.update(render_reasoning_transport(resolved_reasoning))
 
             self._emit_stream_event(
@@ -212,7 +366,14 @@ class LLMClient:
                 if request.transport_retries is not None
                 else {}
             )
-            if stream_callback is not None:
+            if native_transport is not None:
+                response = self._create_native_completion_with_transport_retry(
+                    native_transport,
+                    request.model_copy(update={"messages": repair_messages}),
+                    resolved_reasoning,
+                    **transport_kwargs,
+                )
+            elif stream_callback is not None:
                 response = self._create_streaming_completion_with_transport_retry(
                     client,
                     payload,
@@ -229,7 +390,30 @@ class LLMClient:
 
             choice = response.choices[0]
             content, content_diagnostics = self._extract_message_content(choice.message)
+            reasoning_content = self._extract_message_reasoning_content(choice.message)
+            tool_calls = self._extract_message_tool_calls(choice.message)
             parsed_json: dict[str, Any] | list[Any] | None = None
+
+            if tool_calls:
+                result = LLMResponse(
+                    content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls,
+                    model=response.model,
+                    provider=self.settings.provider,
+                    usage=self._usage_metadata(response),
+                    finish_reason=choice.finish_reason,
+                    provider_details=self._response_metadata(
+                        response=response,
+                        choice=choice,
+                        content=content,
+                        content_diagnostics=content_diagnostics,
+                        json_repair_attempt=attempt + 1,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
+                    ),
+                )
+                result.provider_details["tool_call_count"] = len(tool_calls)
+                return result
 
             if request.response_format == "json_object":
                 # Try to extract JSON from markdown code blocks if present
@@ -247,6 +431,7 @@ class LLMClient:
                         content=content,
                         content_diagnostics=content_diagnostics,
                         json_repair_attempt=attempt + 1,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     )
                     provider_details.update(
                         {
@@ -258,6 +443,8 @@ class LLMClient:
                     )
                     result = LLMResponse(
                         content=content,
+                        reasoning_content=reasoning_content,
+                        tool_calls=tool_calls,
                         parsed_json=parsed_json,
                         model=response.model,
                         provider=self.settings.provider,
@@ -286,6 +473,7 @@ class LLMClient:
                         choice=choice,
                         content_diagnostics=content_diagnostics,
                         parse_diagnostics=parse_diagnostics,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     )
                     if attempt < max_retries - 1:
                         self._emit_stream_event(
@@ -319,6 +507,8 @@ class LLMClient:
                 usage = self._usage_metadata(response)
                 result = LLMResponse(
                     content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls,
                     parsed_json=parsed_json,
                     model=response.model,
                     provider=self.settings.provider,
@@ -330,6 +520,7 @@ class LLMClient:
                         content=content,
                         content_diagnostics=content_diagnostics,
                         json_repair_attempt=attempt + 1,
+                        reasoning_profile_id=resolved_reasoning.profile_id,
                     ),
                 )
 
@@ -357,6 +548,7 @@ class LLMClient:
         choice: Any,
         content_diagnostics: dict[str, Any],
         parse_diagnostics: dict[str, Any],
+        reasoning_profile_id: ReasoningCapabilityProfileId,
     ) -> InvalidLLMResponseError:
         error = InvalidLLMResponseError(
             f"LLM returned invalid JSON (attempt {attempt}/{max_retries}; "
@@ -372,6 +564,7 @@ class LLMClient:
             content=content,
             content_diagnostics=content_diagnostics,
             json_repair_attempt=attempt,
+            reasoning_profile_id=reasoning_profile_id,
         )
         error.context.update(
             {
@@ -486,6 +679,8 @@ class LLMClient:
         created = None
         usage: Any = None
         hidden_reasoning_fields: dict[str, int] = {}
+        reasoning_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
 
         for chunk in stream:
             if wall_clock_timeout is not None and time.monotonic() - started_at >= wall_clock_timeout:
@@ -507,6 +702,10 @@ class LLMClient:
                 hidden_reasoning_fields,
                 self._hidden_reasoning_field_lengths(delta),
             )
+            reasoning_delta = self._stream_delta_reasoning_content(delta)
+            if reasoning_delta:
+                reasoning_parts.append(reasoning_delta)
+            self._merge_stream_delta_tool_calls(tool_call_parts, delta)
             text_delta = self._stream_delta_content(delta)
             if text_delta:
                 content_parts.append(text_delta)
@@ -524,7 +723,12 @@ class LLMClient:
                 )
 
         content = "".join(content_parts)
-        message = SimpleNamespace(content=content)
+        tool_calls = self._finalize_stream_tool_calls(tool_call_parts)
+        message = SimpleNamespace(
+            content=content,
+            reasoning_content="".join(reasoning_parts) or None,
+            tool_calls=tool_calls or None,
+        )
         choice = SimpleNamespace(message=message, finish_reason=finish_reason)
         response = SimpleNamespace(
             choices=[choice],
@@ -542,7 +746,7 @@ class LLMClient:
                 finish_reason=finish_reason,
                 provider_details={"hidden_reasoning_fields": hidden_reasoning_fields}
                 if hidden_reasoning_fields
-                else {},
+                else ({"tool_call_count": len(tool_calls)} if tool_calls else {}),
             )
         )
         return response
@@ -567,6 +771,102 @@ class LLMClient:
         if isinstance(value, list):
             return "\n".join(part for item in value if (part := self._content_part_text(item)))
         return ""
+
+    def _stream_delta_reasoning_content(self, delta: Any) -> str:
+        if delta is None:
+            return ""
+        value = (
+            delta.get("reasoning_content")
+            if isinstance(delta, dict)
+            else getattr(delta, "reasoning_content", None)
+        )
+        return value if isinstance(value, str) else ""
+
+    def _merge_stream_delta_tool_calls(
+        self,
+        accumulated: dict[int, dict[str, Any]],
+        delta: Any,
+    ) -> None:
+        raw_calls = (
+            delta.get("tool_calls")
+            if isinstance(delta, dict)
+            else getattr(delta, "tool_calls", None)
+        )
+        if not raw_calls:
+            return
+        if not isinstance(raw_calls, (list, tuple)):
+            raise UnsupportedReasoningPolicyError(
+                "provider streaming tool_calls must be a list"
+            )
+        for position, raw_call in enumerate(raw_calls):
+            if isinstance(raw_call, dict):
+                index = raw_call.get("index", position)
+                call_id = raw_call.get("id")
+                call_type = raw_call.get("type", "function")
+                function = raw_call.get("function")
+            else:
+                index = getattr(raw_call, "index", position)
+                call_id = getattr(raw_call, "id", None)
+                call_type = getattr(raw_call, "type", "function")
+                function = getattr(raw_call, "function", None)
+            try:
+                index = int(index)
+            except (TypeError, ValueError) as exc:
+                raise UnsupportedReasoningPolicyError(
+                    "provider streaming tool_call index must be a non-negative integer"
+                ) from exc
+            if index < 0:
+                raise UnsupportedReasoningPolicyError(
+                    "provider streaming tool_call index must be non-negative"
+                )
+            entry = accumulated.setdefault(
+                index,
+                {
+                    "id": "",
+                    "type": "function",
+                    "name": "",
+                    "arguments": "",
+                },
+            )
+            if call_id:
+                entry["id"] = str(call_id)
+            if call_type:
+                entry["type"] = str(call_type)
+            if isinstance(function, dict):
+                name = function.get("name")
+                arguments = function.get("arguments")
+            else:
+                name = getattr(function, "name", None)
+                arguments = getattr(function, "arguments", None)
+            if name:
+                entry["name"] += str(name)
+            if arguments:
+                entry["arguments"] += str(arguments)
+
+    def _finalize_stream_tool_calls(
+        self,
+        accumulated: dict[int, dict[str, Any]],
+    ) -> list[LLMToolCall]:
+        calls: list[LLMToolCall] = []
+        for index in sorted(accumulated):
+            entry = accumulated[index]
+            try:
+                calls.append(
+                    LLMToolCall(
+                        id=entry["id"],
+                        type=entry["type"],
+                        index=index,
+                        function=LLMToolFunctionCall(
+                            name=entry["name"],
+                            arguments=entry["arguments"],
+                        ),
+                    )
+                )
+            except Exception as exc:
+                raise UnsupportedReasoningPolicyError(
+                    f"provider streaming tool_call shape is unsupported: {exc}"
+                ) from exc
+        return calls
 
     def _hidden_reasoning_field_lengths(self, delta: Any) -> dict[str, int]:
         fields = ("reasoning_content", "thinking", "reasoning")
@@ -706,6 +1006,131 @@ class LLMClient:
             raise error from last_error
         raise LLMProviderError("Provider request failed without an error.", retryable=True, category=ErrorCategory.RETRYABLE)
 
+    def _create_native_completion_with_transport_retry(
+        self,
+        transport: Any,
+        request: LLMRequest,
+        resolved_reasoning: Any,
+        *,
+        transport_retries: int | None = None,
+    ) -> Any:
+        """Run a native provider attempt while preserving transport evidence."""
+
+        retries = (
+            getattr(self.settings, "transport_retries", 0)
+            if transport_retries is None
+            else transport_retries
+        )
+        attempts = max(0, int(retries)) + 1
+        delay = max(0.0, float(getattr(self.settings, "retry_initial_delay", 0.0)))
+        max_delay = max(delay, float(getattr(self.settings, "retry_max_delay", delay)))
+        history: list[dict[str, Any]] = []
+        self._last_transport_retry_history = history
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                response = transport.send_once(
+                    self.settings,
+                    request,
+                    resolved_reasoning,
+                    trust_env=True,
+                )
+                history.append(
+                    {"attempt": attempt, "status": "success", "retryable": False}
+                )
+                provider_details = getattr(response, "provider_details", None)
+                if isinstance(provider_details, dict):
+                    provider_details["transport_retry_history"] = list(history)
+                return response
+            except LLMProviderError as exc:
+                last_error = exc
+                category = exc.category
+                retryable = bool(exc.context.get("retryable", False))
+            except Exception as exc:
+                last_error = exc
+                category = self._classify_provider_error(exc)
+                retryable = category in {
+                    ErrorCategory.NETWORK,
+                    ErrorCategory.TIMEOUT,
+                    ErrorCategory.RETRYABLE,
+                }
+
+            history.append(
+                {
+                    "attempt": attempt,
+                    "status": "failed",
+                    "category": category.value,
+                    "retryable": retryable,
+                    "error_type": type(last_error).__name__ if last_error else None,
+                    "error": str(last_error)[:500] if last_error else "",
+                }
+            )
+            if not retryable or attempt >= attempts:
+                break
+            if delay > 0:
+                time.sleep(min(delay, max_delay))
+                delay = min(delay * 2 if delay else 0, max_delay)
+
+        if last_error is not None and self._should_retry_without_env_proxy(last_error):
+            direct_attempt = attempts + 1
+            try:
+                response = transport.send_once(
+                    self.settings,
+                    request,
+                    resolved_reasoning,
+                    trust_env=False,
+                )
+                history.append(
+                    {
+                        "attempt": direct_attempt,
+                        "status": "success",
+                        "retryable": False,
+                        "trust_env": False,
+                        "reason": "env_proxy_fallback",
+                    }
+                )
+                provider_details = getattr(response, "provider_details", None)
+                if isinstance(provider_details, dict):
+                    provider_details["transport_retry_history"] = list(history)
+                return response
+            except Exception as exc:
+                last_error = exc
+                category = self._classify_provider_error(exc)
+                history.append(
+                    {
+                        "attempt": direct_attempt,
+                        "status": "failed",
+                        "category": category.value,
+                        "retryable": False,
+                        "error_type": type(last_error).__name__,
+                        "error": str(last_error)[:500],
+                        "trust_env": False,
+                        "reason": "env_proxy_fallback",
+                    }
+                )
+
+        if isinstance(last_error, (httpx.TimeoutException, LLMTimeoutError)):
+            error = LLMTimeoutError(str(last_error), timeout_seconds=self.settings.timeout_seconds)
+            error.context["transport_retry_history"] = history
+            raise error from last_error
+        if isinstance(last_error, LLMProviderError):
+            last_error.context["transport_retry_history"] = history
+            raise last_error
+        if last_error is not None:
+            error = LLMProviderError(
+                f"{self._classify_provider_error(last_error)}: {last_error}",
+                retryable=False,
+                category=self._classify_provider_error(last_error),
+            )
+            error.context["transport_retry_history"] = history
+            raise error from last_error
+        raise LLMProviderError(
+            "Native provider request failed without an error.",
+            retryable=True,
+            category=ErrorCategory.RETRYABLE,
+        )
+
     def _should_retry_without_env_proxy(self, exc: Exception) -> bool:
         category = self._classify_provider_error(exc)
         return category == ErrorCategory.NETWORK and any(
@@ -758,7 +1183,7 @@ class LLMClient:
         return False
 
     def _extract_message_content(self, message: Any) -> tuple[str, dict[str, Any]]:
-        raw_content = getattr(message, "content", None)
+        raw_content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
         diagnostics = {
             "content_type": type(raw_content).__name__,
             "content_part_count": len(raw_content) if isinstance(raw_content, list) else None,
@@ -773,11 +1198,53 @@ class LLMClient:
             return str(raw_content), diagnostics
 
         for field_name in ("text", "message", "output_text"):
-            value = getattr(message, field_name, None)
+            value = message.get(field_name) if isinstance(message, dict) else getattr(message, field_name, None)
             if isinstance(value, str):
                 diagnostics["fallback_content_field"] = field_name
                 return value, diagnostics
         return "", diagnostics
+
+    def _extract_message_reasoning_content(self, message: Any) -> str | None:
+        value = message.get("reasoning_content") if isinstance(message, dict) else getattr(message, "reasoning_content", None)
+        return value if isinstance(value, str) else None
+
+    def _extract_message_tool_calls(self, message: Any) -> list[LLMToolCall]:
+        raw_calls = message.get("tool_calls") if isinstance(message, dict) else getattr(message, "tool_calls", None)
+        if not raw_calls:
+            return []
+        if not isinstance(raw_calls, (list, tuple)):
+            raise UnsupportedReasoningPolicyError("provider tool_calls must be a list")
+        calls: list[LLMToolCall] = []
+        for raw_call in raw_calls:
+            try:
+                if hasattr(raw_call, "model_dump"):
+                    raw_call = raw_call.model_dump(mode="json", exclude_none=True)
+                elif isinstance(raw_call, dict):
+                    raw_call = dict(raw_call)
+                else:
+                    raw_function = getattr(raw_call, "function", None)
+                    raw_call = {
+                        "id": getattr(raw_call, "id", None),
+                        "type": getattr(raw_call, "type", "function"),
+                        "function": raw_function,
+                        "index": getattr(raw_call, "index", None),
+                    }
+                raw_function = raw_call.get("function")
+                if hasattr(raw_function, "model_dump"):
+                    raw_call["function"] = raw_function.model_dump(
+                        mode="json", exclude_none=True
+                    )
+                elif not isinstance(raw_function, dict):
+                    raw_call["function"] = {
+                        "name": getattr(raw_function, "name", None),
+                        "arguments": getattr(raw_function, "arguments", ""),
+                    }
+                calls.append(LLMToolCall.model_validate(raw_call))
+            except Exception as exc:
+                raise UnsupportedReasoningPolicyError(
+                    f"provider tool_call shape is unsupported: {exc}"
+                ) from exc
+        return calls
 
     def _content_part_text(self, part: Any) -> str:
         if isinstance(part, str):
@@ -798,6 +1265,8 @@ class LLMClient:
         return ""
 
     def _message_field_names(self, message: Any) -> list[str]:
+        if isinstance(message, dict):
+            return sorted(str(key) for key in message.keys())
         if hasattr(message, "model_dump"):
             try:
                 return sorted(str(key) for key in message.model_dump().keys())
@@ -815,6 +1284,7 @@ class LLMClient:
         content: str,
         content_diagnostics: dict[str, Any],
         json_repair_attempt: int,
+        reasoning_profile_id: ReasoningCapabilityProfileId,
     ) -> dict[str, Any]:
         finish_reason = getattr(choice, "finish_reason", None)
         metadata = {
@@ -825,6 +1295,14 @@ class LLMClient:
             "content_diagnostics": content_diagnostics,
             "empty_length_response": finish_reason == "length" and not content.strip(),
         }
+        observation = observe_reasoning_response(
+            profile_id=reasoning_profile_id,
+            message=getattr(choice, "message", None),
+            usage=self._usage_metadata(response),
+            finish_reason=finish_reason,
+            visible_content=content,
+        )
+        metadata["reasoning_observation"] = observation.model_dump(mode="json")
         provider_details = getattr(response, "provider_details", None)
         if isinstance(provider_details, dict):
             metadata.update(provider_details)
@@ -843,6 +1321,8 @@ class LLMClient:
         return {}
 
     def _should_cache_response(self, response: LLMResponse) -> bool:
+        if response.tool_calls:
+            return False
         if response.finish_reason == "length" and not response.content.strip():
             return False
         return True

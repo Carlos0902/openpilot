@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from pydantic import Field, field_validator
@@ -14,6 +16,79 @@ from metadata import ReasoningCapabilityProfileId, ReasoningMode
 _CODE_ROOT = Path(__file__).resolve().parents[2]
 _REPOSITORY_ROOT = _CODE_ROOT.parent
 _ENV_FILES = (str(_REPOSITORY_ROOT / ".env"), str(_CODE_ROOT / ".env"), ".env")
+
+
+class ProviderToolExecutionBudgetProfile(str, Enum):
+    """Explicit budget lanes for provider-native task experiments."""
+
+    CANARY = "canary"
+    REAL_READ_ONLY = "real_read_only"
+    REAL_MUTATION = "real_mutation"
+
+
+@dataclass(frozen=True)
+class ProviderToolExecutionBudget:
+    """Static ceilings used by the provider-native execution entry point."""
+
+    profile: ProviderToolExecutionBudgetProfile
+    context_max_prompt_tokens: int
+    completion_ceiling: int
+    completion_floor: int
+    total_completion_tokens: int
+    max_rounds: int
+    max_tool_calls: int
+    max_file_reads: int
+    max_file_edits: int
+    max_file_creates: int
+    max_verification_attempts: int
+
+    @classmethod
+    def for_profile(
+        cls,
+        profile: ProviderToolExecutionBudgetProfile | str,
+    ) -> "ProviderToolExecutionBudget":
+        normalized = ProviderToolExecutionBudgetProfile(profile)
+        if normalized is ProviderToolExecutionBudgetProfile.REAL_READ_ONLY:
+            return cls(
+                profile=normalized,
+                context_max_prompt_tokens=12_288,
+                completion_ceiling=4_096,
+                completion_floor=2_048,
+                total_completion_tokens=24_000,
+                max_rounds=8,
+                max_tool_calls=40,
+                max_file_reads=60,
+                max_file_edits=0,
+                max_file_creates=0,
+                max_verification_attempts=0,
+            )
+        if normalized is ProviderToolExecutionBudgetProfile.REAL_MUTATION:
+            return cls(
+                profile=normalized,
+                context_max_prompt_tokens=12_288,
+                completion_ceiling=4_096,
+                completion_floor=2_048,
+                total_completion_tokens=24_000,
+                max_rounds=8,
+                max_tool_calls=40,
+                max_file_reads=60,
+                max_file_edits=1,
+                max_file_creates=0,
+                max_verification_attempts=1,
+            )
+        return cls(
+            profile=ProviderToolExecutionBudgetProfile.CANARY,
+            context_max_prompt_tokens=4_096,
+            completion_ceiling=1_600,
+            completion_floor=800,
+            total_completion_tokens=12_000,
+            max_rounds=3,
+            max_tool_calls=20,
+            max_file_reads=30,
+            max_file_edits=3,
+            max_file_creates=20,
+            max_verification_attempts=3,
+        )
 
 
 class LLMSettings(BaseSettings):
@@ -49,6 +124,42 @@ class LLMSettings(BaseSettings):
         default=128,
         ge=0,
         alias="OPENPILOT_CONTEXT_RESERVED_PROMPT_TOKENS",
+    )
+    rolling_summary_enabled: bool = Field(
+        default=False,
+        alias="OPENPILOT_ROLLING_SUMMARY_ENABLED",
+    )
+    rolling_summary_token_limit: int = Field(
+        default=256,
+        gt=0,
+        le=4096,
+        alias="OPENPILOT_ROLLING_SUMMARY_TOKEN_LIMIT",
+    )
+    provider_tool_execution_enabled: bool = Field(
+        default=False,
+        alias="OPENPILOT_PROVIDER_TOOL_EXECUTION_ENABLED",
+    )
+    provider_tool_initial_context_projection_enabled: bool = Field(
+        default=False,
+        alias="OPENPILOT_PROVIDER_TOOL_INITIAL_CONTEXT_PROJECTION_ENABLED",
+    )
+    provider_tool_initial_context_mutation_enabled: bool = Field(
+        default=False,
+        alias="OPENPILOT_PROVIDER_TOOL_INITIAL_CONTEXT_MUTATION_ENABLED",
+    )
+    provider_tool_completion_outcome_feedback_enabled: bool = Field(
+        default=False,
+        alias="OPENPILOT_PROVIDER_TOOL_COMPLETION_OUTCOME_FEEDBACK_ENABLED",
+    )
+    provider_tool_execution_budget_profile: ProviderToolExecutionBudgetProfile = Field(
+        default=ProviderToolExecutionBudgetProfile.CANARY,
+        alias="OPENPILOT_PROVIDER_TOOL_EXECUTION_BUDGET_PROFILE",
+    )
+    provider_tool_execution_max_rounds: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        alias="OPENPILOT_PROVIDER_TOOL_EXECUTION_MAX_ROUNDS",
     )
 
     @field_validator("tool_event_reasoning_mode")
