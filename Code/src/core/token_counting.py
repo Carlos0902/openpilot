@@ -28,10 +28,18 @@ def default_deepseek_tokenizer_path() -> Path:
 class ProviderTokenCounter:
     """Count text with a locally available provider tokenizer; never estimate."""
 
-    def __init__(self, *, tokenizer: Any | None, tokenizer_id: str, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        tokenizer: Any | None,
+        tokenizer_id: str,
+        model: str,
+        encoding_kind: str = "tokenizers",
+    ) -> None:
         self._tokenizer = tokenizer
         self.tokenizer_id = tokenizer_id
         self.model = model
+        self._encoding_kind = encoding_kind
 
     @property
     def available(self) -> bool:
@@ -40,6 +48,8 @@ class ProviderTokenCounter:
     def count_text(self, text: str) -> int:
         if self._tokenizer is None:
             raise RuntimeError("provider tokenizer is unavailable")
+        if self._encoding_kind == "tiktoken":
+            return len(self._tokenizer.encode(str(text)))
         return len(self._tokenizer.encode(str(text), add_special_tokens=False).ids)
 
     @classmethod
@@ -49,7 +59,7 @@ class ProviderTokenCounter:
         configured_path = str(getattr(settings, "tokenizer_path", "") or "").strip()
         is_deepseek = model.lower().startswith("deepseek") or "deepseek.com" in base_url.lower()
         if not is_deepseek:
-            return cls(tokenizer=None, tokenizer_id="unavailable", model=model)
+            return cls._from_openai_tiktoken(settings)
         path = Path(configured_path).expanduser() if configured_path else default_deepseek_tokenizer_path()
         tokenizer_id = f"configured-tokenizer:{path.name}" if configured_path else DEEPSEEK_TOKENIZER_ID
         try:
@@ -67,6 +77,31 @@ class ProviderTokenCounter:
             tokenizer=tokenizer,
             tokenizer_id=tokenizer_id if tokenizer is not None else "unavailable",
             model=model,
+        )
+
+    @classmethod
+    def _from_openai_tiktoken(cls, settings: Any) -> "ProviderTokenCounter":
+        """Load an exact local tiktoken encoding for a known OpenAI model."""
+
+        profile = getattr(settings, "reasoning_capability_profile", None)
+        profile_value = getattr(profile, "value", profile)
+        if str(profile_value or "") not in {
+            "openai-chat-known",
+            "openai-chat-no-reasoning-known",
+        }:
+            return cls(tokenizer=None, tokenizer_id="unavailable", model=str(getattr(settings, "model", "") or ""))
+        model = str(getattr(settings, "model", "") or "")
+        try:
+            import tiktoken
+
+            encoding = tiktoken.encoding_for_model(model)
+        except (ImportError, KeyError, ValueError):
+            return cls(tokenizer=None, tokenizer_id="unavailable", model=model)
+        return cls(
+            tokenizer=encoding,
+            tokenizer_id=f"tiktoken:{encoding.name}",
+            model=model,
+            encoding_kind="tiktoken",
         )
 
 

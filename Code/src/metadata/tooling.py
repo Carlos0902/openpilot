@@ -13,10 +13,18 @@ from metadata.artifacts import (
     FileArtifactMetadata,
     SearchArtifactMetadata,
     TextArtifactMetadata,
+    FileReadMode,
+    FileReadWindow,
 )
 from metadata.base import JsonValue, MetadataBase, MetadataKind
 from metadata.project import EnvironmentOperation
 from metadata.results import FailureMetadata, ToolResultMetadata
+
+
+class FileReadWindowSpec(FileReadWindow):
+    """Typed task declaration for a bounded source window sufficient for evidence."""
+
+    file_path: str
 
 
 class ToolInputMetadata(MetadataBase):
@@ -37,7 +45,7 @@ class ToolInputMetadata(MetadataBase):
     language: str | None = None
     encoding: str | None = None
     max_size_mb: int | float | None = None
-    read_mode: str | None = None
+    read_mode: FileReadMode | None = None
     max_lines: int | None = None
     offset: int | None = None
     max_total_chars: int | None = None
@@ -52,6 +60,9 @@ class ToolInputMetadata(MetadataBase):
     insertion_hint: str | None = None
     patch_mode: str | None = None
     generated_unit: str | None = None
+    # Provider-native code artifact handoff. This is lineage only; it never
+    # authorizes a write or widens the task scope.
+    artifact_ref: dict[str, JsonValue] | None = None
     replacement_text: str | None = None
     patch: dict[str, JsonValue] | None = None
     line_start: int | None = None
@@ -241,6 +252,10 @@ class ToolCallMetadata(MetadataBase):
     task_id: str
     step_id: str
     call_id: str
+    # External provider identity is retained separately from the project-owned
+    # lifecycle call_id. It is a wire correlation value, never an authority
+    # for permissions, checkpoints, or budget accounting.
+    provider_call_id: str | None = Field(default=None, min_length=1)
     tool_name: str
     input_metadata: ToolInputMetadata
     tool_context: ToolContextMetadata | None = None
@@ -260,6 +275,7 @@ class ToolErrorMetadata(MetadataBase):
     task_id: str
     step_id: str
     call_id: str
+    provider_call_id: str | None = Field(default=None, min_length=1)
     tool_name: str
     error_type: str
     error_message: str
@@ -310,6 +326,11 @@ class ToolLoopMetadata(MetadataBase):
     tool_invocations: list[ToolCallMetadata] = Field(default_factory=list)
     recoverable_errors: list[ToolErrorMetadata] = Field(default_factory=list)
     tool_contexts: list[ToolContextMetadata] = Field(default_factory=list)
+    # Explicit control-flow counters make recovery evidence auditable by
+    # downstream receipts.  They are derived by the runner, never inferred
+    # from the number of successful provider responses.
+    retry_count: int = Field(default=0, ge=0)
+    fallback_count: int = Field(default=0, ge=0)
     final_output: ToolResultMetadata | None = None
     final_error: FailureMetadata | None = None
     provider_executed: bool = False

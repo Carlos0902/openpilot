@@ -446,6 +446,22 @@ class ContextAssembler:
             for group in duplicate_groups.values():
                 if len(group) < 2:
                     continue
+                # Provider assistant/tool wire messages are required state,
+                # not interchangeable evidence. Two tool results can have
+                # identical compact payloads while carrying different
+                # ``tool_call_id`` values; deduplicating one would leave an
+                # assistant tool-call bundle without its matching result.
+                round_trip_group = [
+                    candidate
+                    for candidate in group
+                    if candidate.role == "tool"
+                    or (
+                        candidate.role == "assistant"
+                        and candidate.truncation == ContextCandidateTruncation.FORBIDDEN
+                    )
+                ]
+                if round_trip_group:
+                    continue
                 winner = max(group, key=self._governance_precedence)
                 for candidate in group:
                     if candidate.candidate_id == winner.candidate_id:

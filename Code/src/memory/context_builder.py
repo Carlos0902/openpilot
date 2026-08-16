@@ -6,8 +6,9 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Sequence
 
 from core.exceptions import (
     ContextAssemblyBudgetError,
@@ -26,7 +27,17 @@ from memory.session_constraints import (
     session_constraint_projection,
 )
 from memory.session_dialog import session_turn_ledger_hash
-from memory.rolling_compaction import RollingSummaryRequest, RollingSummaryResult
+from memory.rolling_compaction import (
+    RollingSummaryFallbackReason,
+    RollingSummaryRequest,
+    RollingSummaryResult,
+    provider_attempt_evidence_complete,
+)
+from memory.compaction_summary import (
+    calculate_summary_budget,
+    source_candidate_binding_hash,
+    source_candidate_fingerprint,
+)
 from metadata import (
     ContextAssemblyPolicy,
     ContextAssemblyResult,
@@ -37,8 +48,16 @@ from metadata import (
     ContextCandidateRetention,
     ContextCandidateTrust,
     ContextCandidateTruncation,
+    ContextCompactionAttempt,
     ContextCompactionBinding,
+    ContextCompactionFallbackReason,
+    ContextCompactionProviderStatus,
     ContextCompactionRecord,
+    ContextCompactionReuseAdmission,
+    ContextCompactionReuseShadowFailure,
+    ContextCompactionReuseShadowFailureReason,
+    ContextCompactionSelectionOutcome,
+    ContextCompactionSelectionStatus,
     ContextSelectionMetadata,
     DurableArtifactReference,
     SessionConstraintState,
@@ -50,6 +69,13 @@ DEFAULT_MAX_PROMPT_CHARS = 16_000
 DEFAULT_MAX_PROMPT_TOKENS = 4_096
 MIN_PROMPT_CHARS = 256
 MEMORY_CONTEXT_ADAPTER_VERSION = "typed_memory_candidates_segmented_compaction_v5"
+ROLLING_SUMMARY_RESPONSE_SCHEMA_RESERVE_TOKENS = 64
+
+
+def _source_candidate_ids_key(candidate_ids: Sequence[str]) -> str:
+    """Canonical key for body-free source-fingerprint evidence."""
+
+    return json.dumps(list(candidate_ids), ensure_ascii=False, separators=(",", ":"))
 
 
 class MemoryContextBuilder:
@@ -82,6 +108,11 @@ class MemoryContextBuilder:
         ]
         | None = None,
         rolling_summary_token_limit: int = 256,
+        compaction_reuse_shadow_provider: Callable[
+            [dict[str, Any]],
+            list[ContextCompactionReuseAdmission | Mapping[str, Any]] | None,
+        ]
+        | None = None,
     ) -> None:
         self.short_memory = short_memory or ShortMemory()
         self.memory_store = memory_store or MemoryStore()
@@ -94,6 +125,7 @@ class MemoryContextBuilder:
         self.rolling_summary_adapter = rolling_summary_adapter
         self.rolling_summary_request_factory = rolling_summary_request_factory
         self.rolling_summary_token_limit = max(1, int(rolling_summary_token_limit))
+        self.compaction_reuse_shadow_provider = compaction_reuse_shadow_provider
         self.context_assembler = ContextAssembler(
             renderer=self._prompt_text,
             token_counter=token_counter,
@@ -180,6 +212,14 @@ class MemoryContextBuilder:
             int(max_prompt_chars),
         )
         requested_max_tokens = self.max_prompt_tokens if max_prompt_tokens is None else int(max_prompt_tokens)
+        session_constraints_hash = (
+            session_constraints.canonical_hash if session_constraints is not None else ""
+        )
+        session_turn_source_hash = (
+            self._session_ingress_turn_ledger_hash(session_ingress_state)
+            if session_ingress_state is not None
+            else ""
+        )
         request_hash = self.context_assembler.request_hash(
             {
                 "adapter_version": MEMORY_CONTEXT_ADAPTER_VERSION,
@@ -188,14 +228,8 @@ class MemoryContextBuilder:
                 "include_environment": bool(include_environment),
                 "limit": int(limit),
                 "system_prompt": system_prompt,
-                "session_constraints_hash": (
-                    session_constraints.canonical_hash if session_constraints is not None else ""
-                ),
-                "session_ingress_turn_ledger_hash": (
-                    self._session_ingress_turn_ledger_hash(session_ingress_state)
-                    if session_ingress_state is not None
-                    else ""
-                ),
+                "session_constraints_hash": session_constraints_hash,
+                "session_ingress_turn_ledger_hash": session_turn_source_hash,
                 "rolling_summary_enabled": self.rolling_summary_enabled,
                 "rolling_summary_token_limit": self.rolling_summary_token_limit,
             },
@@ -277,10 +311,18 @@ class MemoryContextBuilder:
             ):
                 raise ContextAssemblyGovernanceError(
                     assembly.selection.governance_blocked_candidate_ids
-                )
+            )
             raise ContextAssemblyBudgetError(
                 assembly.selection.omitted_required_candidate_ids
             )
+        assembly = self._apply_compaction_reuse_shadow(
+            candidates=candidates,
+            assembly=assembly,
+            request_hash=request_hash,
+            session_turn_source_hash=session_turn_source_hash,
+            session_constraints_hash=session_constraints_hash,
+            strict_sources=strict_sources,
+        )
         selected = self._compatibility_payload(
             payload,
             candidates=candidates,
@@ -288,16 +330,8 @@ class MemoryContextBuilder:
             assembly=assembly,
             compaction_bindings=compaction_bindings,
             request_hash=request_hash,
-            session_turn_source_hash=(
-                self._session_ingress_turn_ledger_hash(session_ingress_state)
-                if session_ingress_state is not None
-                else ""
-            ),
-            session_constraints_hash=(
-                session_constraints.canonical_hash
-                if session_constraints is not None
-                else ""
-            ),
+            session_turn_source_hash=session_turn_source_hash,
+            session_constraints_hash=session_constraints_hash,
         )
         if self._context_snapshot_sink is not None:
             try:
@@ -327,6 +361,7 @@ class MemoryContextBuilder:
             or initial.selection.assembly_status != ContextAssemblyStatus.READY
         ):
             return candidates, sources, initial, []
+        compaction_attempts: list[ContextCompactionAttempt] = []
         dialog_candidates = [
             candidate
             for candidate in candidates
@@ -351,6 +386,13 @@ class MemoryContextBuilder:
         if len(compacted_ids) < 2:
             return candidates, sources, initial, []
 
+        summary_token_limit = self._dynamic_rolling_summary_budget(
+            initial=initial,
+            dialog_candidates=dialog_candidates,
+            compacted_ids=compacted_ids,
+            policy=policy,
+        )
+
         minimum_recent_messages = 2
         while (
             compacted_ids
@@ -368,168 +410,448 @@ class MemoryContextBuilder:
             except ValueError as exc:
                 if strict_sources:
                     raise ContextSourceError("context_compaction", exc) from exc
-                return candidates, sources, initial, []
+                return candidates, sources, self._with_compaction_attempts(initial, compaction_attempts), []
             deterministic_record = record
 
             # LLM-assisted summaries are an opt-in derived view.  The factory
             # owns provider invocation and may return no request; the adapter
             # owns validation.  Any mismatch or fallback keeps this exact
             # deterministic source record and therefore cannot widen authority.
+            provider_status = ContextCompactionProviderStatus.NOT_ATTEMPTED
+            provider_fallback_reason: ContextCompactionFallbackReason | None = None
+            adapter_fallback_reason: str | None = None
+            provider_attempt = None
+            provider_failure_usage: dict[str, Any] | None = None
+            provider_failure_finish_reason: str | None = None
             if (
                 self.rolling_summary_enabled
                 and self.rolling_summary_adapter is not None
                 and self.rolling_summary_request_factory is not None
             ):
-                try:
-                    request = self.rolling_summary_request_factory(
-                        tuple(compacted_sources),
-                        self.rolling_summary_token_limit,
-                    )
-                    if request is not None:
-                        rolling_result = self.rolling_summary_adapter(request)
-                        rolling_record = rolling_result.record
-                        expected_source_ids = [
-                            candidate.candidate_id for candidate in compacted_sources
-                        ]
-                        if (
-                            rolling_record is not None
-                            and rolling_record.source_candidate_ids == expected_source_ids
-                            and rolling_record.source_fingerprint == record.source_fingerprint
-                            and rolling_record.original_chars == record.original_chars
-                            and rolling_record.compacted_chars < rolling_record.original_chars
-                        ):
-                            record = rolling_record
-                except Exception:
-                    # Provider/factory output is untrusted.  The deterministic
-                    # source view remains the only fallback, including in
-                    # non-strict mode; strict source failures are handled by
-                    # the existing artifact sink boundary below.
-                    pass
-            compaction_candidate = ContextCandidate(
-                candidate_id=f"compaction:{record.compaction_id}",
-                kind=ContextCandidateKind.ARTIFACT,
-                source_id=record.source_fingerprint,
-                content=record.summary,
-                retention=ContextCandidateRetention.PREFERRED,
-                priority=99,
-                source_order=500,
-                truncation=ContextCandidateTruncation.FORBIDDEN,
-                trust=ContextCandidateTrust.DERIVED,
-                freshness=ContextCandidateFreshness.CURRENT,
-                compacted_candidate_ids=record.source_candidate_ids,
-            )
-            trial_candidates = [*candidates, compaction_candidate]
-            trial = self.context_assembler.assemble_candidates(
-                trial_candidates,
-                policy=policy,
-                renderer=self._render_candidates,
-            )
-            trial_decisions = {
-                decision.candidate_id: decision
-                for decision in trial.selection.candidate_decisions
-            }
-            compaction_kept = (
-                trial.selection.assembly_status == ContextAssemblyStatus.READY
-                and trial_decisions[compaction_candidate.candidate_id].action == "kept"
-            )
-            if not compaction_kept and record.algorithm == "llm_rolling_summary_v1":
-                # A generated summary is only a preferred replacement.  If it
-                # cannot fit atomically, retry the exact deterministic source
-                # view before considering any wider omission.  This preserves
-                # the current kill-switch semantics for a too-large summary.
-                record = deterministic_record
-                compaction_candidate = ContextCandidate(
-                    candidate_id=f"compaction:{record.compaction_id}",
+                if summary_token_limit <= 0:
+                    provider_fallback_reason = ContextCompactionFallbackReason.BUDGET_ZERO
+                else:
+                    try:
+                        request = self.rolling_summary_request_factory(
+                            tuple(compacted_sources),
+                            summary_token_limit,
+                        )
+                    except Exception as exc:
+                        request = None
+                        provider_status = ContextCompactionProviderStatus.REJECTED
+                        raw_failure_usage = getattr(exc, "usage", None)
+                        provider_failure_usage = (
+                            dict(raw_failure_usage)
+                            if isinstance(raw_failure_usage, Mapping)
+                            else {}
+                        )
+                        provider_failure_finish_reason = getattr(exc, "finish_reason", None)
+                        normalized_finish_reason = str(
+                            provider_failure_finish_reason or ""
+                        ).strip().lower()
+                        provider_fallback_reason = (
+                            ContextCompactionFallbackReason.PROVIDER_OUTPUT_TRUNCATED
+                            if normalized_finish_reason in {"length", "max_tokens"}
+                            else ContextCompactionFallbackReason.REQUEST_OR_PROVIDER_FAILURE
+                        )
+                    if request is None and provider_status == ContextCompactionProviderStatus.NOT_ATTEMPTED:
+                        provider_status = ContextCompactionProviderStatus.REJECTED
+                        provider_fallback_reason = (
+                            ContextCompactionFallbackReason.REQUEST_OR_PROVIDER_FAILURE
+                        )
+                    elif request is not None:
+                        provider_attempt = request.attempt
+                        try:
+                            rolling_result = self.rolling_summary_adapter(request)
+                        except Exception:
+                            rolling_result = None
+                            provider_status = ContextCompactionProviderStatus.REJECTED
+                            provider_fallback_reason = (
+                                ContextCompactionFallbackReason.INVALID_ADAPTER_RESULT
+                            )
+                        if rolling_result is not None:
+                            rolling_record = rolling_result.record
+                            expected_source_ids = [
+                                candidate.candidate_id for candidate in compacted_sources
+                            ]
+                            if (
+                                rolling_result.accepted
+                                and rolling_record is not None
+                                and provider_attempt_evidence_complete(provider_attempt)
+                                and rolling_record.source_candidate_ids == expected_source_ids
+                                and rolling_record.source_fingerprint == record.source_fingerprint
+                                and rolling_record.original_chars == record.original_chars
+                                and rolling_record.compacted_chars < rolling_record.original_chars
+                            ):
+                                record = rolling_record
+                                provider_status = ContextCompactionProviderStatus.ACCEPTED
+                                provider_fallback_reason = None
+                            elif rolling_result.accepted:
+                                provider_status = ContextCompactionProviderStatus.REJECTED
+                                provider_fallback_reason = (
+                                    ContextCompactionFallbackReason.INVALID_ADAPTER_RESULT
+                                    if not provider_attempt_evidence_complete(provider_attempt)
+                                    else ContextCompactionFallbackReason.SOURCE_FINGERPRINT_MISMATCH
+                                )
+                            else:
+                                provider_status = ContextCompactionProviderStatus.REJECTED
+                                provider_fallback_reason = (
+                                    ContextCompactionFallbackReason.INVALID_ADAPTER_RESULT
+                                )
+                                adapter_fallback_reason = (
+                                    rolling_result.fallback.reason.value
+                                    if rolling_result.fallback is not None
+                                    else None
+                                )
+            def build_trial(current_record: ContextCompactionRecord):
+                current_candidate = ContextCandidate(
+                    candidate_id=f"compaction:{current_record.compaction_id}",
                     kind=ContextCandidateKind.ARTIFACT,
-                    source_id=record.source_fingerprint,
-                    content=record.summary,
+                    source_id=current_record.source_fingerprint,
+                    content=current_record.summary,
                     retention=ContextCandidateRetention.PREFERRED,
                     priority=99,
                     source_order=500,
                     truncation=ContextCandidateTruncation.FORBIDDEN,
                     trust=ContextCandidateTrust.DERIVED,
                     freshness=ContextCandidateFreshness.CURRENT,
-                    compacted_candidate_ids=record.source_candidate_ids,
+                    compacted_candidate_ids=current_record.source_candidate_ids,
                 )
-                trial_candidates = [*candidates, compaction_candidate]
-                trial = self.context_assembler.assemble_candidates(
-                    trial_candidates,
+                current_candidates = [*candidates, current_candidate]
+                current_trial = self.context_assembler.assemble_candidates(
+                    current_candidates,
                     policy=policy,
                     renderer=self._render_candidates,
                 )
-                trial_decisions = {
+                current_decisions = {
                     decision.candidate_id: decision
-                    for decision in trial.selection.candidate_decisions
+                    for decision in current_trial.selection.candidate_decisions
                 }
-                compaction_kept = (
-                    trial.selection.assembly_status == ContextAssemblyStatus.READY
-                    and trial_decisions[compaction_candidate.candidate_id].action == "kept"
+                current_decision = current_decisions.get(current_candidate.candidate_id)
+                current_kept = (
+                    current_trial.selection.assembly_status == ContextAssemblyStatus.READY
+                    and current_decision is not None
+                    and current_decision.action == "kept"
                 )
-            newly_limited = [
-                candidate.candidate_id
-                for candidate in dialog_candidates
-                if candidate.candidate_id not in compacted_set
-                and candidate.candidate_id in initially_kept_ids
-                and trial_decisions[candidate.candidate_id].action != "kept"
-            ]
-            if (
-                record.algorithm == "llm_rolling_summary_v1"
-                and newly_limited
-            ):
-                # A summary can fit in isolation yet displace the recent
-                # suffix.  Retry the deterministic projection before widening
-                # the governed source segment; recent dialog must never be
-                # sacrificed merely to keep a generated summary.
-                record = deterministic_record
-                compaction_candidate = ContextCandidate(
-                    candidate_id=f"compaction:{record.compaction_id}",
-                    kind=ContextCandidateKind.ARTIFACT,
-                    source_id=record.source_fingerprint,
-                    content=record.summary,
-                    retention=ContextCandidateRetention.PREFERRED,
-                    priority=99,
-                    source_order=500,
-                    truncation=ContextCandidateTruncation.FORBIDDEN,
-                    trust=ContextCandidateTrust.DERIVED,
-                    freshness=ContextCandidateFreshness.CURRENT,
-                    compacted_candidate_ids=record.source_candidate_ids,
-                )
-                trial_candidates = [*candidates, compaction_candidate]
-                trial = self.context_assembler.assemble_candidates(
-                    trial_candidates,
-                    policy=policy,
-                    renderer=self._render_candidates,
-                )
-                trial_decisions = {
-                    decision.candidate_id: decision
-                    for decision in trial.selection.candidate_decisions
-                }
-                compaction_kept = (
-                    trial.selection.assembly_status == ContextAssemblyStatus.READY
-                    and trial_decisions[compaction_candidate.candidate_id].action == "kept"
-                )
-                newly_limited = [
+                current_newly_limited = [
                     candidate.candidate_id
                     for candidate in dialog_candidates
                     if candidate.candidate_id not in compacted_set
                     and candidate.candidate_id in initially_kept_ids
-                    and trial_decisions[candidate.candidate_id].action != "kept"
+                    and current_decisions.get(candidate.candidate_id) is not None
+                    and current_decisions[candidate.candidate_id].action != "kept"
                 ]
+                return (
+                    current_candidate,
+                    current_candidates,
+                    current_trial,
+                    current_decisions,
+                    current_kept,
+                    current_newly_limited,
+                )
+
+            (
+                compaction_candidate,
+                trial_candidates,
+                trial,
+                trial_decisions,
+                compaction_kept,
+                newly_limited,
+            ) = build_trial(record)
+            generated_record = record if record.algorithm == "llm_rolling_summary_v1" else None
+            if generated_record is not None and not compaction_kept:
+                generated_fallback_reason = ContextCompactionFallbackReason.SUMMARY_NOT_FIT_ATOMICALLY
+            elif generated_record is not None and newly_limited:
+                generated_fallback_reason = ContextCompactionFallbackReason.RECENT_SUFFIX_DISPLACED
+            else:
+                generated_fallback_reason = None
+
+            def append_attempt(
+                *,
+                attempt_record: ContextCompactionRecord,
+                provider: ContextCompactionProviderStatus,
+                selection: ContextCompactionSelectionStatus,
+                fallback: ContextCompactionFallbackReason | None,
+                sink_status: Literal[
+                    "not_attempted", "persisted", "failed", "observed_only"
+                ] = "not_attempted",
+                attempt_evidence: Any = None,
+                trial_status: ContextAssemblyStatus | None = None,
+                trial_decision: Any = None,
+                displaced_ids: list[str] | None = None,
+                selection_outcome: ContextCompactionSelectionOutcome = (
+                    ContextCompactionSelectionOutcome.NOT_APPLICABLE
+                ),
+                artifact_binding: bool = False,
+                used_in_prompt: bool = False,
+                adapter_fallback_reason: str | None = None,
+                provider_usage: dict[str, Any] | None = None,
+                provider_finish_reason: str | None = None,
+            ) -> None:
+                generated = (
+                    attempt_record.algorithm == "llm_rolling_summary_v1"
+                    and provider == ContextCompactionProviderStatus.ACCEPTED
+                )
+                observed_usage = (
+                    provider_usage
+                    if provider_usage is not None
+                    else (
+                        dict(attempt_evidence.usage or {})
+                        if attempt_evidence is not None
+                        and isinstance(getattr(attempt_evidence, "usage", None), Mapping)
+                        and getattr(attempt_evidence, "usage", None) is not None
+                        else None
+                    )
+                )
+                observed_finish_reason = (
+                    provider_finish_reason
+                    if provider_finish_reason is not None
+                    else (
+                        getattr(attempt_evidence, "finish_reason", None)
+                        if attempt_evidence is not None
+                        else None
+                    )
+                )
+                if observed_finish_reason is not None:
+                    observed_finish_reason = str(observed_finish_reason).strip() or None
+                usage_complete = None
+                def nonnegative_int(key: str) -> int | None:
+                    if not isinstance(observed_usage, Mapping):
+                        return None
+                    value = observed_usage.get(key)
+                    return (
+                        value
+                        if isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value >= 0
+                        else None
+                    )
+
+                if observed_usage is not None:
+                    usage_complete = all(
+                        nonnegative_int(key) is not None
+                        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    )
+                    if attempt_evidence is not None:
+                        usage_complete = bool(
+                            getattr(attempt_evidence, "usage_observed", False)
+                            and usage_complete
+                        )
+                compaction_attempts.append(
+                    ContextCompactionAttempt(
+                        attempt_ordinal=len(compaction_attempts) + 1,
+                        source_candidate_ids=list(attempt_record.source_candidate_ids),
+                        source_fingerprint=attempt_record.source_fingerprint,
+                        source_chars=attempt_record.original_chars,
+                        algorithm=attempt_record.algorithm,
+                        provider_status=provider,
+                        selection_status=selection,
+                        fallback_reason=fallback,
+                        summary_token_limit=attempt_record.summary_token_limit,
+                        summary_token_count=attempt_record.summary_token_count,
+                        usage_complete=usage_complete,
+                        finish_reason=observed_finish_reason,
+                        provider_prompt_tokens=(
+                            nonnegative_int("prompt_tokens")
+                        ),
+                        provider_completion_tokens=(
+                            nonnegative_int("completion_tokens")
+                        ),
+                        provider_total_tokens=(
+                            nonnegative_int("total_tokens")
+                        ),
+                        adapter_fallback_reason=adapter_fallback_reason,
+                        generated_candidate_id=(
+                            f"compaction:{attempt_record.compaction_id}" if generated else None
+                        ),
+                        generated_summary_fingerprint=(
+                            "sha256:"
+                            + hashlib.sha256(attempt_record.summary.encode("utf-8")).hexdigest()
+                            if generated
+                            else None
+                        ),
+                        generated_summary_chars=(
+                            attempt_record.compacted_chars if generated else None
+                        ),
+                        trial_assembly_status=trial_status,
+                        trial_candidate_decision=trial_decision,
+                        displaced_candidate_ids=list(displaced_ids or []),
+                        selection_outcome=selection_outcome,
+                        artifact_sink_status=sink_status,
+                        artifact_binding=artifact_binding,
+                        used_in_prompt=used_in_prompt,
+                    )
+                )
+
+            if generated_record is not None and generated_fallback_reason is not None:
+                append_attempt(
+                    attempt_record=generated_record,
+                    provider=provider_status,
+                    selection=ContextCompactionSelectionStatus.NOT_SELECTED,
+                    fallback=generated_fallback_reason,
+                    attempt_evidence=provider_attempt,
+                    trial_status=trial.selection.assembly_status,
+                    trial_decision=trial_decisions.get(compaction_candidate.candidate_id),
+                    displaced_ids=newly_limited,
+                    selection_outcome=(
+                        ContextCompactionSelectionOutcome.GENERATED_RECENT_SUFFIX_DISPLACED
+                        if generated_fallback_reason
+                        == ContextCompactionFallbackReason.RECENT_SUFFIX_DISPLACED
+                        else ContextCompactionSelectionOutcome.GENERATED_FIT_REJECTED
+                    ),
+                    adapter_fallback_reason=(
+                        adapter_fallback_reason
+                        or (
+                            provider_fallback_reason.value
+                            if provider_fallback_reason is not None
+                            else None
+                        )
+                    ),
+                    provider_usage=provider_failure_usage,
+                    provider_finish_reason=provider_failure_finish_reason,
+                )
+                record = deterministic_record
+                (
+                    compaction_candidate,
+                    trial_candidates,
+                    trial,
+                    trial_decisions,
+                    compaction_kept,
+                    newly_limited,
+                ) = build_trial(record)
+            elif generated_record is None and provider_fallback_reason is not None:
+                append_attempt(
+                    attempt_record=deterministic_record.model_copy(
+                        update={
+                            "algorithm": "llm_rolling_summary_v1",
+                            "summary_token_limit": (
+                                summary_token_limit if summary_token_limit > 0 else None
+                            ),
+                        }
+                    ),
+                    provider=provider_status,
+                    selection=ContextCompactionSelectionStatus.NOT_EVALUATED,
+                    fallback=provider_fallback_reason,
+                    attempt_evidence=provider_attempt,
+                    trial_status=None,
+                    selection_outcome=ContextCompactionSelectionOutcome.NOT_APPLICABLE,
+                    adapter_fallback_reason=(
+                        adapter_fallback_reason
+                        or (
+                            provider_fallback_reason.value
+                            if provider_fallback_reason is not None
+                            else None
+                        )
+                    ),
+                    provider_usage=provider_failure_usage,
+                    provider_finish_reason=provider_failure_finish_reason,
+                )
+
             if compaction_kept and not newly_limited:
+                reference = None
+                sink_failed = False
+                sink_exception = False
                 try:
                     reference = self._context_compaction_sink(
                         record.model_dump(mode="json")
                     )
                     if reference is None:
-                        return candidates, sources, initial, []
-                    binding = ContextCompactionBinding(
-                        record=record,
-                        artifact=reference,
-                    )
+                        sink_failed = True
+                    else:
+                        binding = ContextCompactionBinding(
+                            record=record,
+                            artifact=reference,
+                            source_binding_hash=source_candidate_binding_hash(
+                                compacted_sources
+                            ),
+                        )
                 except Exception as exc:
+                    sink_failed = True
+                    sink_exception = True
                     if strict_sources:
                         raise ContextSourceError("context_compaction", exc) from exc
-                    return candidates, sources, initial, []
+                if sink_failed:
+                    if (
+                        not sink_exception
+                        and reference is None
+                        and generated_record is not None
+                        and generated_fallback_reason is None
+                    ):
+                        append_attempt(
+                            attempt_record=record,
+                            provider=provider_status,
+                            selection=ContextCompactionSelectionStatus.NOT_SELECTED,
+                            fallback=None,
+                            sink_status="observed_only",
+                            attempt_evidence=provider_attempt,
+                            trial_status=trial.selection.assembly_status,
+                            trial_decision=trial_decisions.get(compaction_candidate.candidate_id),
+                            selection_outcome=ContextCompactionSelectionOutcome.GENERATED_OBSERVED_ONLY,
+                        )
+                    else:
+                        append_attempt(
+                            attempt_record=record,
+                            provider=(
+                                provider_status
+                                if generated_record is not None and generated_fallback_reason is None
+                                else ContextCompactionProviderStatus.NOT_ATTEMPTED
+                            ),
+                            selection=ContextCompactionSelectionStatus.NOT_SELECTED,
+                            fallback=ContextCompactionFallbackReason.ARTIFACT_SINK_FAILURE,
+                            sink_status="failed",
+                            attempt_evidence=(
+                                provider_attempt
+                                if generated_record is not None and generated_fallback_reason is None
+                                else None
+                            ),
+                            trial_status=trial.selection.assembly_status,
+                            trial_decision=trial_decisions.get(compaction_candidate.candidate_id),
+                            selection_outcome=ContextCompactionSelectionOutcome.SINK_FAILED,
+                        )
+                    return (
+                        candidates,
+                        sources,
+                        self._with_compaction_attempts(initial, compaction_attempts),
+                        [],
+                    )
+                append_attempt(
+                    attempt_record=record,
+                    provider=(
+                        provider_status
+                        if generated_record is not None and generated_fallback_reason is None
+                        else ContextCompactionProviderStatus.NOT_ATTEMPTED
+                    ),
+                    selection=ContextCompactionSelectionStatus.SELECTED,
+                    fallback=(
+                        None
+                        if generated_record is not None and generated_fallback_reason is None
+                        else (
+                            provider_fallback_reason
+                            if provider_fallback_reason is not None
+                            else ContextCompactionFallbackReason.DETERMINISTIC_FALLBACK
+                        )
+                    ),
+                    sink_status="persisted",
+                    attempt_evidence=(
+                        provider_attempt
+                        if generated_record is not None and generated_fallback_reason is None
+                        else None
+                    ),
+                    trial_status=trial.selection.assembly_status,
+                    trial_decision=trial_decisions.get(compaction_candidate.candidate_id),
+                    selection_outcome=(
+                        ContextCompactionSelectionOutcome.GENERATED_SELECTED
+                        if generated_record is not None and generated_fallback_reason is None
+                        else (
+                            ContextCompactionSelectionOutcome.DETERMINISTIC_FALLBACK
+                            if provider_fallback_reason is not None
+                            else ContextCompactionSelectionOutcome.DETERMINISTIC_BOUND
+                        )
+                    ),
+                    artifact_binding=True,
+                    used_in_prompt=True,
+                )
+                trial.selection.compaction_attempts = list(compaction_attempts)
                 trial_sources = dict(sources)
                 trial_sources[compaction_candidate.candidate_id] = (
                     "context_compactions",
@@ -537,7 +859,21 @@ class MemoryContextBuilder:
                 )
                 return trial_candidates, trial_sources, trial, [binding]
             if not newly_limited:
-                break
+                append_attempt(
+                    attempt_record=record,
+                    provider=ContextCompactionProviderStatus.NOT_ATTEMPTED,
+                    selection=ContextCompactionSelectionStatus.NOT_SELECTED,
+                    fallback=ContextCompactionFallbackReason.DETERMINISTIC_FALLBACK,
+                    trial_status=trial.selection.assembly_status,
+                    trial_decision=trial_decisions.get(compaction_candidate.candidate_id),
+                    selection_outcome=ContextCompactionSelectionOutcome.DETERMINISTIC_FALLBACK,
+                )
+                return (
+                    candidates,
+                    sources,
+                    self._with_compaction_attempts(initial, compaction_attempts),
+                    [],
+                )
             compacted_ids.extend(
                 candidate.candidate_id
                 for candidate in dialog_candidates
@@ -549,7 +885,258 @@ class MemoryContextBuilder:
                 for candidate in dialog_candidates
                 if candidate.candidate_id in set(compacted_ids)
             ]
-        return candidates, sources, initial, []
+        return candidates, sources, self._with_compaction_attempts(initial, compaction_attempts), []
+
+    @staticmethod
+    def _source_fingerprint_shadow_index(
+        candidates: Sequence[ContextCandidate],
+        attempts: Sequence[ContextCompactionAttempt],
+    ) -> dict[str, str]:
+        """Expose exact source fingerprints without crossing the body boundary.
+
+        Existing compaction attempts are authoritative.  For a context that has
+        not compacted during this build, expose bounded contiguous assistant
+        dialog windows so a checkpoint-owned artifact can be compared against
+        the current source view.  The provider receives only hashes and IDs.
+        """
+
+        index = {
+            _source_candidate_ids_key(attempt.source_candidate_ids): attempt.source_fingerprint
+            for attempt in attempts
+        }
+        assistant_dialog = [
+            candidate
+            for candidate in candidates
+            if candidate.kind == ContextCandidateKind.DIALOG
+            and candidate.role == "assistant"
+        ]
+        max_window = 64
+        for start in range(len(assistant_dialog)):
+            for end in range(start + 2, min(len(assistant_dialog), start + max_window) + 1):
+                window = assistant_dialog[start:end]
+                source_ids = [candidate.candidate_id for candidate in window]
+                index.setdefault(
+                    _source_candidate_ids_key(source_ids),
+                    source_candidate_fingerprint(window),
+                )
+        return index
+
+    def _apply_compaction_reuse_shadow(
+        self,
+        *,
+        candidates: list[ContextCandidate],
+        assembly: ContextAssemblyResult,
+        request_hash: str,
+        session_turn_source_hash: str,
+        session_constraints_hash: str,
+        strict_sources: bool = False,
+    ) -> ContextAssemblyResult:
+        """Attach body-free reusable-compaction shadow admissions.
+
+        This hook is deliberately default-off and selection-only.  It receives
+        hashes and IDs, not prompt or candidate bodies, and it may only append
+        ``ContextCompactionReuseAdmission`` diagnostics.  It cannot add a
+        candidate, bind an artifact, govern source omissions, or change the
+        prompt text.
+        """
+
+        if self.compaction_reuse_shadow_provider is None:
+            return assembly
+        selected_ids = [candidate.candidate_id for candidate in assembly.selected_candidates]
+        provider_payload = {
+            "schema": "memory-context-compaction-reuse-shadow-v1",
+            "context_request_hash": request_hash,
+            "session_turn_source_hash": session_turn_source_hash,
+            "session_constraints_hash": session_constraints_hash,
+            "prompt_hash": "sha256:" + hashlib.sha256(
+                assembly.prompt_text.encode("utf-8")
+            ).hexdigest(),
+            "candidate_digests": [
+                self._candidate_shadow_digest(candidate) for candidate in candidates
+            ],
+            "selected_candidate_ids": selected_ids,
+            "assembly_status": str(
+                getattr(
+                    assembly.selection.assembly_status,
+                    "value",
+                    assembly.selection.assembly_status,
+                )
+            ),
+            "existing_compaction_attempts": len(assembly.selection.compaction_attempts),
+            "existing_compaction_reuse_admissions": len(
+                assembly.selection.compaction_reuse_admissions
+            ),
+            "source_fingerprint_by_candidate_ids": self._source_fingerprint_shadow_index(
+                candidates,
+                assembly.selection.compaction_attempts,
+            ),
+        }
+        try:
+            raw_admissions = self.compaction_reuse_shadow_provider(provider_payload)
+        except Exception as exc:
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                reason=ContextCompactionReuseShadowFailureReason.PROVIDER_EXCEPTION,
+                exception_type=type(exc).__name__,
+            )
+        if raw_admissions is None or raw_admissions == []:
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                reason=ContextCompactionReuseShadowFailureReason.PROVIDER_EMPTY,
+            )
+        if not isinstance(raw_admissions, (list, tuple)):
+            exc = TypeError("shadow provider must return a list or tuple")
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                reason=ContextCompactionReuseShadowFailureReason.INVALID_PROVIDER_RESULT,
+                exception_type=type(exc).__name__,
+            )
+        try:
+            admissions = [
+                item
+                if isinstance(item, ContextCompactionReuseAdmission)
+                else ContextCompactionReuseAdmission.model_validate(item)
+                for item in raw_admissions
+            ]
+        except Exception as exc:
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                reason=ContextCompactionReuseShadowFailureReason.INVALID_PROVIDER_RESULT,
+                exception_type=type(exc).__name__,
+            )
+        if not admissions:
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                reason=ContextCompactionReuseShadowFailureReason.PROVIDER_EMPTY,
+            )
+        try:
+            selection_payload = assembly.selection.model_dump(mode="python")
+            selection_payload["compaction_reuse_admissions"] = [
+                *selection_payload.get("compaction_reuse_admissions", []),
+                *[admission.model_dump(mode="python") for admission in admissions],
+            ]
+            selection = ContextSelectionMetadata.model_validate(selection_payload)
+            return ContextAssemblyResult(
+                prompt_text=assembly.prompt_text,
+                selected_candidates=list(assembly.selected_candidates),
+                selection=selection,
+            )
+        except Exception as exc:
+            if strict_sources:
+                raise ContextSourceError("context_compaction_reuse", exc) from exc
+            return self._append_compaction_reuse_shadow_failure(
+                assembly,
+                reason=ContextCompactionReuseShadowFailureReason.INVALID_PROVIDER_RESULT,
+                exception_type=type(exc).__name__,
+            )
+
+    @staticmethod
+    def _append_compaction_reuse_shadow_failure(
+        assembly: ContextAssemblyResult,
+        *,
+        reason: ContextCompactionReuseShadowFailureReason,
+        exception_type: str | None = None,
+    ) -> ContextAssemblyResult:
+        """Attach body-free shadow fallback evidence without changing authority."""
+
+        failure = ContextCompactionReuseShadowFailure(
+            failure_id=f"compaction-reuse-shadow:{reason.value}",
+            reason=reason,
+            exception_type=exception_type,
+            strict_sources=False,
+            fallback_applied=True,
+        )
+        selection_payload = assembly.selection.model_dump(mode="python")
+        selection_payload["compaction_reuse_shadow_failures"] = [
+            *selection_payload.get("compaction_reuse_shadow_failures", []),
+            failure.model_dump(mode="python"),
+        ]
+        return ContextAssemblyResult(
+            prompt_text=assembly.prompt_text,
+            selected_candidates=list(assembly.selected_candidates),
+            selection=ContextSelectionMetadata.model_validate(selection_payload),
+        )
+
+    @staticmethod
+    def _with_compaction_attempts(
+        assembly: ContextAssemblyResult,
+        attempts: list[ContextCompactionAttempt],
+    ) -> ContextAssemblyResult:
+        """Attach body-free builder outcomes to the existing selection value."""
+
+        if not attempts:
+            return assembly
+        assembly.selection.compaction_attempts = list(attempts)
+        return assembly
+
+    @staticmethod
+    def _candidate_shadow_digest(candidate: ContextCandidate) -> dict[str, Any]:
+        """Return a reusable-admission-safe candidate view without body text."""
+
+        return {
+            "candidate_id": candidate.candidate_id,
+            "kind": str(getattr(candidate.kind, "value", candidate.kind)),
+            "source_id": candidate.source_id,
+            "role": candidate.role,
+            "retention": str(getattr(candidate.retention, "value", candidate.retention)),
+            "trust": str(getattr(candidate.trust, "value", candidate.trust)),
+            "freshness": str(getattr(candidate.freshness, "value", candidate.freshness)),
+            "truncation": str(getattr(candidate.truncation, "value", candidate.truncation)),
+            "source_order": candidate.source_order,
+            "content_sha256": "sha256:" + hashlib.sha256(
+                candidate.content.encode("utf-8")
+            ).hexdigest(),
+            "compacted_candidate_ids": list(candidate.compacted_candidate_ids),
+        }
+
+    def _dynamic_rolling_summary_budget(
+        self,
+        *,
+        initial: ContextAssemblyResult,
+        dialog_candidates: list[ContextCandidate],
+        compacted_ids: list[str],
+        policy: ContextAssemblyPolicy,
+    ) -> int:
+        """Compute a bounded summary slot from the current prompt envelope.
+
+        The static cap remains the ceiling.  Dynamic accounting is enabled only
+        when the same exact provider tokenizer used by ContextAssembler is
+        available; otherwise the caller keeps the static-cap compatibility path.
+        """
+
+        if policy.max_prompt_tokens is None or self.token_counter is None or not self.token_counter.available:
+            return self.rolling_summary_token_limit
+        used_prompt_tokens = initial.selection.final_prompt_tokens
+        if used_prompt_tokens is None:
+            return self.rolling_summary_token_limit
+        recent_suffix = [
+            candidate
+            for candidate in dialog_candidates
+            if candidate.candidate_id not in set(compacted_ids)
+        ][-2:]
+        try:
+            recent_suffix_tokens = sum(
+                int(self.token_counter.count_text(candidate.content))
+                for candidate in recent_suffix
+            )
+            return calculate_summary_budget(
+                static_cap_tokens=self.rolling_summary_token_limit,
+                requested_prompt_tokens=int(policy.max_prompt_tokens),
+                used_prompt_tokens=int(used_prompt_tokens),
+                required_reserve_tokens=int(policy.reserved_prompt_tokens),
+                recent_suffix_reserve_tokens=recent_suffix_tokens,
+                response_schema_reserve_tokens=ROLLING_SUMMARY_RESPONSE_SCHEMA_RESERVE_TOKENS,
+            )
+        except (TypeError, ValueError):
+            # A tokenizer or metadata boundary failure must not widen the
+            # derived summary budget.  Keep the deterministic source path.
+            return 0
 
     @classmethod
     def _dialog_compaction_record(
@@ -558,17 +1145,7 @@ class MemoryContextBuilder:
     ) -> ContextCompactionRecord:
         if not candidates or any(candidate.role != "assistant" for candidate in candidates):
             raise ValueError("observation compaction requires assistant dialog sources")
-        source_payload = [
-            {"candidate_id": candidate.candidate_id, "content": candidate.content}
-            for candidate in candidates
-        ]
-        encoded = json.dumps(
-            source_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        fingerprint = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        fingerprint = source_candidate_fingerprint(candidates)
         original_chars = sum(len(candidate.content) for candidate in candidates)
         heading = f"Earlier dialog ({len(candidates)} messages):"
         primary_lines: list[str] = []
@@ -580,6 +1157,22 @@ class MemoryContextBuilder:
             r"必须|应该|需求|决定|目标|约束|命令|错误|失败|异常|结果|验证|路径|权限|预算|恢复|下一步",
             re.IGNORECASE,
         )
+        marker_pattern = re.compile(
+            r"\b[A-Za-z][A-Za-z0-9_:-]{1,64}=[A-Za-z0-9_./:-]+"
+        )
+
+        def project_signal_line(line: str) -> str:
+            markers: list[str] = []
+            for match in marker_pattern.finditer(line):
+                marker = match.group(0).rstrip(".,;:，；。")
+                if marker and marker not in markers:
+                    markers.append(marker)
+                if len(markers) >= 4:
+                    break
+            if markers:
+                return " ".join(markers)
+            return line
+
         for candidate in candidates:
             content_lines = [
                 " ".join(line.split())
@@ -588,8 +1181,14 @@ class MemoryContextBuilder:
             ]
             if not content_lines:
                 continue
-            signals = [line for line in content_lines if signal_pattern.search(line)]
-            chosen = signals or content_lines[:1]
+            signals = [
+                project_signal_line(line)
+                for line in content_lines
+                if signal_pattern.search(line) or marker_pattern.search(line)
+            ]
+            chosen = signals or [
+                project_signal_line(line) for line in content_lines[:1]
+            ]
             primary_lines.append(chosen[0])
             if len(chosen) > 1 and chosen[-1] != chosen[0]:
                 secondary_lines.append(chosen[-1])
