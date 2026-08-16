@@ -12,7 +12,9 @@ from typing import Any
 
 from core.exceptions import ContextAssemblyBudgetError, InvalidLLMResponseError, LLMProviderError, LLMTimeoutError
 from core.llm import LLMMessage, LLMRequest
-from core.reasoning import routine_tool_reasoning_policy
+from core.reasoning import reasoning_policy_for_decision
+from core.provider_tool_admission import ProviderToolAdmission, provider_tool_error
+from core.validation_command import normalize_command_argv
 from memory.context_assembly import build_context_llm_request
 from memory.session_constraints import session_constraint_prompt_text
 from core.tool_event_emitter import ToolEventEmitter
@@ -22,6 +24,7 @@ from metadata import (
     EditPlanMetadata,
     FailureMetadata,
     ResultStatus,
+    ReasoningDecisionComplexity,
     ReasoningPolicy,
     RuntimeBudgetMetadata,
     ToolCallMetadata,
@@ -173,10 +176,409 @@ class ToolEventLoopRunner:
         self.event_emitter = ToolEventEmitter(self.runtime, log_hook=self.owner._log)
         self._seen_signatures: dict[str, int] = {}
         self._local_completion_budget = RuntimeBudgetMetadata()
+        self._provider_executed = False
+        self._retry_count = 0
+        self._fallback_count = 0
+
+    def run_provider_tool_calls(
+        self,
+        task: Any,
+        admissions: list[ProviderToolAdmission] | tuple[ProviderToolAdmission, ...],
+        *,
+        round_index: int = 1,
+    ) -> ToolEventLoopRunResult:
+        """Execute admitted provider-native calls through the normal lifecycle.
+
+        Admission and execution are deliberately separate. Callers must first
+        run ``admit_provider_tool_calls``; this method never trusts provider
+        payloads or bypasses the project-owned checkpoint, permission, budget,
+        observation, and state-update hooks. The existing JSON planner loop
+        does not call this method unless an integration explicitly opts in.
+        """
+        if round_index < 1:
+            raise ValueError("round_index must be positive")
+        task_id = str(getattr(task, "id", "unknown"))
+        session_id = self.owner._session_id()
+        self._provider_executed = True
+        admissions = list(admissions)
+        if not admissions:
+            return self._finish(task_id, session_id, True, round_index, None, None, None)
+
+        last_output: ToolResultMetadata | None = None
+        request_projection = [
+            {
+                "tool_name": admission.selection.tool_name if admission.selection is not None else admission.tool_call.tool_name,
+                "input_metadata": (
+                    admission.selection.input_metadata.to_params()
+                    if admission.selection is not None
+                    else admission.tool_call.input_metadata.to_params()
+                ),
+            }
+            for admission in admissions
+        ]
+
+        for index, admission in enumerate(admissions):
+            tool_call, tool_context = self._prepare_provider_tool_call(admission)
+            input_metadata = tool_call.input_metadata
+            self.tool_contexts.append(tool_context)
+            self.tool_invocations.append(tool_call)
+            self._append_event(
+                task_id,
+                tool_call,
+                "pending",
+                "pending",
+                input_metadata=input_metadata,
+                tool_context=tool_context,
+                round_index=round_index,
+                provider_executed=True,
+            )
+
+            if admission.status != "admitted" or admission.selection is None:
+                tool_error = admission.tool_error or provider_tool_error(
+                    tool_call,
+                    error_type="ProviderToolBlocked",
+                    error_message="Provider tool call was blocked before execution.",
+                    recoverable=True,
+                    suggested_recovery="Retry with a tool call that satisfies the project contract and policy.",
+                )
+                tool_error = self._providerize_tool_error(tool_error, tool_call)
+                self._record_tool_error(task_id, tool_call, tool_error, round_index)
+                self._append_tool_result(tool_call, input_metadata, False, tool_error.error_message)
+                final_error = tool_error.failure or FailureMetadata(
+                    error_type=tool_error.error_type,
+                    error_message=tool_error.error_message,
+                    recoverable=tool_error.recoverable,
+                    retry_recommended=tool_error.recoverable,
+                )
+                return self._finish(
+                    task_id,
+                    session_id,
+                    False,
+                    round_index,
+                    last_output,
+                    final_error,
+                    tool_error.error_message,
+                )
+
+            selection = admission.selection
+            selection = selection.model_copy(update={"input_metadata": input_metadata})
+
+            protocol_error = self._validate_and_normalize_call(tool_call)
+            if protocol_error is not None:
+                protocol_error = self._providerize_tool_error(protocol_error, tool_call)
+                self._record_tool_error(task_id, tool_call, protocol_error, round_index)
+                self._append_tool_result(tool_call, input_metadata, False, protocol_error.error_message)
+                final_error = protocol_error.failure
+                return self._finish(
+                    task_id,
+                    session_id,
+                    False,
+                    round_index,
+                    last_output,
+                    final_error,
+                    protocol_error.error_message,
+                )
+
+            self._append_event(
+                task_id,
+                tool_call,
+                "running",
+                "running",
+                input_metadata=input_metadata,
+                tool_context=tool_context,
+                round_index=round_index,
+                provider_executed=True,
+            )
+            input_payload = input_metadata.to_params()
+            self._owner_show_tool_running(task, selection, input_payload, index, len(admissions))
+            controller = getattr(self.runtime, "runtime_controller", None)
+            guard_error = self._guard_project_state_change_if_needed(task, tool_call, selection)
+            if guard_error is not None:
+                guard_error = self._providerize_tool_error(guard_error, tool_call)
+                self._record_tool_error(task_id, tool_call, guard_error, round_index)
+                self._append_tool_result(tool_call, input_metadata, False, guard_error.error_message)
+                return self._finish(
+                    task_id,
+                    session_id,
+                    False,
+                    round_index,
+                    last_output,
+                    guard_error.failure,
+                    guard_error.error_message,
+                )
+
+            self._owner_log_tool_start(task, selection.tool_name, input_payload)
+            diagnostics = getattr(self.runtime, "runtime_diagnostics_hooks", None)
+            if diagnostics:
+                diagnostics.on_tool_started(tool_call=tool_call)
+            set_pending_verification = getattr(controller, "set_pending_verification", None)
+            if callable(set_pending_verification) and selection.tool_name in FILE_MUTATION_TOOLS:
+                set_pending_verification(self._pending_verification_plan(request_projection, index, selection))
+
+            replay_tool_result = getattr(controller, "replay_tool_result", None)
+            exec_result = replay_tool_result(tool_call, selection) if callable(replay_tool_result) else None
+            prepare_tool_call = getattr(controller, "prepare_tool_call", None)
+            if exec_result is None and callable(prepare_tool_call) and not prepare_tool_call(tool_call, selection):
+                checkpoint_error = self._protocol_error(
+                    session_id,
+                    task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "CheckpointPrepareFailed",
+                    "Mutation was not executed because its prepared checkpoint was not durable.",
+                    input_metadata,
+                    tool_context,
+                    suggested_recovery="Restore checkpoint storage before retrying the mutation.",
+                    provider_call_id=tool_call.provider_call_id,
+                )
+                checkpoint_error = self._providerize_tool_error(checkpoint_error, tool_call)
+                self._record_tool_error(task_id, tool_call, checkpoint_error, round_index)
+                self._append_tool_result(tool_call, input_metadata, False, checkpoint_error.error_message)
+                return self._finish(
+                    task_id,
+                    session_id,
+                    False,
+                    round_index,
+                    last_output,
+                    checkpoint_error.failure,
+                    checkpoint_error.error_message,
+                )
+            if exec_result is None:
+                exec_result = self.runtime.tool_executor.execute_single(selection, context=None)
+            observe_tool_result = getattr(controller, "observe_tool_result", None)
+            if (
+                not hasattr(exec_result, "recovery_already_applied")
+                and callable(observe_tool_result)
+                and not observe_tool_result(tool_call, selection, exec_result)
+            ):
+                checkpoint_error = self._protocol_error(
+                    session_id,
+                    task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "CheckpointObservationFailed",
+                    "Tool returned, but its result could not be durably recorded before state application.",
+                    input_metadata,
+                    tool_context,
+                    suggested_recovery="Reconcile the indeterminate side effect before continuing.",
+                    provider_call_id=tool_call.provider_call_id,
+                )
+                checkpoint_error = self._providerize_tool_error(checkpoint_error, tool_call)
+                self._record_tool_error(task_id, tool_call, checkpoint_error, round_index)
+                self._append_tool_result(tool_call, input_metadata, False, checkpoint_error.error_message)
+                return self._finish(
+                    task_id,
+                    session_id,
+                    False,
+                    round_index,
+                    last_output,
+                    checkpoint_error.failure,
+                    checkpoint_error.error_message,
+                )
+            if not bool(getattr(exec_result, "recovery_already_applied", False)):
+                self._update_runtime_state(selection, exec_result)
+
+            self._owner_show_tool_result(selection.tool_name, exec_result)
+            log_output = self._owner_summarize_output(getattr(exec_result, "output_metadata", None))
+            self._owner_log_tool_complete(task, selection.tool_name, exec_result, log_output)
+            if bool(getattr(exec_result, "success", False)):
+                output_metadata = exec_result.output_metadata
+                last_output = output_metadata
+                self._append_event(
+                    task_id,
+                    tool_call,
+                    "completed",
+                    "completed",
+                    input_metadata=input_metadata,
+                    output_metadata=output_metadata,
+                    tool_context=tool_context,
+                    round_index=round_index,
+                    provider_executed=True,
+                )
+                self._append_tool_result(tool_call, input_metadata, True, None, output_metadata)
+                if diagnostics:
+                    diagnostics.on_tool_completed(
+                        tool_execution=ToolExecutionEnvelopeMetadata(
+                            tool_name=selection.tool_name,
+                            step_id=tool_call.step_id,
+                            status=ResultStatus.SUCCESS,
+                            success=True,
+                            input_metadata=input_metadata,
+                            output_metadata=output_metadata,
+                            duration_seconds=0.0,
+                            timeout_override=selection.timeout_override,
+                            attempts_used=1,
+                            call_id=tool_call.call_id,
+                            tool_context=tool_context,
+                        ),
+                        task_id=task_id,
+                        session_id=session_id,
+                    )
+                verification_error = self._verify_state_change_if_needed(
+                    task=task,
+                    task_id=task_id,
+                    session_id=session_id,
+                    source_selection=selection,
+                    round_index=round_index,
+                    last_output=last_output,
+                    defer_provider_validation=True,
+                )
+                if verification_error is not None:
+                    return self._finish(
+                        task_id,
+                        session_id,
+                        False,
+                        round_index,
+                        last_output,
+                        verification_error,
+                        verification_error.error_message,
+                    )
+                continue
+
+            failure = exec_result.error or FailureMetadata(
+                error_type="ToolExecutionFailed",
+                error_message=f"{selection.tool_name} failed",
+            )
+            if not isinstance(failure, FailureMetadata):
+                failure = FailureMetadata(
+                    error_type=str(getattr(failure, "error_type", "") or type(failure).__name__),
+                    error_message=str(getattr(failure, "error_message", failure)),
+                    recoverable=bool(getattr(failure, "recoverable", False)),
+                    retry_recommended=bool(getattr(failure, "retry_recommended", False)),
+                )
+            failure = self._enrich_execution_failure(
+                failure,
+                tool_call=tool_call,
+                input_metadata=input_metadata,
+                suggested_recovery=self._suggest_recovery(selection.tool_name, failure.error_message),
+            )
+            tool_error = ToolErrorMetadata(
+                session_id=session_id,
+                task_id=task_id,
+                step_id=tool_call.step_id,
+                call_id=tool_call.call_id,
+                provider_call_id=tool_call.provider_call_id,
+                tool_name=selection.tool_name,
+                error_type=failure.error_type,
+                error_message=failure.error_message,
+                recoverable=bool(failure.recoverable),
+                suggested_recovery=self._suggest_recovery(selection.tool_name, failure.error_message),
+                failure=failure,
+                input_metadata=input_metadata,
+                tool_context=tool_context,
+                provider_executed=True,
+                round_index=round_index,
+                event_index=self._next_event_index(),
+            )
+            self._record_tool_error(task_id, tool_call, tool_error, round_index)
+            self._append_tool_result(tool_call, input_metadata, False, failure.error_message)
+            return self._finish(
+                task_id,
+                session_id,
+                False,
+                round_index,
+                last_output,
+                failure,
+                failure.error_message,
+            )
+
+        return self._finish(task_id, session_id, True, round_index, last_output, None, None)
+
+    def _prepare_provider_tool_call(
+        self,
+        admission: ProviderToolAdmission,
+    ) -> tuple[ToolCallMetadata, ToolContextMetadata]:
+        """Attach project-derived context without changing provider identity."""
+        tool_call = admission.tool_call
+        input_metadata = tool_call.input_metadata
+        apply_project_context = getattr(self.runtime, "_apply_project_command_context", None)
+        if callable(apply_project_context):
+            input_metadata = apply_project_context(tool_call.tool_name, input_metadata)
+            tool_call = tool_call.model_copy(update={"input_metadata": input_metadata})
+        tool_context = self.event_emitter.build_context(
+            task_id=tool_call.task_id,
+            session_id=tool_call.session_id,
+            step_id=tool_call.step_id,
+            call_id=tool_call.call_id,
+            tool_name=tool_call.tool_name,
+            input_metadata=input_metadata,
+        )
+        tool_call = tool_call.model_copy(
+            update={
+                "tool_context": tool_context,
+                "provider_executed": True,
+                "event_index": self._next_event_index(),
+            }
+        )
+        return tool_call, tool_context
+
+    def _providerize_tool_error(
+        self,
+        tool_error: ToolErrorMetadata,
+        tool_call: ToolCallMetadata,
+    ) -> ToolErrorMetadata:
+        provider_call_id = tool_call.provider_call_id or tool_error.provider_call_id
+        if not provider_call_id:
+            return tool_error
+        failure = tool_error.failure
+        if failure is not None:
+            failure = failure.model_copy(
+                update={
+                    "details": {
+                        **(failure.details or {}),
+                        "call_id": tool_call.call_id,
+                        "provider_call_id": provider_call_id,
+                    }
+                }
+            )
+        return tool_error.model_copy(
+            update={
+                "provider_call_id": provider_call_id,
+                "provider_executed": True,
+                "tool_context": tool_call.tool_context,
+                "input_metadata": tool_call.input_metadata,
+                "failure": failure,
+            }
+        )
+
+    def _owner_show_tool_running(
+        self,
+        task: Any,
+        selection: ToolSelection,
+        input_payload: dict[str, Any],
+        index: int,
+        total: int,
+    ) -> None:
+        hook = getattr(self.owner, "_show_tool_running", None)
+        if callable(hook):
+            hook(task, selection.tool_name, input_payload, "provider-native tool call", index, total)
+
+    def _owner_log_tool_start(self, task: Any, tool_name: str, input_payload: dict[str, Any]) -> None:
+        hook = getattr(self.owner, "_log_tool_start", None)
+        if callable(hook):
+            hook(task, tool_name, input_payload)
+
+    def _owner_show_tool_result(self, tool_name: str, exec_result: Any) -> None:
+        hook = getattr(self.owner, "_show_tool_result", None)
+        if callable(hook):
+            hook(tool_name, exec_result)
+
+    def _owner_summarize_output(self, output_metadata: Any) -> Any:
+        hook = getattr(self.owner, "_summarize_metadata_output", None)
+        return hook(output_metadata) if callable(hook) else output_metadata
+
+    def _owner_log_tool_complete(self, task: Any, tool_name: str, exec_result: Any, log_output: Any) -> None:
+        hook = getattr(self.owner, "_log_tool_complete", None)
+        if callable(hook):
+            hook(task, tool_name, exec_result, log_output)
 
     def run(self, task: Any, initial_prompt: str) -> ToolEventLoopRunResult:
         task_id = str(getattr(task, "id", "unknown"))
         session_id = self.owner._session_id()
+        self._retry_count = 0
+        self._fallback_count = 0
         prompt = initial_prompt
         last_output: ToolResultMetadata | None = None
         last_code_output: ToolResultMetadata | None = None
@@ -205,6 +607,7 @@ class ToolEventLoopRunner:
                             recoverable=False,
                         )
                         return self._finish(task_id, session_id, False, rounds_used, last_output, final_error, final_error.error_message)
+                    reasoning_complexity = self._reasoning_complexity_for_task(task)
                     request = build_context_llm_request(
                         self.runtime.llm_client,
                         purpose=ContextRequestPurpose.TOOL_EVENT_DECISION,
@@ -221,7 +624,8 @@ class ToolEventLoopRunner:
                                 "static_ceiling": budget.tool_event_completion_ceiling,
                                 "dynamic_limit": completion_limit,
                                 "total_remaining": budget.tool_event_completion_tokens_remaining,
-                            }
+                            },
+                            "reasoning_complexity": reasoning_complexity.value,
                         },
                         reasoning_policy=self._reasoning_policy_for_task(task),
                     )
@@ -246,6 +650,8 @@ class ToolEventLoopRunner:
                     self._reconcile_completion_failure(budget, exc, reserved=completion_limit)
                     fallback = getattr(self.owner, "_fallback_tool_requests", None)
                     tool_requests = fallback(reason=str(exc)) if callable(fallback) else []
+                    if tool_requests:
+                        self._fallback_count += 1
                     if not tool_requests:
                         raise
             round_had_recoverable_error = False
@@ -557,6 +963,7 @@ class ToolEventLoopRunner:
                     retry_count = direct_retry_counts.get(signature, 0)
                     if retry_count < 1:
                         direct_retry_counts[signature] = retry_count + 1
+                        self._retry_count += 1
                         pending_retry_requests = [
                             dict(request)
                             for request in tool_requests[index:]
@@ -576,6 +983,8 @@ class ToolEventLoopRunner:
                         )
                     elif tool_name == "code_generator" and not self._uses_local_code_fallback(input_metadata):
                         pending_retry_requests = self._local_code_fallback_requests(tool_requests, index)
+                        if pending_retry_requests:
+                            self._fallback_count += 1
                         self.owner._log(
                             "tool_loop_local_fallback_scheduled",
                             output_summary={
@@ -621,10 +1030,18 @@ class ToolEventLoopRunner:
         policy_for_task = getattr(self.owner, "_reasoning_policy_for_task", None)
         if callable(policy_for_task):
             return policy_for_task(task)
-        return routine_tool_reasoning_policy(
+        return reasoning_policy_for_decision(
             getattr(self.runtime.llm_client, "settings", None),
-            routine=False,
+            ReasoningDecisionComplexity.STANDARD,
         )
+
+    def _reasoning_complexity_for_task(self, task: Any) -> ReasoningDecisionComplexity:
+        complexity_for_task = getattr(self.owner, "_reasoning_complexity_for_task", None)
+        if callable(complexity_for_task):
+            complexity = complexity_for_task(task)
+            if isinstance(complexity, ReasoningDecisionComplexity):
+                return complexity
+        return ReasoningDecisionComplexity.STANDARD
 
     def _reconcile_completion_usage(self, budget: RuntimeBudgetMetadata, response: Any, *, reserved: int) -> None:
         provider_details = getattr(response, "provider_details", None)
@@ -889,6 +1306,9 @@ class ToolEventLoopRunner:
     def _guard_project_state_change_if_needed(self, task: Any, tool_call: ToolCallMetadata, selection: ToolSelection) -> ToolErrorMetadata | None:
         controller = getattr(self.runtime, "runtime_controller", None)
         state = getattr(controller, "state", None)
+        contract_error = self._provider_task_contract_error(task, tool_call, selection)
+        if contract_error is not None:
+            return contract_error
         session_constraint_check = getattr(controller, "session_constraint_violation", None)
         if state is not None and callable(session_constraint_check):
             command_is_mutation = bool(file_mutation_targets(selection)) or (
@@ -1018,6 +1438,158 @@ class ToolEventLoopRunner:
             suggested_recovery="Create a scoped EditPlanMetadata with selected target files, evidence, allowed changes, and verification.",
             details=decision.to_json_dict(),
         )
+
+    def _provider_task_contract_error(
+        self,
+        task: Any,
+        tool_call: ToolCallMetadata,
+        selection: ToolSelection,
+    ) -> ToolErrorMetadata | None:
+        """Recheck provider task scope after admission and context binding.
+
+        Admission is the first boundary; this second check protects against a
+        transformed input (environment binding, relative-path resolution, or a
+        synthesized selection) crossing the task contract before execution.
+        Tasks without explicit scopes retain the legacy planner behavior.
+        """
+
+        task_reads = [str(path) for path in getattr(task, "read_files", []) or [] if str(path).strip()]
+        task_writes = [str(path) for path in getattr(task, "write_files", []) or [] if str(path).strip()]
+        project_path = str(
+            getattr(selection.input_metadata, "project_path", None)
+            or getattr(tool_call.tool_context, "project_path", None)
+            or ""
+        ).strip()
+        if not project_path and (task_writes or task_reads):
+            first_write = Path((task_writes or task_reads)[0]).expanduser()
+            if first_write.is_absolute():
+                project_path = str(first_write.resolve(strict=False).parent)
+
+        def canonical(raw: Any) -> str:
+            path = Path(str(raw or "")).expanduser()
+            if not path.is_absolute() and project_path:
+                path = Path(project_path) / path
+            return str(path.resolve(strict=False))
+
+        def scoped_paths(fields: tuple[str, ...]) -> list[str]:
+            params = selection.input_metadata.to_params()
+            values: list[str] = []
+            for field in fields:
+                value = params.get(field)
+                if value:
+                    values.append(canonical(value))
+            values.extend(canonical(value) for value in params.get("file_paths") or [] if value)
+            return values
+
+        if task_reads and selection.tool_name == "file_reader":
+            allowed = {canonical(path) for path in task_reads}
+            requested = scoped_paths(("file_path", "directory_path"))
+            if requested and not set(requested).issubset(allowed):
+                return self._protocol_error(
+                    tool_call.session_id,
+                    tool_call.task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "ProviderTaskReadScopeViolation",
+                    "Provider file read crossed the task read_files contract.",
+                    selection.input_metadata,
+                    tool_call.tool_context,
+                    suggested_recovery="Use only a path from Task.read_files.",
+                    details={"requested": requested, "allowed": sorted(allowed)},
+                )
+
+        if task_writes and selection.tool_name in FILE_MUTATION_TOOLS:
+            allowed = {canonical(path) for path in task_writes}
+            requested = [canonical(path) for path in file_mutation_targets(selection)]
+            if requested and not set(requested).issubset(allowed):
+                return self._protocol_error(
+                    tool_call.session_id,
+                    tool_call.task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "ProviderTaskWriteScopeViolation",
+                    "Provider file mutation crossed the task write_files contract.",
+                    selection.input_metadata,
+                    tool_call.tool_context,
+                    suggested_recovery="Use only a path from Task.write_files.",
+                    details={"requested": requested, "allowed": sorted(allowed)},
+                )
+
+        expected_command = str(getattr(task, "validation_command", "") or "").strip()
+        if expected_command and selection.tool_name == "command_executor":
+            controller = getattr(self.runtime, "runtime_controller", None)
+            state = getattr(controller, "state", None)
+            task_requires_write_order = bool(getattr(task, "write_files", []) or [])
+            if task_requires_write_order and state is not None:
+                phase = _phase_value(getattr(state, "phase", ""))
+                verification_status = str(getattr(state, "verification_status", "") or "")
+                if phase != AgentPhase.VERIFY.value and verification_status != "required":
+                    return self._protocol_error(
+                        tool_call.session_id,
+                        tool_call.task_id,
+                        tool_call.step_id,
+                        tool_call.call_id,
+                        selection.tool_name,
+                        "ProviderValidationOrderViolation",
+                        "Validation is admitted only after the requested mutation enters verification.",
+                        selection.input_metadata,
+                        tool_call.tool_context,
+                        suggested_recovery="Complete the scoped mutation first, then run validation once.",
+                        details={"phase": phase, "verification_status": verification_status},
+                    )
+            requested_command = str(
+                selection.input_metadata.requested_command
+                or selection.input_metadata.command
+                or ""
+            ).strip()
+            actual_argv = normalize_command_argv(requested_command)
+            expected_argv = normalize_command_argv(expected_command)
+            if actual_argv != expected_argv:
+                return self._protocol_error(
+                    tool_call.session_id,
+                    tool_call.task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "ProviderValidationCommandViolation",
+                    "Provider command crossed the task validation_command contract.",
+                    selection.input_metadata,
+                    tool_call.tool_context,
+                    suggested_recovery="Run the exact Task.validation_command once.",
+                    details={"requested_command": requested_command, "expected_command": expected_command},
+                )
+            mode = str(selection.input_metadata.mode or "").strip().lower()
+            if mode and mode not in {"automatic", "execute", "run", "exec"}:
+                return self._protocol_error(
+                    tool_call.session_id,
+                    tool_call.task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "ProviderValidationModeViolation",
+                    "Provider validation command must use automatic execution mode.",
+                    selection.input_metadata,
+                    tool_call.tool_context,
+                    suggested_recovery="Use automatic mode for the exact validation command.",
+                )
+            requested_cwd = str(selection.input_metadata.cwd or "").strip()
+            if project_path and requested_cwd and canonical(requested_cwd) != canonical(project_path):
+                return self._protocol_error(
+                    tool_call.session_id,
+                    tool_call.task_id,
+                    tool_call.step_id,
+                    tool_call.call_id,
+                    selection.tool_name,
+                    "ProviderValidationCwdViolation",
+                    "Provider validation command cwd crossed the project boundary.",
+                    selection.input_metadata,
+                    tool_call.tool_context,
+                    suggested_recovery="Run validation from the bound project root.",
+                    details={"requested_cwd": requested_cwd, "project_path": project_path},
+                )
+        return None
 
     def _requires_edit_guard(self, selection: ToolSelection) -> bool:
         if selection.tool_name in FILE_MUTATION_TOOLS:
@@ -1168,6 +1740,7 @@ class ToolEventLoopRunner:
         source_selection: ToolSelection,
         round_index: int,
         last_output: ToolResultMetadata | None,
+        defer_provider_validation: bool = False,
     ) -> FailureMetadata | None:
         if source_selection.tool_name not in {"file_writer", "file_patch_writer", "file_delete_tool", "command_executor"}:
             return None
@@ -1175,6 +1748,14 @@ class ToolEventLoopRunner:
         state = getattr(controller, "state", None)
         verifier = getattr(controller, "verifier", None)
         if state is None or verifier is None:
+            return None
+        # Provider-native mutation tasks carry their exact validation command
+        # as the next provider tool call.  Do not run RuntimeVerifier's
+        # generic fallback (for example ``<entrypoint> --help``) between the
+        # write and that provider call; doing so both substitutes the command
+        # and moves the runtime past the VERIFY boundary.  The provider's
+        # typed command is admitted and executed in the next round instead.
+        if defer_provider_validation and str(getattr(task, "validation_command", "") or "").strip():
             return None
         if getattr(state, "verification_status", "") != "required":
             return None
@@ -1388,6 +1969,7 @@ class ToolEventLoopRunner:
         *,
         suggested_recovery: str = "",
         details: dict[str, Any] | None = None,
+        provider_call_id: str | None = None,
     ) -> ToolErrorMetadata:
         suggested = suggested_recovery or self._suggest_recovery(tool_name, message)
         enriched_details = {
@@ -1397,6 +1979,8 @@ class ToolEventLoopRunner:
             "input_summary": self._input_summary(input_metadata),
         }
         enriched_details.update(details or {})
+        if provider_call_id:
+            enriched_details["provider_call_id"] = provider_call_id
         failure = FailureMetadata(
             error_type=error_type,
             error_message=message,
@@ -1410,6 +1994,7 @@ class ToolEventLoopRunner:
             task_id=task_id,
             step_id=step_id,
             call_id=call_id,
+            provider_call_id=provider_call_id,
             tool_name=tool_name or "unknown",
             error_type=error_type,
             error_message=message,
@@ -1435,6 +2020,7 @@ class ToolEventLoopRunner:
             output_summary={
                 "task_id": task_id,
                 "call_id": tool_call.call_id,
+                "provider_call_id": tool_call.provider_call_id,
                 "tool": tool_call.tool_name,
                 "error_type": tool_error.error_type,
                 "recoverable": tool_error.recoverable,
@@ -1474,7 +2060,10 @@ class ToolEventLoopRunner:
         tool_error: ToolErrorMetadata | None = None,
         recoverable: bool = True,
         round_index: int = 1,
+        provider_executed: bool | None = None,
     ) -> None:
+        if provider_executed is None:
+            provider_executed = bool(tool_call.provider_executed)
         event = self.event_emitter.emit(
             task_id=task_id,
             tool_call=tool_call,
@@ -1486,6 +2075,7 @@ class ToolEventLoopRunner:
             tool_error=tool_error,
             failure=failure,
             recoverable=recoverable,
+            provider_executed=provider_executed,
             round_index=round_index,
         )
         self.events.append(event)
@@ -1505,6 +2095,8 @@ class ToolEventLoopRunner:
         self.tool_results.append(
             {
                 "call_id": tool_call.call_id,
+                "provider_call_id": tool_call.provider_call_id,
+                "provider_executed": bool(tool_call.provider_executed),
                 "step_id": tool_call.step_id,
                 "tool": tool_call.tool_name,
                 "input_metadata": input_metadata.to_json_dict(),
@@ -1537,6 +2129,9 @@ class ToolEventLoopRunner:
             tool_invocations=self.tool_invocations,
             recoverable_errors=self.recoverable_errors,
             tool_contexts=self.tool_contexts,
+            retry_count=self._retry_count,
+            fallback_count=self._fallback_count,
+            provider_executed=self._provider_executed,
             final_output=last_output,
             final_error=final_error,
         )
@@ -1566,6 +2161,7 @@ class ToolEventLoopRunner:
             {
                 "tool_name": error.tool_name,
                 "call_id": error.call_id,
+                "provider_call_id": error.provider_call_id,
                 "error_type": error.error_type,
                 "error_message": error.error_message,
                 "suggested_recovery": error.suggested_recovery,
@@ -1815,6 +2411,8 @@ class ToolEventLoopRunner:
                 "suggested_recovery": suggested_recovery,
             }
         )
+        if tool_call.provider_call_id:
+            details["provider_call_id"] = tool_call.provider_call_id
         message = failure.error_message
         error_type = failure.error_type
         if tool_call.tool_name == "file_reader" and "not a file" in message.lower():
@@ -1877,6 +2475,7 @@ class ToolEventLoopRunner:
         return {
             "tool_name": error.tool_name,
             "call_id": error.call_id,
+            "provider_call_id": error.provider_call_id,
             "error_type": error.error_type,
             "error_message": error.error_message,
             "suggested_recovery": error.suggested_recovery,

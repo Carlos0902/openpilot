@@ -8,6 +8,7 @@ from core.provider_tool_admission import (
     admit_provider_tool_calls,
     provider_tool_error,
 )
+from core.provider_tool_roundtrip import build_provider_tool_definitions
 from core.tool_contracts import PermissionLevel, ToolCapability, ToolDefinition
 from metadata import RuntimeBudgetMetadata, ToolCallMetadata, ToolContractMetadata, ToolInputMetadata
 from tools.tool_registry import ToolRegistry
@@ -50,6 +51,26 @@ def _patch_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(FILE_PATCH_WRITER_DEFINITION, file_patch_writer_executor)
     return registry
+
+
+def test_file_patch_writer_provider_schema_exposes_conditional_modify_fields() -> None:
+    definition = build_provider_tool_definitions(_patch_registry(), ["file_patch_writer"])[0]
+    parameters = definition.function.parameters
+
+    assert {"file_path", "operation_kind", "symbol_name", "replacement_text", "patch"}.issubset(
+        parameters["properties"]
+    )
+    assert parameters["required"] == ["file_path"]
+    modify_condition = next(
+        condition
+        for condition in parameters["allOf"]
+        if condition["if"]["properties"]["operation_kind"] == {"const": "modify_symbol"}
+    )
+    assert modify_condition["then"]["required"] == ["symbol_name"]
+    assert modify_condition["then"]["anyOf"] == [
+        {"required": ["replacement_text"]},
+        {"required": ["patch"]},
+    ]
 
 
 def test_file_patch_writer_admission_enforces_conditional_modify_fields(tmp_path) -> None:

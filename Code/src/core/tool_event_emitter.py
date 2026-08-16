@@ -94,6 +94,8 @@ class ToolEventEmitter:
         reason: str = "",
         recoverable: bool = True,
         round_index: int = 1,
+        provider_call_id: str | None = None,
+        provider_executed: bool = False,
     ) -> ToolCallMetadata:
         return ToolCallMetadata(
             session_id=session_id,
@@ -107,6 +109,8 @@ class ToolEventEmitter:
             reason=reason,
             recoverable=recoverable,
             round_index=round_index,
+            provider_call_id=provider_call_id,
+            provider_executed=provider_executed,
             event_index=self.next_event_index(),
         )
 
@@ -124,6 +128,7 @@ class ToolEventEmitter:
         tool_error: ToolErrorMetadata | None = None,
         recoverable: bool = True,
         round_index: int = 1,
+        provider_executed: bool = False,
     ) -> ToolEventMetadata:
         event = ToolEventMetadata(
             session_id=tool_call.session_id,
@@ -140,6 +145,7 @@ class ToolEventEmitter:
             tool_error=tool_error,
             failure=failure,
             recoverable=recoverable,
+            provider_executed=provider_executed,
             round_index=round_index,
             event_index=self.next_event_index(),
         )

@@ -9,7 +9,7 @@ import textwrap
 import uuid
 from pathlib import Path
 
-from core.llm import LLMMessage
+from core.llm import LLMMessage, render_llm_message
 from core.exceptions import ContextAssemblyBudgetError
 from core.reasoning import routine_tool_reasoning_policy
 from autonomous_iteration.enhancement_completion_budget import (
@@ -291,7 +291,7 @@ def _call_llm(
     if hasattr(llm_client, "generate"):
         return str(llm_client.generate("\n\n".join(message.content for message in request.messages)))
     if hasattr(llm_client, "chat"):
-        return str(llm_client.chat([message.model_dump() for message in request.messages]))
+        return str(llm_client.chat([render_llm_message(message) for message in request.messages]))
     return str(llm_client("\n\n".join(message.content for message in request.messages)))
 
 

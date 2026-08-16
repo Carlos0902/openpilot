@@ -269,6 +269,26 @@ def test_runtime_session_standard_returns_result(tmp_path) -> None:
     assert runtime.task_decomposer.decompose_called is True
 
 
+def test_runtime_session_task_graph_preserves_support_context_files() -> None:
+    task = Task(
+        id="task-support-context",
+        description="Modify calculator",
+        kind="implement",
+        read_files=["calculator.py"],
+        support_context_files=["tests/test_calculator.py"],
+        write_files=["calculator.py"],
+        validation_command="python -m pytest -q tests/test_calculator.py",
+    )
+
+    node = _RuntimeSessionExecutor._task_node(task)
+    restored = _RuntimeSessionExecutor._task_from_node(node)
+
+    assert node.support_context_files == ["tests/test_calculator.py"]
+    assert restored.support_context_files == ["tests/test_calculator.py"]
+    assert restored.read_files == ["calculator.py"]
+    assert restored.write_files == ["calculator.py"]
+
+
 def test_runtime_session_enhanced_returns_result(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("autonomous_iteration.runtime_controller.time.sleep", lambda seconds: None)
     runtime = FakeRuntime(tmp_path)
