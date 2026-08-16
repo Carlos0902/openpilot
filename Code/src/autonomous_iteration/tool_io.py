@@ -27,7 +27,7 @@ class ExecutionToolIO:
         for key, value in params.items():
             if key.startswith("_"):
                 continue
-            if key in {"content", "code", "task_description"} and isinstance(value, str):
+            if key in {"content", "code", "generated_unit", "task_description"} and isinstance(value, str):
                 sanitized[key] = f"<{len(value)} chars>"
                 sanitized[f"{key}_length"] = len(value)
                 sanitized[f"{key}_preview"] = value[:200]

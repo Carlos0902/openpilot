@@ -21,7 +21,7 @@ from autonomous_iteration.planning_surface import (
 from autonomous_iteration.runtime_controller import EditGuard, FileSelector, RuntimeVerifier, StateUpdater, ToolRouter
 from autonomous_iteration.tool_io import ExecutionToolIO
 from core.exceptions import ErrorCategory, InvalidLLMResponseError, LLMProviderError
-from metadata import AgentPhase, CodeArtifactMetadata, DecisionNeedMetadata, FileArtifactMetadata, ReasoningMode, ResolutionPlanMetadata, ResultStatus, RuntimeStateMetadata, TaskResultMetadata, TextArtifactMetadata, ToolErrorMetadata, ToolInputMetadata, ToolResultMetadata
+from metadata import AgentPhase, CodeArtifactMetadata, DecisionNeedMetadata, FileArtifactMetadata, ReasoningDecisionComplexity, ReasoningMode, ResolutionPlanMetadata, ResultStatus, RuntimeStateMetadata, TaskResultMetadata, TextArtifactMetadata, ToolErrorMetadata, ToolInputMetadata, ToolResultMetadata
 from tools.bug_fix_tool import BUG_FIX_TOOL_DEFINITION
 from tools.command_tool import COMMAND_EXECUTOR_DEFINITION
 from tools.code_generator import CODE_GENERATOR_DEFINITION
@@ -1236,6 +1236,8 @@ def test_tool_event_loop_retries_recoverable_code_generator_timeout(tmp_path) ->
     loop = result.result_metadata.result.attributes["tool_loop"]
     assert loop["recoverable_errors"][0]["error_type"] == "LLMTimeoutError"
     assert "bounded request" in loop["recoverable_errors"][0]["suggested_recovery"]
+    assert loop["retry_count"] == 1
+    assert loop["fallback_count"] == 0
     entries = [
         json.loads(line)
         for line in (tmp_path / "tool_planning.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1277,6 +1279,9 @@ def test_tool_event_loop_uses_local_code_fallback_after_repeated_provider_timeou
     writer_selection = runtime.tool_executor.selections[3]
     assert writer_selection.input_metadata.content == "print('local fallback')"
     assert len(runtime.llm_client.requests) == 1
+    loop = result.result_metadata.result.attributes["tool_loop"]
+    assert loop["retry_count"] == 1
+    assert loop["fallback_count"] == 1
     entries = [
         json.loads(line)
         for line in (tmp_path / "tool_planning.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1587,6 +1592,7 @@ def test_general_task_keeps_provider_reasoning_default(tmp_path) -> None:
         runtime.llm_client.requests[0].reasoning_policy.mode
         == ReasoningMode.PROVIDER_DEFAULT
     )
+    assert runtime.llm_client.requests[0].trace_info["reasoning_complexity"] == "standard"
 
 
 def test_multi_target_implementation_keeps_provider_reasoning_default(tmp_path) -> None:
@@ -1605,6 +1611,21 @@ def test_multi_target_implementation_keeps_provider_reasoning_default(tmp_path) 
         runtime.llm_client.requests[0].reasoning_policy.mode
         == ReasoningMode.PROVIDER_DEFAULT
     )
+    assert runtime.llm_client.requests[0].trace_info["reasoning_complexity"] == "complex"
+
+
+def test_multi_target_implementation_uses_typed_complexity_route(tmp_path) -> None:
+    task = Task(
+        id="multi-write-complexity",
+        description="Coordinate three related edits",
+        kind="implement",
+        read_files=[str(tmp_path / "a.py"), str(tmp_path / "b.py"), str(tmp_path / "c.py")],
+        write_files=[str(tmp_path / "a.py"), str(tmp_path / "b.py")],
+    )
+    runtime = FakeRuntime(tmp_path, {"decision_needs": []})
+    executor = ToolPlanningTaskExecutor(runtime)
+
+    assert executor._reasoning_complexity_for_task(task) is ReasoningDecisionComplexity.COMPLEX
 
 
 def test_implement_subtask_drops_future_validation_commands(tmp_path) -> None:
@@ -3225,3 +3246,76 @@ def test_intelligent_autopilot_execute_task_proxy_uses_tool_planning_agent(tmp_p
 
     assert result.status == TaskStatus.COMPLETED
     assert result.result_metadata.result.get("proxied") is True
+
+
+def test_provider_result_completion_helper_builds_bounded_success_result() -> None:
+    task = Task(id="task-helper-success", description="Read README")
+    final_text = "done" * 200
+    result = ToolPlanningTaskExecutor._build_provider_task_result(
+        task,
+        SimpleNamespace(success=True, final_response=SimpleNamespace(content=final_text)),
+        0.25,
+        [{"round": 1}],
+        {"provider_tool_execution": True, "rounds_used": 2},
+    )
+
+    assert result.status == TaskStatus.COMPLETED
+    assert result.result_summary == final_text[:500]
+    assert result.result_metadata is not None
+    assert result.result_metadata.result.content == final_text
+
+
+def test_provider_result_completion_helper_handles_empty_final_response() -> None:
+    task = Task(id="task-helper-empty", description="Read README")
+    result = ToolPlanningTaskExecutor._build_provider_task_result(
+        task,
+        SimpleNamespace(success=True, final_response=None),
+        0.1,
+        [],
+        {},
+    )
+
+    assert result.status == TaskStatus.COMPLETED
+    assert result.result_summary == ""
+    assert result.result_metadata is not None
+    assert result.result_metadata.result.content == ""
+
+
+def test_provider_result_completion_helper_preserves_failure_evidence() -> None:
+    task = Task(id="task-helper-failure", description="Read README")
+    result = ToolPlanningTaskExecutor._build_provider_task_result(
+        task,
+        SimpleNamespace(
+            success=False,
+            error_message="provider stopped before completion",
+            rounds_used=1,
+            final_response=SimpleNamespace(finish_reason="length"),
+            evidence_coverage=SimpleNamespace(to_json_dict=lambda: {"required": 1, "covered": 0}),
+        ),
+        0.5,
+        [{"round": 1}],
+        {"provider_tool_execution": True},
+    )
+
+    assert result.status == TaskStatus.FAILED
+    assert result.result_metadata is not None
+    failure = result.result_metadata.failure
+    assert failure is not None
+    assert failure.details["runner_error"] == "provider stopped before completion"
+    assert failure.details["provider_stop_reason"] == "length"
+    assert failure.details["evidence_coverage"] == {"required": 1, "covered": 0}
+
+
+def test_provider_result_completion_helper_accepts_mapping_failure_evidence() -> None:
+    task = Task(id="task-helper-mapping", description="Read README")
+    result = ToolPlanningTaskExecutor._build_provider_task_result(
+        task,
+        SimpleNamespace(success=False, error_message="mapping evidence failure", evidence_coverage={"required": 2, "covered": 1}),
+        0.2,
+        [],
+        {},
+    )
+
+    assert result.status == TaskStatus.FAILED
+    assert result.result_metadata is not None
+    assert result.result_metadata.failure.details["evidence_coverage"] == {"required": 2, "covered": 1}

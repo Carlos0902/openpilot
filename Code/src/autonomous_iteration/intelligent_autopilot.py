@@ -3237,6 +3237,7 @@ class IntelligentAutopilot:
                 required_inputs=list(task.required_inputs),
                 expected_outputs=list(task.expected_outputs),
                 read_files=list(task.read_files),
+                support_context_files=list(task.support_context_files),
                 write_files=list(task.write_files),
                 dependencies=list(task.dependencies),
                 can_run_parallel=task.can_run_parallel,

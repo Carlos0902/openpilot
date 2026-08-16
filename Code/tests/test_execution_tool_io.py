@@ -60,6 +60,7 @@ def test_tool_io_sanitizes_large_payloads_without_private_params() -> None:
     params = {
         "content": "x" * 300,
         "code": "print('ok')",
+        "generated_unit": "def generated():\n    return 'ok'\n" * 20,
         "task_description": "build app",
         "_llm_client": object(),
         "file_path": "app.py",
@@ -71,6 +72,9 @@ def test_tool_io_sanitizes_large_payloads_without_private_params() -> None:
     assert sanitized["content_length"] == 300
     assert sanitized["content_preview"] == "x" * 200
     assert sanitized["code"] == "<11 chars>"
+    assert sanitized["generated_unit"].startswith("<")
+    assert sanitized["generated_unit_length"] == len(params["generated_unit"])
+    assert "return 'ok'" in sanitized["generated_unit_preview"]
     assert "_llm_client" not in sanitized
     assert sanitized["file_path"] == "app.py"
 

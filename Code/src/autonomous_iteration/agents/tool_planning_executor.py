@@ -3,25 +3,34 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shlex
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import ValidationError
 
 from autonomous_iteration.runtime_controller import ToolRouter, apply_read_only_runtime_mode, is_read_only_analysis_goal
 from autonomous_iteration.task_models import Task, TaskExecutionContext, TaskExecutionResult, TaskStatus
+from core.config import ProviderToolExecutionBudget, ProviderToolExecutionBudgetProfile
 from core.llm import LLMMessage, LLMRequest
-from core.reasoning import routine_tool_reasoning_policy
+from core.provider_tool_roundtrip import ProviderToolRoundTripRunner, build_provider_tool_definitions
+from core.reasoning import reasoning_policy_for_decision
 from core.tool_event_loop import ToolEventLoopRunner
 from memory.context_assembly import build_context_llm_request
 from memory.session_constraints import session_constraint_prompt_text
 from metadata import (
     AgentPhase,
     ContextRequestPurpose,
+    ContextCandidate,
+    ContextCandidateFreshness,
+    ContextCandidateKind,
+    ContextCandidateRetention,
+    ContextCandidateTrust,
+    ContextCandidateTruncation,
     DecisionNeedMetadata,
     DifficultyAssessmentMetadata,
     FailureMetadata,
@@ -29,6 +38,7 @@ from metadata import (
     ProblemSignalMetadata,
     ResultStatus,
     ResolutionPlanMetadata,
+    ReasoningDecisionComplexity,
     ReasoningPolicy,
     RuntimeStateMetadata,
     SessionConstraintState,
@@ -37,6 +47,8 @@ from metadata import (
     TextArtifactMetadata,
     ToolInputMetadata,
 )
+from core.tool_contracts import ToolCapability
+from tools.mutation_descriptor import FILE_MUTATION_TOOLS
 
 
 NEED_ATTRIBUTE_FIELDS = {
@@ -230,7 +242,10 @@ class ToolPlanningTaskExecutor:
             selection,
         )
 
-    def _reasoning_policy_for_task(self, task: Task | None = None) -> ReasoningPolicy:
+    def _reasoning_complexity_for_task(
+        self,
+        task: Task | None = None,
+    ) -> ReasoningDecisionComplexity:
         active_task = task or getattr(self, "_active_task", None)
         routine = False
         if active_task is not None:
@@ -255,10 +270,131 @@ class ToolPlanningTaskExecutor:
                 "write",
             }:
                 routine = len(write_files) == 1 and len(read_files) <= 2
-        return routine_tool_reasoning_policy(
-            getattr(self.runtime.llm_client, "settings", None),
-            routine=routine,
+                if not routine and (len(write_files) > 1 or len(read_files) > 2):
+                    return ReasoningDecisionComplexity.COMPLEX
+        return (
+            ReasoningDecisionComplexity.ROUTINE
+            if routine
+            else ReasoningDecisionComplexity.STANDARD
         )
+
+    def _reasoning_policy_for_task(self, task: Task | None = None) -> ReasoningPolicy:
+        return reasoning_policy_for_decision(
+            getattr(self.runtime.llm_client, "settings", None),
+            self._reasoning_complexity_for_task(task),
+        )
+
+    @staticmethod
+    def _task_support_context_files(task: Task) -> list[str]:
+        return [
+            str(path).strip()
+            for path in getattr(task, "support_context_files", []) or []
+            if str(path).strip()
+        ]
+
+    @staticmethod
+    def _resolved_project_path(raw_path: str, project_path: str) -> Path:
+        root = Path(project_path).expanduser().resolve(strict=False)
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = root / path
+        return path.resolve(strict=False)
+
+    @staticmethod
+    def _path_is_relative_to(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    def _support_context_candidates_for_task(
+        self,
+        task: Task,
+        *,
+        project_path: str,
+        source_order_start: int,
+    ) -> tuple[list[ContextCandidate], str | None]:
+        support_files = self._task_support_context_files(task)
+        if not support_files:
+            return [], None
+        if not str(project_path or "").strip():
+            return [], "Provider support_context_files require a concrete project_path."
+
+        root = Path(project_path).expanduser().resolve(strict=False)
+        candidates: list[ContextCandidate] = []
+        for index, raw_path in enumerate(support_files, start=1):
+            resolved = self._resolved_project_path(raw_path, str(root))
+            if not self._path_is_relative_to(resolved, root):
+                return [], f"Provider support_context_files path escapes project_path: {raw_path}"
+            if not resolved.is_file():
+                return [], f"Provider support_context_files path is not an existing file: {raw_path}"
+            file_sha256 = "sha256:" + hashlib.sha256(resolved.read_bytes()).hexdigest()
+            path_hash = "sha256:" + hashlib.sha256(
+                str(resolved).encode("utf-8")
+            ).hexdigest()
+            candidates.append(
+                ContextCandidate(
+                    candidate_id=f"provider-support-context:{task.id}:{index}",
+                    kind=ContextCandidateKind.RUNTIME_EVIDENCE,
+                    source_id=f"task:{task.id}:support_context_files:{index}",
+                    content=(
+                        f"support_context_file={raw_path}; "
+                        "role=read_only_reference_metadata; "
+                        "routing=not_required_read_before_write; "
+                        "read_authority=false; "
+                        "write_allowed=false; "
+                        "validation_authority=false; "
+                        "payload_omitted=true; "
+                        f"resolved_path_sha256={path_hash}; "
+                        f"file_sha256={file_sha256}."
+                    ),
+                    role="system",
+                    retention=ContextCandidateRetention.REQUIRED,
+                    priority=96,
+                    source_order=source_order_start + index - 1,
+                    truncation=ContextCandidateTruncation.FORBIDDEN,
+                    trust=ContextCandidateTrust.OBSERVED,
+                    freshness=ContextCandidateFreshness.CURRENT,
+                )
+            )
+        return candidates, None
+
+    @staticmethod
+    def _provider_task_prompt_candidates(
+        *,
+        task_id: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> list[ContextCandidate]:
+        return [
+            ContextCandidate(
+                candidate_id=f"provider-task-system:{task_id}",
+                kind=ContextCandidateKind.INSTRUCTION,
+                source_id=f"task:{task_id}:provider-system-prompt",
+                content=system_prompt,
+                role="system",
+                retention=ContextCandidateRetention.REQUIRED,
+                priority=100,
+                source_order=0,
+                truncation=ContextCandidateTruncation.FORBIDDEN,
+                trust=ContextCandidateTrust.AUTHORITATIVE,
+                freshness=ContextCandidateFreshness.CURRENT,
+            ),
+            ContextCandidate(
+                candidate_id=f"provider-task-user:{task_id}",
+                kind=ContextCandidateKind.TASK,
+                source_id=f"task:{task_id}:provider-user-prompt",
+                content=user_prompt,
+                role="user",
+                retention=ContextCandidateRetention.REQUIRED,
+                priority=100,
+                source_order=1,
+                truncation=ContextCandidateTruncation.FORBIDDEN,
+                trust=ContextCandidateTrust.AUTHORITATIVE,
+                freshness=ContextCandidateFreshness.CURRENT,
+            ),
+        ]
 
     def execute_task(self, task: Task, context: TaskExecutionContext) -> TaskExecutionResult:
         """Execute a single task by generating and executing tool calls."""
@@ -443,6 +579,434 @@ class ToolPlanningTaskExecutor:
                 duration_ms=int(duration * 1000),
             )
             return result
+
+    def execute_provider_tool_task(
+        self,
+        task: Task,
+        context: TaskExecutionContext,
+        *,
+        tool_names: list[str],
+        user_confirmed: bool = False,
+        allow_mutations: bool = False,
+        max_rounds: int | None = None,
+        initial_context_candidates: list[ContextCandidate] | None = None,
+    ) -> TaskExecutionResult:
+        """Run an explicitly enabled provider-native task entry point.
+
+        The existing JSON planner remains the default. This method is the
+        guarded route for a real provider canary: the settings flag must be
+        enabled, the caller must provide an explicit tool allowlist, and
+        mutation tools require both an explicit code-level opt-in and user
+        confirmation.
+        """
+        started_at = datetime.now()
+        settings = getattr(getattr(self.runtime, "llm_client", None), "settings", None)
+        enabled = bool(getattr(settings, "provider_tool_execution_enabled", False))
+        try:
+            budget_profile = ProviderToolExecutionBudget.for_profile(
+                getattr(
+                    settings,
+                    "provider_tool_execution_budget_profile",
+                    ProviderToolExecutionBudgetProfile.CANARY,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            budget_profile = None
+            budget_profile_error = str(exc)
+        else:
+            budget_profile_error = None
+
+        def failure_result(error_type: str, message: str, *, details: dict[str, Any] | None = None) -> TaskExecutionResult:
+            duration = (datetime.now() - started_at).total_seconds()
+            failure = FailureMetadata(
+                error_type=error_type,
+                error_message=message,
+                recoverable=False,
+                details={"task_id": task.id, **(details or {})},
+            )
+            return TaskExecutionResult(
+                task_id=task.id,
+                status=TaskStatus.FAILED,
+                error=message,
+                duration=duration,
+                result_metadata=TaskResultMetadata(
+                    task_id=task.id,
+                    status=ResultStatus.FAIL,
+                    failure=failure,
+                    duration=duration,
+                ),
+                attributes={"provider_tool_execution": True, "provider_tool_execution_enabled": enabled},
+            )
+
+        if not enabled:
+            return failure_result(
+                "ProviderToolExecutionDisabled",
+                "Provider-native task execution is disabled; enable the explicit canary flag first.",
+            )
+        if budget_profile is None:
+            return failure_result(
+                "ProviderToolBudgetProfileInvalid",
+                f"Invalid provider-native budget profile: {budget_profile_error}",
+            )
+        if budget_profile.profile is ProviderToolExecutionBudgetProfile.REAL_READ_ONLY and allow_mutations:
+            return failure_result(
+                "ProviderToolBudgetProfileMutationConflict",
+                "The real_read_only provider budget profile cannot be used for mutation tasks.",
+            )
+        if allow_mutations and budget_profile.profile is not ProviderToolExecutionBudgetProfile.REAL_MUTATION:
+            return failure_result(
+                "ProviderToolBudgetProfileMutationRequired",
+                "Provider-native mutation tasks require the explicit real_mutation budget profile.",
+            )
+        configured_rounds = int(getattr(settings, "provider_tool_execution_max_rounds", 3) or 3)
+        if max_rounds is not None:
+            if isinstance(max_rounds, bool) or not isinstance(max_rounds, int):
+                return failure_result(
+                    "ProviderToolMaxRoundsInvalid",
+                    "Provider-native max_rounds must be an integer within the selected budget profile.",
+                )
+            requested_rounds = max_rounds
+            if requested_rounds < 1 or requested_rounds > budget_profile.max_rounds:
+                return failure_result(
+                    "ProviderToolMaxRoundsExceedsBudget",
+                    f"max_rounds must be between 1 and {budget_profile.max_rounds} for the selected budget profile.",
+                    details={"requested_max_rounds": requested_rounds, "profile_max_rounds": budget_profile.max_rounds},
+                )
+            effective_rounds = requested_rounds
+        else:
+            effective_rounds = min(max(1, configured_rounds), budget_profile.max_rounds)
+        normalized_tools = [str(name or "").strip() for name in tool_names if str(name or "").strip()]
+        if not normalized_tools:
+            return failure_result("ProviderToolAllowlistRequired", "Provider-native tasks require a non-empty tool allowlist.")
+
+        projection_flag = getattr(
+            settings,
+            "provider_tool_initial_context_projection_enabled",
+            None,
+        )
+        mutation_projection_flag = bool(
+            getattr(settings, "provider_tool_initial_context_mutation_enabled", False)
+        )
+        task_support_context_files = self._task_support_context_files(task)
+        projected_context_requested = bool(initial_context_candidates) or bool(task_support_context_files)
+        if projected_context_requested:
+            if allow_mutations and not mutation_projection_flag:
+                return failure_result(
+                    "ProviderMutationInitialContextProjectionDisabled",
+                    "Mutation tasks require the separate explicit mutation projection flag.",
+                )
+            if not allow_mutations and projection_flag is False:
+                return failure_result(
+                    "ProviderInitialContextProjectionDisabled",
+                    "Typed initial-context candidates require the explicit read-only projection flag.",
+                )
+
+        registry = getattr(self.runtime, "tool_registry", None)
+        if registry is None:
+            return failure_result("ProviderToolRegistryMissing", "Provider-native task execution requires a tool registry.")
+        mutation_tools = []
+        for tool_name in normalized_tools:
+            definition = registry.get(tool_name) if hasattr(registry, "get") else None
+            capabilities = set(getattr(definition, "capabilities", []) or []) if definition is not None else set()
+            if tool_name in FILE_MUTATION_TOOLS or ToolCapability.FILE_WRITE in capabilities or ToolCapability.FILE_DELETE in capabilities:
+                mutation_tools.append(tool_name)
+        if mutation_tools and (not allow_mutations or not user_confirmed):
+            return failure_result(
+                "ProviderMutationConfirmationRequired",
+                "Provider-native mutation tasks require explicit allow_mutations and user_confirmed=True.",
+                details={"mutation_tools": mutation_tools},
+            )
+
+        try:
+            tools = build_provider_tool_definitions(registry, normalized_tools)
+            goal = str(getattr(context, "parent_context", {}).get("goal", "") or "")
+            project_path = str(
+                getattr(context, "parent_context", {}).get("project_path", "")
+                or getattr(context, "shared_state", {}).get("project_path", "")
+                or ""
+            )
+            read_scope = list(task.read_files or []) if task.read_files else None
+            write_scope = list(task.write_files or []) if allow_mutations else None
+            if allow_mutations and (not read_scope or not write_scope):
+                return failure_result(
+                    "ProviderTaskScopeMissing",
+                    "Provider-native mutation tasks require explicit non-empty read_files and write_files scopes.",
+                )
+            if allow_mutations and str(getattr(task, "kind", "") or "").lower() not in {"implement", "repair", "modify", "edit", "write"}:
+                return failure_result(
+                    "ProviderMutationTaskKindInvalid",
+                    "Provider-native mutation tasks require an implementation task kind.",
+                )
+            constraint_state = self._session_constraints_from_context(context)
+            constraint_text = session_constraint_prompt_text(constraint_state) if constraint_state else ""
+            controller = getattr(self.runtime, "runtime_controller", None)
+            if controller is None:
+                return failure_result("ProviderRuntimeControllerMissing", "Provider-native task execution requires a runtime controller.")
+            if getattr(controller, "state", None) is None:
+                controller.state = RuntimeStateMetadata(goal=task.description)
+            budget_updates = {
+                "tool_event_completion_outcome_feedback_enabled": bool(
+                    getattr(
+                        settings,
+                        "provider_tool_completion_outcome_feedback_enabled",
+                        False,
+                    )
+                ),
+            }
+            if budget_profile.profile in {
+                ProviderToolExecutionBudgetProfile.REAL_READ_ONLY,
+                ProviderToolExecutionBudgetProfile.REAL_MUTATION,
+            }:
+                budget_updates.update(
+                    {
+                        "max_tool_calls": budget_profile.max_tool_calls,
+                        "max_file_reads": budget_profile.max_file_reads,
+                        "max_file_edits": budget_profile.max_file_edits,
+                        "max_file_creates": budget_profile.max_file_creates,
+                        "max_verification_attempts": budget_profile.max_verification_attempts,
+                        "max_tool_event_completion_tokens": budget_profile.total_completion_tokens,
+                        "tool_event_completion_ceiling": budget_profile.completion_ceiling,
+                        "tool_event_completion_floor": budget_profile.completion_floor,
+                    }
+                )
+            controller.state.budget = controller.state.budget.model_copy(update=budget_updates)
+            if constraint_state is not None:
+                controller.state.session_constraints = constraint_state.model_copy(deep=True)
+            apply_read_only_runtime_mode(
+                controller.state,
+                task.description,
+                tags=list(getattr(task, "tags", []) or []),
+                task_type=str(getattr(task, "kind", "") or ""),
+            )
+            if hasattr(controller, "_active_task_id"):
+                controller._active_task_id = task.id
+            system_prompt = (
+                "You are executing a bounded project task through typed tools. "
+                "Use the available tools when evidence is needed, obey all constraints, "
+                "and finish with a concise result. Do not invent paths or claim a tool succeeded "
+                "without its returned evidence."
+            )
+            if allow_mutations:
+                system_prompt += (
+                    " For this mutation task, use file_reader for inspection only; do not use "
+                    "command_executor for reading. command_executor is reserved for the exact "
+                    "typed validation_command after the scoped mutation. Follow this bounded "
+                    "workflow exactly: read each authorized source once, then issue one scoped "
+                    "file_writer or file_patch_writer call for the authorized target, then run "
+                    "the exact validation command. A file_reader result is complete when "
+                    "evidence_status=complete and projection_status=inline or "
+                    "projection_status=bounded_window; "
+                    "for bounded_window, trust the exact declared read_window and must not reread "
+                    "that path. Treat bounded_preview as partial only. Do not repeat a completed read."
+                    " For command_executor, pass the validation command exactly as declared; provide "
+                    "cwd as a separate field and never add cd, shell chaining, pipes, redirection, "
+                    "or substitutions."
+                )
+            user_prompt = f"Task: {task.description}\nOverall goal: {goal}\nProject path: {project_path}"
+            if read_scope:
+                user_prompt = (
+                    f"{user_prompt}\nExplicit read_files scope (authoritative; do not read outside): "
+                    f"{json.dumps(read_scope, ensure_ascii=False)}"
+                )
+            if constraint_text:
+                user_prompt = f"{user_prompt}\n{constraint_text}"
+            effective_initial_context_candidates = initial_context_candidates
+            support_context_candidate_count = 0
+            if task_support_context_files:
+                support_context_candidates, support_context_error = self._support_context_candidates_for_task(
+                    task,
+                    project_path=project_path,
+                    source_order_start=2,
+                )
+                if support_context_error:
+                    return failure_result(
+                        "ProviderSupportContextInvalid",
+                        support_context_error,
+                        details={"support_context_files": list(task_support_context_files)},
+                    )
+                support_context_candidate_count = len(support_context_candidates)
+                effective_initial_context_candidates = [
+                    *self._provider_task_prompt_candidates(
+                        task_id=task.id,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                    ),
+                    *support_context_candidates,
+                    *(initial_context_candidates or []),
+                ]
+            roundtrip = ProviderToolRoundTripRunner(
+                self,
+                task,
+                tools=tools,
+                max_rounds=effective_rounds,
+                user_confirmed=user_confirmed,
+                allow_mutations=allow_mutations,
+                max_tokens=budget_profile.completion_ceiling,
+                read_scope=read_scope,
+                write_scope=write_scope,
+                project_path=project_path,
+                validation_command=(task.validation_command if allow_mutations else None),
+                validation_cwd=project_path,
+                context_max_prompt_tokens=budget_profile.context_max_prompt_tokens,
+                initial_context_candidates=effective_initial_context_candidates,
+                bounded_read_windows=list(getattr(task, "read_windows", []) or []),
+            ).run(
+                [
+                    LLMMessage(role="system", content=system_prompt),
+                    LLMMessage(role="user", content=user_prompt),
+                ]
+            )
+        except Exception as exc:
+            return failure_result("ProviderToolTaskSetupFailed", str(exc))
+
+        duration = (datetime.now() - started_at).total_seconds()
+        loop_payload = [loop.loop_metadata.to_json_dict() for loop in roundtrip.tool_loop_results]
+        feedback_enabled = bool(
+            getattr(
+                roundtrip,
+                "outcome_feedback_enabled",
+                controller.state.budget.tool_event_completion_outcome_feedback_enabled,
+            )
+        )
+        reasoning_complexity = getattr(
+            roundtrip,
+            "reasoning_complexity",
+            self._reasoning_complexity_for_task(task),
+        )
+        reasoning_mode = getattr(roundtrip, "reasoning_mode", None)
+        output = {
+            "provider_tool_execution": True,
+            "rounds_used": roundtrip.rounds_used,
+            "tool_loops": loop_payload,
+            "final_response": roundtrip.final_response.content if roundtrip.final_response else "",
+            "evidence_coverage": roundtrip.evidence_coverage.to_json_dict(),
+            "request_diagnostics": [
+                dict(item) for item in getattr(roundtrip, "request_diagnostics", ())
+            ],
+            "budget_diagnostics": [
+                dict(item) for item in getattr(roundtrip, "budget_diagnostics", ())
+            ],
+            "handoff_diagnostics": [
+                dict(item) for item in getattr(roundtrip, "handoff_diagnostics", ())
+            ],
+            "provider": roundtrip.final_response.provider if roundtrip.final_response else "",
+            "model": roundtrip.final_response.model if roundtrip.final_response else "",
+            "budget_profile": budget_profile.profile.value,
+            "execution_mode": "real_mutation" if allow_mutations else "real_read_only",
+            "allow_mutations": bool(allow_mutations),
+            "user_confirmed": bool(user_confirmed),
+            "support_context_files": list(task_support_context_files),
+            "support_context_candidate_count": support_context_candidate_count,
+            "outcome_feedback_enabled": feedback_enabled,
+            "reasoning_complexity": (
+                reasoning_complexity.value
+                if hasattr(reasoning_complexity, "value")
+                else str(reasoning_complexity)
+            ),
+            "reasoning_mode": (
+                reasoning_mode.value
+                if hasattr(reasoning_mode, "value")
+                else None
+            ),
+            "requested_max_rounds": max_rounds,
+            "effective_max_rounds": effective_rounds,
+            "budget_limits": {
+                "context_max_prompt_tokens": budget_profile.context_max_prompt_tokens,
+                "completion_ceiling": budget_profile.completion_ceiling,
+                "outcome_feedback_enabled": feedback_enabled,
+                "total_completion_tokens": budget_profile.total_completion_tokens,
+                "max_rounds": budget_profile.max_rounds,
+                "max_tool_calls": budget_profile.max_tool_calls,
+                "max_file_reads": budget_profile.max_file_reads,
+                "max_file_edits": budget_profile.max_file_edits,
+                "max_file_creates": budget_profile.max_file_creates,
+                "max_verification_attempts": budget_profile.max_verification_attempts,
+            },
+            "attempts": [
+                {
+                    "signature": attempt.signature,
+                    "tool_name": attempt.tool_name,
+                    "provider_call_id": attempt.provider_call_id,
+                    "round_index": attempt.round_index,
+                    "success": attempt.success,
+                    "error_type": attempt.error_type,
+                    "duplicate_of": attempt.duplicate_of,
+                }
+                for attempt in roundtrip.attempts
+            ],
+        }
+        output["budget_contract_sha256"] = "sha256:" + hashlib.sha256(
+            json.dumps(output["budget_limits"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return self._build_provider_task_result(
+            task,
+            roundtrip,
+            duration,
+            loop_payload,
+            output,
+        )
+
+    @staticmethod
+    def _build_provider_task_result(
+        task: Task,
+        roundtrip: Any,
+        duration: float,
+        loop_payload: list[dict[str, Any]],
+        output: dict[str, Any],
+    ) -> TaskExecutionResult:
+        """Build a typed result from already-computed provider round-trip evidence."""
+        success = bool(getattr(roundtrip, "success", False))
+        if not success:
+            error_message = str(getattr(roundtrip, "error_message", "") or "Provider-native task failed.")
+            coverage = getattr(roundtrip, "evidence_coverage", None)
+            if hasattr(coverage, "to_json_dict"):
+                coverage = coverage.to_json_dict()
+            elif isinstance(coverage, Mapping):
+                coverage = dict(coverage)
+            else:
+                coverage = {}
+            failure = FailureMetadata(
+                error_type="ProviderToolTaskFailed",
+                error_message=error_message,
+                recoverable=False,
+                details={
+                    "rounds_used": int(getattr(roundtrip, "rounds_used", 0) or 0),
+                    "tool_loops": loop_payload,
+                    "provider_stop_reason": (
+                        getattr(getattr(roundtrip, "final_response", None), "finish_reason", None)
+                    ),
+                    "runner_error": error_message,
+                    "evidence_coverage": coverage,
+                },
+            )
+            return TaskExecutionResult(
+                task_id=task.id,
+                status=TaskStatus.FAILED,
+                error=error_message,
+                duration=duration,
+                result_metadata=TaskResultMetadata(
+                    task_id=task.id,
+                    status=ResultStatus.FAIL,
+                    failure=failure,
+                    duration=duration,
+                ),
+                attributes=dict(output),
+            )
+        final_response = getattr(roundtrip, "final_response", None)
+        final_text = str(getattr(final_response, "content", "") or "")
+        return TaskExecutionResult(
+            task_id=task.id,
+            status=TaskStatus.COMPLETED,
+            duration=duration,
+            result_metadata=TaskResultMetadata(
+                task_id=task.id,
+                status=ResultStatus.SUCCESS,
+                result=TextArtifactMetadata(content=final_text, attributes=dict(output)),
+                duration=duration,
+            ),
+            result_summary=final_text[:500],
+            attributes=dict(output),
+        )
 
     def _build_tool_plan_prompt(
         self,

@@ -37,7 +37,7 @@ from core.exceptions import (
     InvalidLLMResponseError,
     LLMProviderError,
 )
-from core.reasoning import reasoning_policy_for_decision, routine_tool_reasoning_policy
+from core.reasoning import reasoning_policy_for_decision
 from autonomous_iteration.enhancement_completion_budget import EnhancementCompletionBudgetCoordinator
 from memory.context_assembly import build_context_candidate_request
 from autonomous_iteration.models import (
@@ -1126,9 +1126,13 @@ class AutonomousIterationAgent:
                             reasoning_complexity,
                         )
                         if reasoning_complexity is not None
-                        else routine_tool_reasoning_policy(
+                        else reasoning_policy_for_decision(
                             getattr(self.llm_client, "settings", None),
-                            routine=complexity == EnhancementCompletionComplexity.ROUTINE,
+                            (
+                                ReasoningDecisionComplexity.ROUTINE
+                                if complexity == EnhancementCompletionComplexity.ROUTINE
+                                else ReasoningDecisionComplexity.STANDARD
+                            ),
                         )
                     ),
                 }

@@ -22,11 +22,12 @@ from metadata import (
     EnhancementCompletionRequest,
     EnhancementCompletionRequirement,
     RuntimeBudgetMetadata,
+    ReasoningDecisionComplexity,
 )
 
 from core.exceptions import ContextAssemblyBudgetError, InvalidLLMResponseError, OpenPilotError
-from core.llm import LLMMessage
-from core.reasoning import routine_tool_reasoning_policy
+from core.llm import LLMMessage, render_llm_message
+from core.reasoning import reasoning_policy_for_decision
 from autonomous_iteration.enhancement_completion_budget import EnhancementCompletionBudgetCoordinator
 from memory.context_assembly import (
     build_context_candidate_request,
@@ -543,9 +544,13 @@ TOOL OUTPUT REQUIREMENTS:
                         "remaining_tokens": self.runtime_budget.enhancement_completion_tokens_remaining,
                     },
                 },
-                "reasoning_policy": routine_tool_reasoning_policy(
+                "reasoning_policy": reasoning_policy_for_decision(
                     getattr(self.llm_client, "settings", None),
-                    routine=routine,
+                    (
+                        ReasoningDecisionComplexity.ROUTINE
+                        if routine
+                        else ReasoningDecisionComplexity.COMPLEX
+                    ),
                 ),
             }
         )
@@ -579,7 +584,7 @@ TOOL OUTPUT REQUIREMENTS:
         elif hasattr(self.llm_client, 'generate'):
             response = self.llm_client.generate("\n\n".join(message.content for message in request.messages))
         elif hasattr(self.llm_client, 'chat'):
-            response = self.llm_client.chat([message.model_dump() for message in request.messages])
+            response = self.llm_client.chat([render_llm_message(message) for message in request.messages])
         else:
             # 如果 LLM 客户端没有标准方法，尝试直接调用
             response = self.llm_client("\n\n".join(message.content for message in request.messages))

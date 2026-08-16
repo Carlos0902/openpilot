@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from autonomous_iteration.improvement_context import ImprovementContextHelper
 from autonomous_iteration.models import EvaluationResult
-from core.llm import LLMMessage
+from core.llm import LLMMessage, render_llm_message
 from memory.context_assembly import build_context_llm_request
 from metadata import (
     ContextCandidateTruncation,
@@ -1310,7 +1310,7 @@ class ProjectEvaluatorAgent:
         if hasattr(client, "generate"):
             return str(client.generate("\n\n".join(message.content for message in request.messages)))
         if hasattr(client, "chat"):
-            return str(client.chat([message.model_dump() for message in request.messages]))
+            return str(client.chat([render_llm_message(message) for message in request.messages]))
         if callable(client):
             return str(client("\n\n".join(message.content for message in request.messages)))
         return ""

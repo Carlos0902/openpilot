@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from memory.project_path_resolver import ensure_resolved_path
-from metadata import ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
+from metadata import FileReadMode, ToolContractMetadata, ToolInputMetadata, ToolResultMetadata, metadata_tool_result
 
 from core.tool_contracts import (
     PermissionLevel,
@@ -68,7 +68,7 @@ FILE_TYPE_RULES: dict[str, dict[str, Any]] = {
     },
 }
 
-READ_MODES = {"full", "adaptive", "sample", "tail"}
+READ_MODES = {mode.value for mode in FileReadMode}
 
 
 FILE_READER_DEFINITION = ToolDefinition(
@@ -144,7 +144,12 @@ def file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
     )
     encoding = params.get("encoding", "utf-8")
     max_size_mb = params.get("max_size_mb", 10)
-    read_mode = str(params.get("read_mode", "full") or "full").lower()
+    raw_read_mode = params.get("read_mode")
+    read_mode = (
+        raw_read_mode
+        if isinstance(raw_read_mode, FileReadMode)
+        else FileReadMode(str(raw_read_mode or FileReadMode.FULL.value).lower())
+    )
     max_lines = params.get("max_lines")
     offset = int(params.get("offset", 0) or 0)
 
@@ -152,14 +157,23 @@ def file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
         raise FileNotFoundError(f"File not found: {file_path}")
     if not file_path.is_file():
         raise ValueError(f"Not a file: {file_path}")
-    if read_mode not in READ_MODES:
-        raise ValueError(f"Invalid read_mode: {read_mode}. Use full, adaptive, sample, or tail.")
+    if read_mode.value not in READ_MODES:
+        raise ValueError(f"Invalid read_mode: {read_mode}. Use full, adaptive, sample, tail, range, or offset.")
+
+    def attach_window(payload: dict[str, Any]) -> dict[str, Any]:
+        if read_mode is not FileReadMode.FULL or max_lines is not None or offset:
+            payload["read_window"] = {
+                "read_mode": read_mode.value,
+                "offset": offset,
+                "max_lines": max_lines if max_lines is not None else 1,
+            }
+        return payload
 
     size_bytes = file_path.stat().st_size
     file_type = _detect_file_type(file_path)
     strategy = _read_strategy(file_type)
     effective_max_size_mb = max_size_mb
-    if read_mode == "adaptive" and strategy.get("max_size_mb") is not None:
+    if read_mode is FileReadMode.ADAPTIVE and strategy.get("max_size_mb") is not None:
         effective_max_size_mb = min(float(max_size_mb), float(strategy["max_size_mb"]))
     max_size_bytes = max_size_mb * 1024 * 1024
     if effective_max_size_mb is not None:
@@ -173,12 +187,13 @@ def file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
     if file_type == "binary":
         return _binary_result(file_path, size_bytes)
 
-    if read_mode == "adaptive":
+    if read_mode is FileReadMode.ADAPTIVE:
         read_full = bool(strategy.get("read_full", False))
-        if read_full:
+        explicit_window = max_lines is not None or offset != 0
+        if read_full and not explicit_window:
             return _read_text_file(file_path, encoding, size_bytes, file_type)
         limit = _coerce_line_limit(max_lines, strategy.get("max_lines") or 100)
-        return _read_text_file(
+        return attach_window(_read_text_file(
             file_path,
             encoding,
             size_bytes,
@@ -186,9 +201,9 @@ def file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
             max_lines=limit,
             offset=offset,
             attributes={"read_mode": "adaptive"},
-        )
-    if read_mode == "sample":
-        return _read_text_file(
+        ))
+    if read_mode is FileReadMode.SAMPLE:
+        return attach_window(_read_text_file(
             file_path,
             encoding,
             size_bytes,
@@ -196,16 +211,36 @@ def file_reader_executor(input_metadata: ToolInputMetadata) -> ToolResultMetadat
             max_lines=_coerce_line_limit(max_lines, 10),
             offset=offset,
             attributes={"read_mode": "sample"},
-        )
-    if read_mode == "tail":
-        return _read_text_tail(
+        ))
+    if read_mode is FileReadMode.TAIL:
+        return attach_window(_read_text_tail(
             file_path,
             encoding,
             size_bytes,
             file_type,
             max_lines=_coerce_line_limit(max_lines, 100),
-        )
+        ))
+    if read_mode in {FileReadMode.RANGE, FileReadMode.OFFSET}:
+        return attach_window(_read_text_file(
+            file_path,
+            encoding,
+            size_bytes,
+            file_type,
+            max_lines=_coerce_line_limit(max_lines, 100),
+            offset=offset,
+            attributes={"read_mode": read_mode.value},
+        ))
 
+    if max_lines is not None or offset:
+        return attach_window(_read_text_file(
+            file_path,
+            encoding,
+            size_bytes,
+            file_type,
+            max_lines=_coerce_line_limit(max_lines, 100),
+            offset=offset,
+            attributes={"read_mode": "window"},
+        ))
     return _read_text_file(file_path, encoding, size_bytes, file_type)
 
 

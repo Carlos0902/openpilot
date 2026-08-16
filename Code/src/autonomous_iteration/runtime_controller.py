@@ -1728,6 +1728,7 @@ class _RuntimeSessionExecutor:
             required_inputs=list(task.required_inputs),
             expected_outputs=list(task.expected_outputs),
             read_files=list(task.read_files),
+            support_context_files=list(task.support_context_files),
             write_files=list(task.write_files),
             dependencies=list(task.dependencies),
             can_run_parallel=task.can_run_parallel,
@@ -1758,6 +1759,7 @@ class _RuntimeSessionExecutor:
             required_inputs=list(node.required_inputs),
             expected_outputs=list(node.expected_outputs),
             read_files=list(node.read_files),
+            support_context_files=list(node.support_context_files),
             write_files=list(node.write_files),
             dependencies=list(node.dependencies),
             can_run_parallel=node.can_run_parallel,
@@ -4099,7 +4101,12 @@ class AgentRuntimeController:
             self._record_checkpoint_failure(safe_boundary, "checkpoint store or run identity unavailable")
             return False
         generation = self._checkpoint_generation + 1
-        session_id = str(getattr(self.runtime, "session_id", "") or "")
+        active_ingress = session_ingress_state or self._active_session_ingress_state
+        session_id = (
+            active_ingress.identity.run_id
+            if active_ingress is not None
+            else str(getattr(self.runtime, "session_id", "") or "")
+        )
         project_root = str(
             self._checkpoint_context.get("project_path")
             or self._checkpoint_context.get("cwd")
@@ -4120,8 +4127,8 @@ class AgentRuntimeController:
             safe_boundary=safe_boundary,
             runtime_state=state.model_copy(deep=True),
             session_ingress_state=(
-                (session_ingress_state or self._active_session_ingress_state).model_copy(deep=True)
-                if (session_ingress_state or self._active_session_ingress_state) is not None
+                active_ingress.model_copy(deep=True)
+                if active_ingress is not None
                 else None
             ),
             subtask_id=subtask_id,

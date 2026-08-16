@@ -187,6 +187,7 @@ class TaskDecomposer:
                 required_inputs=self._string_list(subtask_desc.get("required_inputs")),
                 expected_outputs=self._string_list(subtask_desc.get("expected_outputs")),
                 read_files=self._string_list(subtask_desc.get("read_files")),
+                support_context_files=self._string_list(subtask_desc.get("support_context_files")),
                 write_files=self._string_list(subtask_desc.get("write_files")),
                 can_run_parallel=bool(subtask_desc.get("can_run_parallel", True)),
                 validation_command=str(subtask_desc.get("validation_command") or ""),
@@ -207,6 +208,7 @@ class TaskDecomposer:
                     "required_inputs": subtask.required_inputs,
                     "expected_outputs": subtask.expected_outputs,
                     "read_files": subtask.read_files,
+                    "support_context_files": subtask.support_context_files,
                     "write_files": subtask.write_files,
                     "can_run_parallel": subtask.can_run_parallel,
                     "validation_command": subtask.validation_command,
@@ -306,6 +308,7 @@ class TaskDecomposer:
                     "required_inputs": task.required_inputs,
                     "expected_outputs": task.expected_outputs,
                     "read_files": task.read_files,
+                    "support_context_files": task.support_context_files,
                     "write_files": task.write_files,
                     "can_run_parallel": task.can_run_parallel,
                     "validation_command": task.validation_command,
@@ -493,6 +496,7 @@ Return JSON only with this shape:
             "description": "Subtask description",
             "kind": "inspect|implement|repair|validate|document|general",
             "read_files": [],
+            "support_context_files": [],
             "write_files": [],
             "dependencies": [],
             "validation_command": ""
@@ -508,6 +512,8 @@ Guidelines:
 - Each subtask should be independently executable
 - Every inspect subtask must list concrete read_files when file inspection is requested.
 - Every implement or repair subtask must list every permitted target in write_files.
+- For implement or repair subtasks, put helpful but non-authorizing reference files in
+  support_context_files instead of read_files when they are not required read-before-write evidence.
 - Tasks that write the same file must depend on each other or set can_run_parallel=false
 - Every validate subtask must include the exact non-empty validation_command it is required to run.
 - Dependencies should be indices (0, 1, 2, etc.) of other subtasks in the list
